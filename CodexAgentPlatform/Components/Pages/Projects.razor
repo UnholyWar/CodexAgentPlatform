@@ -4,23 +4,49 @@
 
 <PageTitle>Projeler · Codex Agent Platform</PageTitle>
 <section class="admin-page">
-    <header class="section-head"><h1>Projeler</h1><button class="primary" @onclick="() => selected = new()">＋ Proje ekle</button></header>
-    @if (error is not null) { <p class="notice error" role="alert">@error</p> }
+    <header class="section-head">
+        <h1>Projeler</h1>
+        <button class="primary" disabled="@busy" @ref="addButton" @onclick="NewProject">＋ Proje ekle</button>
+    </header>
+    @if (notice is not null) { <p class="notice" role="status">@notice</p> }
     <div class="split-panel">
         <div class="list">
             @foreach (var project in rows)
             {
-                <button class="list-row" @onclick="() => Select(project)"><span class="avatar" aria-hidden="true">▱</span>
+                <button class="list-row" disabled="@busy" @onclick="() => Select(project)"><span class="avatar" aria-hidden="true">▱</span>
                     <span><strong>@project.Name</strong><small>@project.DefaultBranch</small></span></button>
             }
             @if (rows.Count == 0) { <p class="empty">Henüz proje eklenmedi.</p> }
         </div>
         @if (selected is not null)
         {
-            <form class="card fields" @onsubmit="SaveAsync" @onsubmit:preventDefault>
-                <label>Proje adı <input @bind="selected.Name" maxlength="80" required /></label>
-                <label>Varsayılan branch <input @bind="selected.DefaultBranch" maxlength="150" required /></label>
-                <div class="actions"><button class="primary">Kaydet</button><a class="button" href="/resources">Kaynaklara git</a></div>
+            <form class="card fields" @onsubmit="SaveAsync" @onsubmit:preventDefault aria-labelledby="project-editor">
+                <h2 id="project-editor" tabindex="-1" @ref="editorHeading">@(isNew ? "Yeni proje" : "Projeyi düzenle")</h2>
+                <label>Proje adı <input @bind="selected.Name" maxlength="80" required disabled="@busy" /></label>
+                <label>Varsayılan branch <input @bind="selected.DefaultBranch" maxlength="150" required disabled="@busy" /></label>
+                @if (error is not null) { <p class="notice error" role="alert">@error</p> }
+                @if (confirmDelete)
+                {
+                    <div class="fields" role="group" aria-labelledby="project-delete-confirmation">
+                        <p id="project-delete-confirmation" tabindex="-1" @ref="deleteConfirmation">“@originalName” projesi silinsin mi?</p>
+                        <div class="actions">
+                            <button class="button" type="button" disabled="@busy" @onclick="CancelDelete">Vazgeç</button>
+                            <button class="button danger" type="button" disabled="@busy" @onclick="DeleteAsync">Projeyi sil</button>
+                        </div>
+                    </div>
+                }
+                else
+                {
+                    <div class="actions">
+                        <button class="primary" type="submit" disabled="@busy">Kaydet</button>
+                        <button class="button" type="button" disabled="@busy" @onclick="CloseEditor">İptal</button>
+                        @if (!isNew)
+                        {
+                            <a class="button" href="/resources">Kaynaklara git</a>
+                            <button class="button danger" type="button" disabled="@busy" @onclick="AskToDelete">Sil</button>
+                        }
+                    </div>
+                }
             </form>
         }
     </div>
@@ -29,27 +55,137 @@
 @code {
     private List<Project> rows = [];
     private Project? selected;
-    private string? error;
-    protected override Task OnInitializedAsync() => Load();
-    private async Task Load()
+    private string? originalName, error, notice;
+    private bool busy, isNew, confirmDelete, focusEditor, focusAdd, focusConfirmation;
+    private ElementReference editorHeading, addButton, deleteConfirmation;
+
+    protected override Task OnInitializedAsync() => LoadAsync();
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (focusEditor)
+        {
+            focusEditor = false;
+            await editorHeading.FocusAsync();
+        }
+        if (focusAdd)
+        {
+            focusAdd = false;
+            await addButton.FocusAsync();
+        }
+        if (focusConfirmation)
+        {
+            focusConfirmation = false;
+            await deleteConfirmation.FocusAsync();
+        }
+    }
+
+    private async Task LoadAsync()
     {
         await using var db = await Dbs.CreateDbContextAsync();
         rows = await db.Projects.AsNoTracking().OrderBy(x => x.Name).ToListAsync();
     }
-    private void Select(Project project) => selected = new Project { Id = project.Id, Name = project.Name, DefaultBranch = project.DefaultBranch };
+
+    private void NewProject() => OpenEditor(new Project(), true);
+
+    private void Select(Project project) =>
+        OpenEditor(new Project { Id = project.Id, Name = project.Name, DefaultBranch = project.DefaultBranch }, false);
+
+    private void OpenEditor(Project project, bool creating)
+    {
+        selected = project;
+        originalName = project.Name;
+        isNew = creating;
+        error = notice = null;
+        confirmDelete = false;
+        focusEditor = true;
+    }
+
+    private void CloseEditor()
+    {
+        selected = null;
+        error = null;
+        confirmDelete = false;
+        focusAdd = true;
+    }
+
+    private void AskToDelete()
+    {
+        error = null;
+        confirmDelete = focusConfirmation = true;
+    }
+
+    private void CancelDelete() => confirmDelete = false;
+
     private async Task SaveAsync()
     {
-        if (selected is not { } draft) return;
+        if (busy || confirmDelete || selected is not { } draft) return;
         error = null;
         draft.Name = draft.Name.Trim();
         draft.DefaultBranch = draft.DefaultBranch.Trim();
         if (draft.Name.Length is 0 or > 80 || draft.DefaultBranch.Length is 0 or > 150)
-        { error = "Proje adı ve varsayılan branch gerekli."; return; }
-        await using var db = await Dbs.CreateDbContextAsync();
-        var row = await db.Projects.SingleOrDefaultAsync(x => x.Id == draft.Id);
-        if (row is null) db.Projects.Add(draft);
-        else (row.Name, row.DefaultBranch) = (draft.Name, draft.DefaultBranch);
-        try { await db.SaveChangesAsync(); selected = null; await Load(); }
-        catch (DbUpdateException) { error = "Proje adı zaten kullanılıyor."; }
+        {
+            error = "Proje adı ve varsayılan branch gerekli.";
+            return;
+        }
+
+        busy = true;
+        try
+        {
+            await using var db = await Dbs.CreateDbContextAsync();
+            if (isNew)
+                db.Projects.Add(draft);
+            else
+            {
+                var row = await db.Projects.FindAsync(draft.Id);
+                if (row is null) { error = "Proje artık mevcut değil."; return; }
+                (row.Name, row.DefaultBranch) = (draft.Name, draft.DefaultBranch);
+            }
+            await db.SaveChangesAsync();
+            await LoadAsync();
+            notice = "Proje kaydedildi.";
+            CloseEditor();
+        }
+        catch (DbUpdateException ex) when (ex.InnerException is Microsoft.Data.Sqlite.SqliteException { SqliteExtendedErrorCode: 2067 })
+        { error = "Proje adı zaten kullanılıyor."; }
+        catch (DbUpdateException) { error = "Proje kaydedilemedi."; }
+        finally { busy = false; }
+    }
+
+    private async Task DeleteAsync()
+    {
+        if (busy || isNew || !confirmDelete || selected is not { } draft) return;
+        busy = true;
+        error = null;
+        try
+        {
+            await using var db = await Dbs.CreateDbContextAsync();
+            await using var transaction = await db.Database.BeginTransactionAsync();
+            var row = await db.Projects.FindAsync(draft.Id);
+            if (row is null) { error = "Proje artık mevcut değil."; return; }
+            if (row.Name != originalName) { error = "Projenin adı değişti. Silmeden önce projeyi yeniden açın."; return; }
+
+            var permissions = await db.Agents.Select(x => x.AllowedProjects).ToListAsync();
+            if (await db.Resources.AnyAsync(x => x.ProjectId == row.Id) ||
+                await db.Work.AnyAsync(x => x.ProjectId == row.Id) ||
+                await db.Runs.AnyAsync(x => x.ProjectId == row.Id) ||
+                await db.Notes.AnyAsync(x => x.ProjectId == row.Id) ||
+                await db.Events.AnyAsync(x => x.ProjectId == row.Id) ||
+                permissions.Any(value => ToolAccess.Split(value).Contains(row.Id, StringComparer.Ordinal)))
+            {
+                error = "Projeye bağlı kaynak, ajan izni, hafıza notu veya çalışma geçmişi var. Proje silinemedi.";
+                return;
+            }
+
+            db.Projects.Remove(row);
+            await db.SaveChangesAsync();
+            await transaction.CommitAsync();
+            await LoadAsync();
+            notice = "Proje silindi.";
+            CloseEditor();
+        }
+        catch (Exception ex) when (ex is DbUpdateException or Microsoft.Data.Sqlite.SqliteException)
+        { error = "Proje silinemedi. Tekrar deneyin."; }
+        finally { busy = false; }
     }
 }

@@ -5,7 +5,9 @@
         <div class="platform">
             <aside class="rail">
                 <a class="brand" href="/"><span class="brand-mark" aria-hidden="true">C</span><span>Codex Agent<br />Platform</span></a>
-                <nav aria-label="Çalışma alanı">
+                <button type="button" class="button mobile-nav-toggle" aria-controls="workspace-navigation"
+                    aria-expanded="@(mobileNavOpen ? "true" : "false")" @onclick="() => mobileNavOpen = !mobileNavOpen">Menü</button>
+                <nav id="workspace-navigation" class="@(mobileNavOpen ? "is-open" : null)" aria-label="Çalışma alanı" @onclick="() => mobileNavOpen = false">
                     <NavLink class="nav-item" href="/" Match="NavLinkMatch.All"><span aria-hidden="true">◫</span>Sohbet</NavLink>
                     <NavLink class="nav-item" href="/conversations"><span aria-hidden="true">▤</span>Sohbet geçmişi</NavLink>
                     <NavLink class="nav-item" href="/agents"><span aria-hidden="true">◎</span>Ajanlar</NavLink>
@@ -40,5 +42,6 @@
 </div>
 
 @code {
+    private bool mobileNavOpen;
     private static string Initial(string? name) => string.IsNullOrWhiteSpace(name) ? "Y" : name[..1].ToUpperInvariant();
 }

@@ -2,15 +2,35 @@
 
 .NET 10 hedefleyen Blazor Interactive Server uygulaması. Yönetici, sohbetten Codex ajanlarıyla çalışır. Konuşmalar ve görev olayları SQLite’ta, sürümlenmiş bilgi notları Markdown dosyalarında saklanır. Arka plan çalışması tarayıcı bağlantısından bağımsızdır.
 
-## Yerelde hızlı başlatma
+## Docker ile hızlı başlatma
 
-Depo kökünde PowerShell ile çalıştırın.
+Depo kökünde PowerShell kullanın. İlk kurulumda [Docker Compose bölümündeki](#docker-compose) `docker compose up` satırından önce gelen komutlarla `secrets/platform.pfx` ve `secrets/vault.key` dosyalarını oluşturun. Mevcut kurulumda aynı dosyaları ve sertifika parolasını kullanın. Parolayı bu PowerShell oturumunda `$env:PLATFORM_TLS_PASSWORD` değişkenine verin.
 
 ```powershell
-dotnet run --project CodexAgentPlatform --launch-profile https
+$tls = (Resolve-Path 'secrets/platform.pfx').Path
+$vault = (Resolve-Path 'secrets/vault.key').Path
+$dataVolume = 'codexagentplatform_platform-data'
+$workspacesVolume = 'codexagentplatform_platform-workspaces'
+$env:ASPNETCORE_Kestrel__Certificates__Default__Password = $env:PLATFORM_TLS_PASSWORD
+
+docker run -d --name codex-agent-platform --init --restart unless-stopped --stop-timeout 45 `
+  -p '127.0.0.1:8443:8443' `
+  -e 'ASPNETCORE_ENVIRONMENT=Production' `
+  -e 'ASPNETCORE_URLS=https://+:8443' `
+  -e 'ASPNETCORE_Kestrel__Certificates__Default__Path=/run/secrets/platform_tls' `
+  -e ASPNETCORE_Kestrel__Certificates__Default__Password `
+  -e 'Platform__VaultKeyFile=/run/secrets/vault_key' `
+  -e 'Platform__LocalCodexLogin=true' `
+  --mount "type=volume,source=$dataVolume,target=/data" `
+  --mount "type=volume,source=$workspacesVolume,target=/workspaces" `
+  --mount "type=bind,source=$tls,target=/run/secrets/platform_tls,readonly" `
+  --mount "type=bind,source=$vault,target=/run/secrets/vault_key,readonly" `
+  ghcr.io/unholywar/codexagentplatform:latest
 ```
 
-Tarayıcıda [https://localhost:7213](https://localhost:7213) adresini açın. Uygulamayı durdurmak için terminalde `Ctrl+C` tuşlarına basın.
+Tarayıcıda [https://localhost:8443](https://localhost:8443) adresini açın. İlk açılışta kurulum kodunu `docker exec codex-agent-platform cat /data/credentials/bootstrap-code` ile okuyun. Oluşturulan container’ı durdurmak için `docker stop codex-agent-platform`, tekrar açmak için `docker start codex-agent-platform` kullanın.
+
+`/data` volume’u sohbetleri, SQLite veritabanını ve Codex oturumunu saklar. `/workspaces` volume’u proje çalışma alanlarını saklar. Örnekteki adlar varsayılan `codexagentplatform` Compose projesiyle eşleşir. Compose’u farklı bir proje adıyla çalıştırdıysanız `docker volume ls` ile mevcut adları bulun ve iki değişkeni güncelleyin. Aynı volume’lara geçmeden önce eski container’ı durdurun.
 
 ## Visual Studio veya komut satırından çalıştırma
 
@@ -20,6 +40,10 @@ Tarayıcıda [https://localhost:7213](https://localhost:7213) adresini açın. U
 4. İlk açılışta kurulum sayfasında yeni yönetici adınızı ve en az 14 karakterlik güçlü şifrenizi belirleyin. Geliştirmede doğrudan loopback bağlantısı ve `Platform__LocalBootstrap=true` varsa geçici şifre `admin` kabul edilir. Diğer ortamlarda kurulum kodunu veri dizinindeki `credentials/bootstrap-code` dosyasından okuyun. Kurulum tamamlandığında geçici erişim geçersiz olur.
 5. **Codex ayarları** ekranında bağlantıyı test edin ve **Cihaz koduyla giriş yap** düğmesini kullanın. Cihaz kodu seçeneği hesabınızın veya çalışma alanınızın güvenlik ayarlarında etkin olmalıdır. Oturum bu uygulamanın `data/codex` dizininde tutulur.
 6. **Ajanlar** ekranında ajan rollerini, proje izinlerini, model ve reasoning effort ayarlarını düzenleyin. Sohbette ajan seçebilir veya `@Developer`, `@Architect`, `@QA`, `@DevOps` ile başlayabilirsiniz.
+
+```powershell
+dotnet run --project CodexAgentPlatform --launch-profile https
+```
 
 App Server, uygulama tarafından JSONL üzerinden `stdio` ile başlatılır. Uygulama tek yöneticiye ait yerel kullanım için tasarlanmıştır. App Server hesabıyla kimlik doğrulamanın kapsamı ve ayrı barındırılan servis akışı için [OpenAI’nin App Server belgelerine](https://learn.chatgpt.com/docs/app-server#auth-endpoints) bakın. [Headless cihaz kodu akışı](https://learn.chatgpt.com/docs/auth#login-on-headless-devices).
 

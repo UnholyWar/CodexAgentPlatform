@@ -5,18 +5,21 @@
 
 <PageTitle>Hafıza · Codex Agent Platform</PageTitle>
 <section class="admin-page">
-    <header class="section-head"><h1>Hafıza</h1><button class="primary" @onclick="NewNote">＋ Not ekle</button></header>
-    <form class="filter" @onsubmit="LoadAsync" @onsubmit:preventDefault>
+    <header class="section-head">
+        <h1>Hafıza</h1><button class="primary" @ref="addButton" disabled="@busy" @onclick="NewNote">＋ Not ekle</button>
+    </header>
+    <form class="filter" @onsubmit="SearchAsync" @onsubmit:preventDefault>
         <input placeholder="Başlık, özet veya etiket…" aria-label="Hafıza ara" @bind="query" maxlength="150" />
         <label class="check"><input type="checkbox" @bind="archived" /> Arşiv dahil</label>
-        <button class="button">Ara</button>
+        <button class="button" type="submit" disabled="@busy">Ara</button>
     </form>
-    @if (error is not null) { <p class="notice error" role="alert">@error</p> }
+    @if (!editing && error is not null) { <p class="notice error" role="alert">@error</p> }
+    @if (!editing && notice is not null) { <p class="notice" role="status">@notice</p> }
     <div class="split-panel">
         <div class="list">
             @foreach (var note in rows)
             {
-                <button class="list-row" @onclick="() => OpenAsync(note)">
+                <button class="list-row" disabled="@busy" @onclick="() => OpenAsync(note)">
                     <span><strong>@note.Title</strong><small>@note.Summary</small><small>@note.UpdatedAtUtc.ToString("dd.MM.yyyy HH:mm") UTC · @note.Verification</small></span>
                     <small>@(note.Archived ? "Arşiv" : $"v{note.Version}")</small>
                 </button>
@@ -25,8 +28,8 @@
         </div>
         @if (editing)
         {
-            <form class="card fields" @onsubmit="SaveAsync" @onsubmit:preventDefault>
-                <h2>@(selected is null ? "Yeni not" : selected.Title)</h2>
+            <form class="card fields" aria-busy="@busy" @onsubmit="SaveAsync" @onsubmit:preventDefault>
+                <h2 @ref="editorHeading" tabindex="-1">@(selected is null ? "Yeni not" : selected.Title)</h2>
                 <label>Başlık <input @bind="title" maxlength="160" required /></label>
                 <label>Özet <input @bind="summary" maxlength="600" /></label>
                 <label>Etiketler <input @bind="tags" maxlength="300" /></label>
@@ -44,14 +47,17 @@
                     <p class="muted">@ProjectName(selected.ProjectId) · @selected.CreatedAtUtc.ToString("dd.MM.yyyy") · v@selected.Version</p>
                 }
                 <label>Markdown <textarea class="mono" @bind="body" maxlength="32000" rows="11" required></textarea></label>
+                @if (error is not null) { <p class="notice error" role="alert">@error</p> }
+                @if (notice is not null) { <p class="notice" role="status">@notice</p> }
                 <div class="actions">
-                    <button class="primary">Kaydet</button>
-                    @if (selected is { Archived: false }) { <button type="button" class="button" @onclick="ArchiveAsync">Arşivle</button> }
+                    <button class="primary" type="submit" disabled="@busy">Kaydet</button>
+                    <button type="button" class="button" disabled="@busy" @onclick="CancelEdit">İptal</button>
+                    @if (selected is { Archived: false }) { <button type="button" class="button" disabled="@busy" @onclick="ArchiveAsync">Arşivle</button> }
                 </div>
                 @if (selected is { Version: > 1 })
                 {
                     <label>Önceki sürümü düzenleyiciye yükle
-                        <select value="@selected.Version" @onchange="ReadVersionAsync">
+                        <select value="@selected.Version" disabled="@busy" @onchange="ReadVersionAsync">
                             @foreach (var v in Enumerable.Range(1, selected.Version).Reverse()) { <option value="@v">v@v</option> }
                         </select>
                     </label>
@@ -66,9 +72,10 @@
     private List<MemoryNote> rows = [];
     private List<Project> projects = [];
     private MemoryNote? selected;
-    private string? query, error, project;
+    private string? query, error, notice, project;
     private string title = "", summary = "", tags = "", verification = "hypothesis", body = "";
-    private bool archived, editing;
+    private bool archived, editing, busy, focusOnRender, focusAddOnRender;
+    private ElementReference editorHeading, addButton;
     protected override async Task OnInitializedAsync()
     {
         await using var db = await Dbs.CreateDbContextAsync();
@@ -76,17 +83,44 @@
         await LoadAsync();
     }
 
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (focusOnRender)
+        {
+            focusOnRender = false;
+            await editorHeading.FocusAsync();
+        }
+        else if (focusAddOnRender)
+        {
+            focusAddOnRender = false;
+            await addButton.FocusAsync();
+        }
+    }
+
     private async Task LoadAsync() => rows = await Store.SearchAsync(query, null, null, archived, default);
+    private Task SearchAsync() => RunAsync(LoadAsync);
     private void NewNote()
     {
-        selected = null; error = null; project = null; editing = true;
+        if (busy) return;
+        selected = null; error = notice = null; project = null; editing = true;
         title = summary = tags = body = ""; verification = "hypothesis";
+        focusOnRender = true;
     }
+    private void CancelEdit()
+    {
+        if (busy) return;
+        editing = false;
+        selected = null;
+        error = notice = null;
+        focusAddOnRender = true;
+    }
+
     private Task OpenAsync(MemoryNote note) => RunAsync(async () =>
     {
         body = await Store.ReadAsync(note.Id, null, null, default);
         selected = note; editing = true;
         (title, summary, tags, verification, project) = (note.Title, note.Summary, note.Tags, note.Verification, note.ProjectId);
+        focusOnRender = true;
     });
     private Task SaveAsync() => RunAsync(async () =>
     {
@@ -95,12 +129,16 @@
             admin: true, expectedVersion: selected?.Version);
         selected = saved;
         await LoadAsync();
+        notice = "Not kaydedildi.";
     });
     private Task ArchiveAsync() => RunAsync(async () =>
     {
-        if (selected is { } note) await Store.ArchiveAsync(note.Id, null, null, null, true, default);
+        if (selected is not { } note) return;
+        await Store.ArchiveAsync(note.Id, null, null, null, true, default);
         editing = false; selected = null;
         await LoadAsync();
+        notice = "Not arşive alındı.";
+        focusAddOnRender = true;
     });
     private Task ReadVersionAsync(ChangeEventArgs e) => RunAsync(async () =>
     {
@@ -109,10 +147,13 @@
     });
     private async Task RunAsync(Func<Task> action)
     {
-        error = null;
+        if (busy) return;
+        busy = true;
+        error = notice = null;
         try { await action(); }
         catch (Exception ex) when (ex is InvalidOperationException or IOException or DbUpdateException)
         { error = ex is InvalidOperationException ? ex.Message : "Hafıza kaydı okunamadı veya yazılamadı."; }
+        finally { busy = false; }
     }
     private string ProjectName(string? id) => projects.Find(p => p.Id == id)?.Name ?? "Genel";
 }

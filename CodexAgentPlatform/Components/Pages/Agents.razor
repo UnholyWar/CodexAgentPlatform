@@ -6,13 +6,16 @@
 
 <PageTitle>Ajanlar · Codex Agent Platform</PageTitle>
 <section class="admin-page">
-    <header class="section-head"><h1>Ajanlar</h1><button class="primary" @onclick="NewAgent">＋ Ajan ekle</button></header>
-    @if (error is not null) { <p class="notice error" role="alert">@error</p> }
+    <header class="section-head">
+        <h1>Ajanlar</h1><button class="primary" @ref="addButton" disabled="@busy" @onclick="NewAgent">＋ Ajan ekle</button>
+    </header>
+    @if (edit is null && error is not null) { <p class="notice error" role="alert">@error</p> }
+    @if (notice is not null) { <p class="notice" role="status">@notice</p> }
     <div class="split-panel">
         <div class="list">
             @foreach (var agent in agents)
             {
-                <button class="list-row" @onclick="() => EditAsync(agent.Id)">
+                <button class="list-row" disabled="@busy" @onclick="() => EditAsync(agent.Id)">
                     <span class="avatar" aria-hidden="true">@agent.Name.FirstOrDefault()</span>
                     <span><strong>@agent.Name</strong><small>@agent.Title</small></span>
                     <small>@(agent.Archived ? "Arşiv" : stats.GetValueOrDefault(agent.Id).ToString("N0") + " token")</small>
@@ -21,13 +24,14 @@
         </div>
         @if (edit is not null)
         {
-            <form class="card fields" @onsubmit="SaveAsync" @onsubmit:preventDefault>
-                <h2>@(isNew ? "Yeni ajan" : edit.Name)</h2>
+            <form class="card fields" aria-busy="@busy" @onsubmit="SaveAsync" @onsubmit:preventDefault>
+                <h2 @ref="editorHeading" tabindex="-1">@(isNew ? "Yeni ajan" : edit.Name)</h2>
                 <label>Ad <input @bind="edit.Name" required maxlength="60" /></label>
                 <label>Unvan <input @bind="edit.Title" required maxlength="120" /></label>
                 <label>Rol talimatları <textarea @bind="edit.Instructions" maxlength="8000" rows="5"></textarea></label>
                 <div class="fields side-by-side"><ModelFields Models="models" @bind-Model="edit.Model" @bind-Effort="edit.Effort" /></div>
-                <div><button type="button" class="button" @onclick="LoadModelsAsync">Modelleri yükle</button></div>
+                <div><button type="button" class="button" disabled="@busy" @onclick="LoadModelsAsync">Modelleri yükle</button></div>
+                @if (modelError is not null) { <p class="notice error" role="alert">@modelError</p> }
                 <fieldset>
                     <legend>Araç izinleri</legend>
                     @foreach (var tool in tools)
@@ -48,7 +52,11 @@
                     </fieldset>
                 }
                 <label class="check"><input type="checkbox" @bind="edit.Archived" /> Arşivle</label>
-                <div><button class="primary" type="submit">Kaydet</button></div>
+                @if (error is not null) { <p class="notice error" role="alert">@error</p> }
+                <div class="actions">
+                    <button class="primary" type="submit" disabled="@busy">Kaydet</button>
+                    <button class="button" type="button" disabled="@busy" @onclick="CancelEdit">İptal</button>
+                </div>
             </form>
         }
     </div>
@@ -60,8 +68,9 @@
     private Dictionary<string, long> stats = [];
     private List<CodexModel> models = [];
     private Agent? edit;
-    private bool isNew;
-    private string? error;
+    private bool isNew, busy, focusOnRender, focusAddOnRender;
+    private string? error, modelError, notice;
+    private ElementReference editorHeading, addButton;
     private HashSet<string> allowedTools = [], allowedProjects = [];
     private static readonly Dictionary<string, string> tools = new()
     {
@@ -70,6 +79,20 @@
     };
 
     protected override Task OnInitializedAsync() => ReloadAsync();
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (focusOnRender)
+        {
+            focusOnRender = false;
+            await editorHeading.FocusAsync();
+        }
+        else if (focusAddOnRender)
+        {
+            focusAddOnRender = false;
+            await addButton.FocusAsync();
+        }
+    }
+
     private async Task ReloadAsync()
     {
         await using var db = await Dbs.CreateDbContextAsync();
@@ -78,25 +101,61 @@
         stats = await db.Usage.GroupBy(x => x.AgentId).Select(g => new { Id = g.Key, Total = g.Sum(x => x.Total) })
             .ToDictionaryAsync(x => x.Id, x => x.Total);
     }
-    private void NewAgent() { edit = new(); isNew = true; error = null; allowedTools = ["memory"]; allowedProjects = []; }
+    private void NewAgent()
+    {
+        if (busy) return;
+        edit = new();
+        isNew = true;
+        error = modelError = notice = null;
+        allowedTools = ["memory"];
+        allowedProjects = [];
+        focusOnRender = true;
+    }
+
+    private void CancelEdit()
+    {
+        if (busy) return;
+        edit = null;
+        error = modelError = null;
+        focusAddOnRender = true;
+    }
+
     private async Task EditAsync(string id)
     {
-        error = null;
-        await using var db = await Dbs.CreateDbContextAsync();
-        edit = await db.Agents.AsNoTracking().SingleAsync(x => x.Id == id);
-        isNew = false;
-        allowedTools = ToolAccess.Split(edit.AllowedTools).ToHashSet();
-        allowedProjects = ToolAccess.Split(edit.AllowedProjects).ToHashSet();
+        if (busy) return;
+        busy = true;
+        error = modelError = notice = null;
+        try
+        {
+            await using var db = await Dbs.CreateDbContextAsync();
+            var agent = await db.Agents.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id);
+            if (agent is null)
+            {
+                error = "Ajan artık bulunamıyor.";
+                await ReloadAsync();
+                return;
+            }
+            edit = agent;
+            isNew = false;
+            allowedTools = ToolAccess.Split(agent.AllowedTools).ToHashSet();
+            allowedProjects = ToolAccess.Split(agent.AllowedProjects).ToHashSet();
+            focusOnRender = true;
+        }
+        finally { busy = false; }
     }
     private async Task LoadModelsAsync()
     {
-        error = null;
+        if (busy) return;
+        busy = true;
+        modelError = null;
         try { models = await Accounts.ModelsAsync(default); }
-        catch (Exception ex) { error = ex is CodexRpcException ? ex.Message : "Codex model listesi alınamadı."; }
+        catch (Exception ex) { modelError = ex is CodexRpcException ? ex.Message : "Codex model listesi alınamadı."; }
+        finally { busy = false; }
     }
     private async Task SaveAsync()
     {
-        if (edit is not { } draft) return;
+        if (busy || edit is not { } draft) return;
+        busy = true;
         error = null;
         try
         {
@@ -114,12 +173,16 @@
             row.AllowedProjects = string.Join(',', allowedProjects);
             if (isNew) db.Agents.Add(row);
             await db.SaveChangesAsync();
+            isNew = false;
             await WorkspaceMemory.WriteAgentAsync(Paths, row, default);
-            edit = null;
             await ReloadAsync();
+            edit = null;
+            focusAddOnRender = true;
+            notice = "Ajan kaydedildi.";
         }
-        catch (Exception ex) when (ex is DbUpdateException or ArgumentException or IOException)
+        catch (Exception ex) when (ex is DbUpdateException or ArgumentException or IOException or InvalidOperationException)
         { error = ex is ArgumentException ? ex.Message : "Ajan bilgileri veya Markdown kimliği kaydedilemedi."; }
+        finally { busy = false; }
     }
     private static void Toggle(HashSet<string> set, string id, ChangeEventArgs e)
     {
