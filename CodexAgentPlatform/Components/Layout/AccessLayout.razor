@@ -1,8 +1,11 @@
 @inherits LayoutComponentBase
 
-<div class="access-shell">
-    <section class="access-panel">
-        <div class="brand"><span class="brand-mark" aria-hidden="true">C</span> Codex Agent Platform</div>
-        @Body
-    </section>
-</div>
+<main class="access-shell">
+    <div class="access-frame">
+        <div class="access-art">
+            <div class="access-wordmark"><span class="brand-mark"><Icon Name="brand" /></span><span>Codex<br /><small>Agent Platform</small></span></div>
+            <img class="orbit-art" src="@Assets["orbit.svg"]" alt="" />
+        </div>
+        <section class="access-panel">@Body</section>
+    </div>
+</main>

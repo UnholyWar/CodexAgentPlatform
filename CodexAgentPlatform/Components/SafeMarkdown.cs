@@ -6,21 +6,40 @@ namespace CodexAgentPlatform.Components;
 
 public static partial class SafeMarkdown
 {
-    public static string Render(string source)
+    public static string Render(string source, bool compactCode = false)
     {
         var html = new StringBuilder();
-        var code = false;
+        int? codeStart = null;
+        var lines = 0;
+        var diff = false;
         var list = false;
+        void CloseCode()
+        {
+            html.Append("</code></pre>");
+            if (compactCode && (diff || lines > 6 || html.Length - codeStart!.Value > 650))
+            {
+                var label = diff ? "Dosya farkı" : "Kod bloğu";
+                html.Insert(codeStart!.Value, $"<details class=\"code-fold\"><summary>{label}<small>{lines} satır</small></summary>");
+                html.Append("</details>");
+            }
+            codeStart = null;
+        }
         foreach (var raw in source.Replace("\r", "").Split('\n'))
         {
             if (raw.StartsWith("```", StringComparison.Ordinal))
             {
                 CloseList(html, ref list);
-                html.Append(code ? "</code></pre>" : "<pre><code>");
-                code = !code;
+                if (codeStart.HasValue) CloseCode();
+                else
+                {
+                    codeStart = html.Length;
+                    diff = raw[3..].Trim().ToLowerInvariant() is "diff" or "patch";
+                    lines = 0;
+                    html.Append("<pre><code>");
+                }
                 continue;
             }
-            if (code) { html.AppendLine(WebUtility.HtmlEncode(raw)); continue; }
+            if (codeStart.HasValue) { html.AppendLine(WebUtility.HtmlEncode(raw)); lines++; continue; }
             if (raw.StartsWith("- ", StringComparison.Ordinal) || raw.StartsWith("* ", StringComparison.Ordinal))
             {
                 if (!list) html.Append("<ul>");
@@ -39,7 +58,7 @@ public static partial class SafeMarkdown
             else html.Append("<p>").Append(Inline(raw)).Append("</p>");
         }
         CloseList(html, ref list);
-        if (code) html.Append("</code></pre>");
+        if (codeStart.HasValue) CloseCode();
         return html.ToString();
     }
 

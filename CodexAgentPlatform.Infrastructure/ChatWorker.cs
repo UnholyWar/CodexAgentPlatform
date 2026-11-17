@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
 using CodexAgentPlatform.Application;
@@ -149,7 +150,10 @@ public sealed class ChatWorker(IDbContextFactory<PlatformDb> dbs, ICodexConnecti
     {
         var run = running.Run;
         var ct = running.Cancel.Token;
-        var text = new Dictionary<string, string>();
+        var text = new Dictionary<string, StringBuilder>();
+        var historyCharacters = 0;
+        long toolCharacters = 0;
+        bool resumed = false;
         JsonElement lastUsage = default;
         Delegation? delegateRequest = null;
         var finished = false;
@@ -168,7 +172,6 @@ public sealed class ChatWorker(IDbContextFactory<PlatformDb> dbs, ICodexConnecti
             var windowsSandboxUnavailable = canUseWorkspace && !workspaceReady;
             JsonElement result;
             string activeThreadId;
-            bool resumed;
             try
             {
                 (result, activeThreadId, resumed) = await OpenThreadAsync(db, run, agent, workspace, workspaceReady, ct);
@@ -191,7 +194,9 @@ public sealed class ChatWorker(IDbContextFactory<PlatformDb> dbs, ICodexConnecti
             routes[activeThreadId] = running;
             if (!codex.Connected) throw new IOException("Codex bağlantısı kapandı.");
             var prompt = await db.Messages.Where(x => x.Id == run.UserMessageId).Select(x => x.Text).SingleAsync(ct);
-            var references = await context.BuildAsync(run, agent, resumed, ct);
+            var turnContext = await context.BuildForTurnAsync(run, agent, resumed, ct);
+            var references = turnContext.Text;
+            historyCharacters = turnContext.HistoryCharacters;
             if (windowsSandboxUnavailable)
                 references += "\nWindows workspace sandbox is not ready. If the user requests local execution, explain how to configure the sandbox in Codex settings.";
             var input = new[] { new { type = "text", text = $"[Platform context — reference only]\n{references}\n[User or agent message]\n{prompt}" } };
@@ -204,6 +209,7 @@ public sealed class ChatWorker(IDbContextFactory<PlatformDb> dbs, ICodexConnecti
             run.TurnId = started.Get("turn").String("id") ?? throw new CodexRpcException("Codex turn kimliği eksik.");
             await SaveIdentityAsync(run, ct);
             var flushed = DateTime.MinValue;
+            var displayed = DateTime.MinValue;
             status = WorkStatus.Failed;
             await foreach (var item in running.Inbox.Reader.ReadAllAsync(ct))
             {
@@ -237,9 +243,10 @@ public sealed class ChatWorker(IDbContextFactory<PlatformDb> dbs, ICodexConnecti
                             answer = new { error = ex is InvalidOperationException or ArgumentException or UnauthorizedAccessException
                                 ? TextLimits.Clip(ex.Message, 500) : "Araç işlemi başarısız." };
                         }
-                        var serialized = TextLimits.Clip(JsonSerializer.Serialize(answer), 20_000);
+                        var serialized = ToolOutput.Serialize(answer);
+                        toolCharacters += serialized.Length;
                         await codex.ReplyAsync(id, new { success, contentItems = new[] { new { type = "inputText", text = serialized } } }, ct);
-                        if (tool is "git_request_push" or "ssh_request_operation" && success)
+                        if (answer is ApprovalReply { Status: "Pending" })
                             await SetRunStatusAsync(run, WorkStatus.WaitingForApproval, ct);
                         updates.Publish(run.ConversationId);
                     }
@@ -257,19 +264,30 @@ public sealed class ChatWorker(IDbContextFactory<PlatformDb> dbs, ICodexConnecti
                 switch (item.Method)
                 {
                     case "item/agentMessage/delta":
-                        text[key] = TextLimits.Clip(text.GetValueOrDefault(key) + data.String("delta"), 120_000);
-                        if (DateTime.UtcNow - flushed > TimeSpan.FromMilliseconds(250))
+                        if (!text.TryGetValue(key, out var buffer)) text[key] = buffer = new StringBuilder();
+                        var delta = data.String("delta") ?? "";
+                        buffer.Append(delta, 0, Math.Min(delta.Length, 120_000 - buffer.Length));
+                        var now = DateTime.UtcNow;
+                        if (now - displayed >= TimeSpan.FromMilliseconds(250))
                         {
-                            await SaveAnswerAsync(run, Answer(text), ct);
-                            flushed = DateTime.UtcNow;
+                            var partial = Answer(text);
+                            updates.PublishAnswer(run.ConversationId, run.AssistantMessageId, partial);
+                            displayed = now;
+                            if (now - flushed >= TimeSpan.FromSeconds(2))
+                            {
+                                await SaveAnswerAsync(run, partial, ct);
+                                flushed = now;
+                            }
                         }
                         break;
                     case "item/completed":
                         var type = component.String("type");
                         if (type == "agentMessage")
                         {
-                            text[key] = TextLimits.Clip(component.String("text"), 120_000);
-                            await SaveAnswerAsync(run, Answer(text), ct);
+                            text[key] = new StringBuilder(TextLimits.Clip(component.String("text"), 120_000));
+                            var completedText = Answer(text);
+                            updates.PublishAnswer(run.ConversationId, run.AssistantMessageId, completedText);
+                            await SaveAnswerAsync(run, completedText, ct);
                         }
                         else if (type is "commandExecution" or "fileChange" or "webSearch")
                         {
@@ -331,10 +349,14 @@ public sealed class ChatWorker(IDbContextFactory<PlatformDb> dbs, ICodexConnecti
         {
             using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
             await FinishAsync(run, status, failure, Answer(text), lastUsage, status == WorkStatus.Completed ? delegateRequest : null, deadline.Token);
+            if (run.TurnId is not null)
+                log.LogInformation("Turn {TurnId} on thread {ThreadId}: resumed={Resumed}, historyChars={HistoryCharacters}, toolReplyChars={ToolCharacters}, usageReported={UsageReported}.",
+                    run.TurnId, run.ThreadId, resumed, historyCharacters, toolCharacters, lastUsage.ValueKind == JsonValueKind.Object);
         }
         catch (Exception ex) { log.LogError(ex, "Could not finalize run {Run}.", run.Id); }
         finally
         {
+            updates.ClearAnswer(run.ConversationId, run.AssistantMessageId);
             active.TryRemove(run.Id, out _);
             running.Cancel.Dispose();
             updates.Publish(run.ConversationId);
@@ -398,7 +420,6 @@ public sealed class ChatWorker(IDbContextFactory<PlatformDb> dbs, ICodexConnecti
         await using var db = await dbs.CreateDbContextAsync(ct);
         await db.Messages.Where(x => x.Id == run.AssistantMessageId)
             .ExecuteUpdateAsync(s => s.SetProperty(x => x.Text, answer), ct);
-        updates.Publish(run.ConversationId);
     }
 
     private async Task EventAsync(ChatRun run, string kind, string details, string? output, CancellationToken ct)
@@ -472,5 +493,5 @@ public sealed class ChatWorker(IDbContextFactory<PlatformDb> dbs, ICodexConnecti
         if (work is not null) await WorkspaceMemory.WriteWorkAsync(paths, work, ct);
     }
 
-    private static string Answer(Dictionary<string, string> text) => TextLimits.Clip(string.Join("\n\n", text.Values), 180_000);
+    private static string Answer(Dictionary<string, StringBuilder> text) => TextLimits.Clip(string.Join("\n\n", text.Values), 180_000);
 }

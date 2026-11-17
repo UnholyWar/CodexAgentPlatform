@@ -10,6 +10,119 @@ namespace CodexAgentPlatform.Tests;
 public sealed class ChatTests
 {
     [Fact]
+    public async Task ProjectChatReusesWorkspaceAndOnlyResumesCompletedWorkOnReference()
+    {
+        await using var storage = await TestStorage.CreateAsync();
+        var chats = new ChatStore(storage, new ChatUpdates());
+        await using var db = storage.CreateDbContext();
+        var project = new Project { Name = "Deneme projesi" };
+        db.Projects.Add(project);
+        var developer = await db.Agents.SingleAsync(x => x.Id == "developer");
+        developer.AllowedProjects = project.Id;
+        await db.SaveChangesAsync();
+
+        var chat = await chats.SendAsync(null, "Birinci soru", developer.Id, project.Id, default);
+        var first = await db.Runs.AsNoTracking().SingleAsync();
+        await db.Runs.ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, WorkStatus.Completed));
+        await chats.SendAsync(chat, "İkinci soru", developer.Id, project.Id, default);
+        var second = await db.Runs.AsNoTracking().SingleAsync(x => x.Id != first.Id);
+        Assert.Equal(first.Workspace, second.Workspace);
+        var work = new WorkItem { ConversationId = chat, ProjectId = project.Id, AgentId = developer.Id,
+            Workspace = first.Workspace!, Status = WorkStatus.Completed, Title = "Veri aktarımı" };
+        db.Work.Add(work);
+        await db.SaveChangesAsync();
+        await db.Runs.ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, WorkStatus.Completed));
+        await chats.SendAsync(chat, "Teşekkürler", developer.Id, project.Id, default);
+        var thanks = await db.Runs.AsNoTracking().SingleAsync(x => x.Status == WorkStatus.Pending);
+        Assert.Null(thanks.WorkId);
+        Assert.Equal(first.Workspace, thanks.Workspace);
+        await db.Runs.ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, WorkStatus.Completed));
+        await chats.SendAsync(chat, "Veri aktarımı işini yeniden aç", developer.Id, project.Id, default);
+        Assert.Equal(work.Id, (await db.Runs.AsNoTracking().SingleAsync(x => x.Status == WorkStatus.Pending)).WorkId);
+    }
+
+    [Fact]
+    public async Task ResumedAgentReceivesOnlyNewAuthorizedExcerpts()
+    {
+        await using var storage = await TestStorage.CreateAsync();
+        var chats = new ChatStore(storage, new ChatUpdates());
+        await using var db = storage.CreateDbContext();
+        var architect = await db.Agents.SingleAsync(x => x.Id == "architect");
+        var qa = await db.Agents.SingleAsync(x => x.Id == "qa");
+        var restricted = new Project { Name = "Başka bir proje" };
+        qa.AllowedProjects = restricted.Id;
+        db.Projects.Add(restricted);
+        await db.SaveChangesAsync();
+        var chat = await chats.SendAsync(null, "İlk tasarım", architect.Id, null, default);
+
+        async Task Complete(string thread, string answer)
+        {
+            var run = await db.Runs.AsNoTracking().SingleAsync(x => x.Status == WorkStatus.Pending);
+            await db.Messages.Where(x => x.Id == run.AssistantMessageId).ExecuteUpdateAsync(s => s.SetProperty(x => x.Text, answer));
+            await db.Runs.Where(x => x.Id == run.Id).ExecuteUpdateAsync(s => s.SetProperty(x => x.ThreadId, thread)
+                .SetProperty(x => x.TurnId, run.Id).SetProperty(x => x.Status, WorkStatus.Completed));
+        }
+
+        await Complete("design", "Önceki yanıt");
+        await chats.SendAsync(chat, "Planı incele", qa.Id, null, default);
+        await Complete("qa", "Doğrulama sonucu");
+        await chats.SendAsync(chat, "Özel rapor", qa.Id, restricted.Id, default);
+        await Complete("restricted", "Gizli sonuç");
+        await chats.SendAsync(chat, "Sonucu değerlendir", architect.Id, null, default);
+        var next = await db.Runs.AsNoTracking().SingleAsync(x => x.Status == WorkStatus.Pending);
+        next.ThreadId = "design";
+        var references = await new ContextBudget(storage).BuildAsync(next, architect, true, default);
+        Assert.Contains("Doğrulama sonucu", references);
+        Assert.DoesNotContain("Önceki yanıt", references);
+        Assert.DoesNotContain("Özel rapor", references);
+        Assert.DoesNotContain("Gizli sonuç", references);
+    }
+
+    [Fact]
+    public void ToolRepliesPreserveUnicodePageBoundariesAndValidJson()
+    {
+        var text = new string('ğ', 2999) + "🌍" + new string('ş', 700);
+        var first = Args(ToolOutput.Page(text, 0, 8000));
+        var next = Args(ToolOutput.Page(text, (int)first.Number("nextOffset"), 8000));
+        Assert.Equal(text, first.String("output") + next.String("output"));
+        Assert.Equal(JsonValueKind.Null, next.Get("nextOffset").ValueKind);
+        var rows = Enumerable.Repeat(new { detail = new string('ö', 900) }, 100).ToArray();
+        var serialized = ToolOutput.Serialize(rows);
+        Assert.InRange(serialized.Length, 1, 20_000);
+        using var result = JsonDocument.Parse(serialized);
+        Assert.True(result.RootElement.True("truncated"));
+        Assert.NotEmpty(result.RootElement.Items("items"));
+    }
+
+    [Fact]
+    public void NewDeveloperThreadsDeferMaintenanceToolsAndKeepWorkToolsAvailable()
+    {
+        var developer = new Agent { AllowedTools = "memory,resources,workspace,git" };
+        var specs = AgentTools.Describe(developer).Select(Args).ToArray();
+        Assert.Equal(9, specs.Count(t => t.String("type") == "function"));
+        Assert.Contains(specs, t => t.String("name") == "task_begin" && !t.True("deferLoading"));
+        var deferred = Assert.Single(specs, t => t.String("type") == "namespace").Items("tools").ToArray();
+        Assert.Equal(8, deferred.Length);
+        Assert.All(deferred, t => Assert.True(t.True("deferLoading")));
+        Assert.DoesNotContain(deferred, t => t.String("name") == "ssh_inspect");
+    }
+
+    [Fact]
+    public void StreamingUpdatesOnlyPatchTheMatchingMessage()
+    {
+        var updates = new ChatUpdates();
+        var reloads = 0;
+        updates.Changed += _ => reloads++;
+        var snapshot = new ChatSnapshot([new Message { Id = 9 }, new Message { Id = 10 }], [], null, []);
+        updates.PublishAnswer("chat", 10, "yeni yanıt");
+        updates.ClearAnswer("chat", 9);
+        updates.ApplyAnswer("chat", snapshot);
+        Assert.Equal("", snapshot.Messages[0].Text);
+        Assert.Equal("yeni yanıt", snapshot.Messages[1].Text);
+        Assert.Equal(0, reloads);
+    }
+
+    [Fact]
     public async Task StreamingPersistenceThreadResumeModelChangeAndTokenAccounting()
     {
         await using var storage = await TestStorage.CreateAsync();

@@ -7,7 +7,7 @@
 <PageTitle>Ajanlar · Codex Agent Platform</PageTitle>
 <section class="admin-page">
     <header class="section-head">
-        <h1>Ajanlar</h1><button class="primary" @ref="addButton" disabled="@busy" @onclick="NewAgent">＋ Ajan ekle</button>
+        <h1>Ajanlar</h1><button class="primary" @ref="addButton" disabled="@busy" @onclick="NewAgent"><Icon Name="plus" /> Ajan ekle</button>
     </header>
     @if (edit is null && error is not null) { <p class="notice error" role="alert">@error</p> }
     @if (notice is not null) { <p class="notice" role="status">@notice</p> }
@@ -25,6 +25,7 @@
         @if (edit is not null)
         {
             <form class="card fields" aria-busy="@busy" @onsubmit="SaveAsync" @onsubmit:preventDefault>
+                <button type="button" class="editor-back" disabled="@busy" @onclick="CancelEdit"><Icon Name="chevron" /> Ajan listesi</button>
                 <h2 @ref="editorHeading" tabindex="-1">@(isNew ? "Yeni ajan" : edit.Name)</h2>
                 <label>Ad <input @bind="edit.Name" required maxlength="60" /></label>
                 <label>Unvan <input @bind="edit.Title" required maxlength="120" /></label>

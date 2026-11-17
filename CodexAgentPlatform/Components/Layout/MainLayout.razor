@@ -4,32 +4,20 @@
     <Authorized Context="session">
         <div class="platform">
             <aside class="rail">
-                <a class="brand" href="/"><span class="brand-mark" aria-hidden="true">C</span><span>Codex Agent<br />Platform</span></a>
-                <button type="button" class="button mobile-nav-toggle" aria-controls="workspace-navigation"
-                    aria-expanded="@(mobileNavOpen ? "true" : "false")" @onclick="() => mobileNavOpen = !mobileNavOpen">Menü</button>
-                <nav id="workspace-navigation" class="@(mobileNavOpen ? "is-open" : null)" aria-label="Çalışma alanı" @onclick="() => mobileNavOpen = false">
-                    <NavLink class="nav-item" href="/" Match="NavLinkMatch.All"><span aria-hidden="true">◫</span>Sohbet</NavLink>
-                    <NavLink class="nav-item" href="/conversations"><span aria-hidden="true">▤</span>Sohbet geçmişi</NavLink>
-                    <NavLink class="nav-item" href="/agents"><span aria-hidden="true">◎</span>Ajanlar</NavLink>
-                    <NavLink class="nav-item" href="/work"><span aria-hidden="true">□</span>Çalışmalar</NavLink>
-                    <NavLink class="nav-item" href="/memory"><span aria-hidden="true">◇</span>Hafıza</NavLink>
-                    <NavLink class="nav-item" href="/timeline"><span aria-hidden="true">◷</span>Zaman çizelgesi</NavLink>
-                    <hr />
-                    <NavLink class="nav-item" href="/projects"><span aria-hidden="true">▱</span>Projeler</NavLink>
-                    <NavLink class="nav-item" href="/resources"><span aria-hidden="true">⊞</span>Kaynaklar</NavLink>
-                    <NavLink class="nav-item" href="/approvals"><span aria-hidden="true">✓</span>Onaylar</NavLink>
-                    <NavLink class="nav-item" href="/codex"><span aria-hidden="true">⌘</span>Codex ayarları</NavLink>
-                    <NavLink class="nav-item" href="/system"><span aria-hidden="true">⚙</span>Sistem</NavLink>
-                </nav>
-                <div class="rail-footer">
-                    <span class="avatar avatar-small" aria-hidden="true">@Initial(session.User.Identity?.Name)</span>
-                    <span class="owner-name">@session.User.Identity?.Name</span>
-                    <form action="/session/logout" method="post">
-                        <AntiforgeryToken />
-                        <button type="submit" class="icon-button" title="Çıkış yap" aria-label="Çıkış yap">↪</button>
-                    </form>
-                </div>
+                @Brand
+                @NavigationLinks
+                @Account(session.User.Identity?.Name)
             </aside>
+            <header class="mobile-header">
+                @Brand
+                <a class="icon-button" href="/conversations" aria-label="Sohbet geçmişi"><Icon Name="history" /></a>
+                <button class="icon-button" type="button" popovertarget="mobile-menu" aria-label="Menüyü aç"><Icon Name="menu" /></button>
+            </header>
+            <div class="mobile-menu" id="mobile-menu" popover="auto" role="dialog" aria-label="Çalışma alanı menüsü">
+                <div class="menu-head">@Brand<button class="icon-button" type="button" popovertarget="mobile-menu" popovertargetaction="hide" aria-label="Menüyü kapat"><Icon Name="close" /></button></div>
+                @NavigationLinks
+                @Account(session.User.Identity?.Name)
+            </div>
             <main class="main-pane">@Body</main>
         </div>
     </Authorized>
@@ -38,10 +26,37 @@
     </NotAuthorized>
 </AuthorizeView>
 <div id="blazor-error-ui" data-nosnippet>
-    Bağlantıda bir hata oluştu. <a href="" class="reload">Yenile</a><button class="dismiss" aria-label="Kapat">×</button>
+    Bağlantıda bir hata oluştu. <a href="" class="reload">Yenile</a><button class="dismiss" aria-label="Kapat"><Icon Name="close" /></button>
 </div>
 
 @code {
-    private bool mobileNavOpen;
-    private static string Initial(string? name) => string.IsNullOrWhiteSpace(name) ? "Y" : name[..1].ToUpperInvariant();
+    private RenderFragment Brand => @<a class="brand" href="/"><span class="brand-mark"><Icon Name="brand" /></span><span>Codex <small>Agent Platform</small></span></a>;
+
+    private RenderFragment NavigationLinks => @<nav aria-label="Çalışma alanı">
+        <div class="nav-label">Çalışma alanı</div>
+        @Link("/", "chat", "Sohbet")
+        @Link("/conversations", "history", "Sohbet geçmişi")
+        @Link("/agents", "agents", "Ajanlar")
+        @Link("/work", "work", "Çalışmalar")
+        @Link("/memory", "memory", "Hafıza")
+        @Link("/timeline", "timeline", "Zaman çizelgesi")
+        <div class="nav-label">Yönetim</div>
+        @Link("/projects", "folder", "Projeler")
+        @Link("/resources", "grid", "Kaynaklar")
+        @Link("/approvals", "approve", "Onaylar")
+        @Link("/codex", "terminal", "Codex ayarları")
+        @Link("/system", "settings", "Sistem")
+    </nav>;
+
+    private RenderFragment Link(string href, string icon, string label) =>
+        @<NavLink class="nav-item" href="@href" Match="NavLinkMatch.All"><Icon Name="@icon" />@label</NavLink>;
+
+    private RenderFragment Account(string? name) => @<div class="rail-footer">
+        <span class="avatar avatar-small" aria-hidden="true">@(string.IsNullOrWhiteSpace(name) ? "Y" : name[..1].ToUpperInvariant())</span>
+        <span class="owner-name">@name</span>
+        <form action="/session/logout" method="post">
+            <AntiforgeryToken />
+            <button type="submit" class="icon-button" title="Çıkış yap" aria-label="Çıkış yap"><Icon Name="logout" /></button>
+        </form>
+    </div>;
 }

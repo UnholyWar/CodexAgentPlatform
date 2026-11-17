@@ -6,14 +6,14 @@
 <section class="admin-page">
     <header class="section-head">
         <h1>Projeler</h1>
-        <button class="primary" disabled="@busy" @ref="addButton" @onclick="NewProject">＋ Proje ekle</button>
+        <button class="primary" disabled="@busy" @ref="addButton" @onclick="NewProject"><Icon Name="plus" /> Proje ekle</button>
     </header>
     @if (notice is not null) { <p class="notice" role="status">@notice</p> }
     <div class="split-panel">
         <div class="list">
             @foreach (var project in rows)
             {
-                <button class="list-row" disabled="@busy" @onclick="() => Select(project)"><span class="avatar" aria-hidden="true">▱</span>
+                <button class="list-row" disabled="@busy" @onclick="() => Select(project)"><span class="avatar" aria-hidden="true"><Icon Name="folder" /></span>
                     <span><strong>@project.Name</strong><small>@project.DefaultBranch</small></span></button>
             }
             @if (rows.Count == 0) { <p class="empty">Henüz proje eklenmedi.</p> }
@@ -21,6 +21,7 @@
         @if (selected is not null)
         {
             <form class="card fields" @onsubmit="SaveAsync" @onsubmit:preventDefault aria-labelledby="project-editor">
+                <button type="button" class="editor-back" disabled="@busy" @onclick="CloseEditor"><Icon Name="chevron" /> Proje listesi</button>
                 <h2 id="project-editor" tabindex="-1" @ref="editorHeading">@(isNew ? "Yeni proje" : "Projeyi düzenle")</h2>
                 <label>Proje adı <input @bind="selected.Name" maxlength="80" required disabled="@busy" /></label>
                 <label>Varsayılan branch <input @bind="selected.DefaultBranch" maxlength="150" required disabled="@busy" /></label>

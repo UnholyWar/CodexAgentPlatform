@@ -47,6 +47,17 @@ public sealed class GitApprovalTests
         Assert.Equal("Failed", result.Status);
         Assert.Contains("onaydan sonra değişti", result.Result);
         Assert.False(await operations.ExecuteNextAsync(default));
+
+        var chat = new Conversation { AutoApprove = true };
+        repository.Production = false;
+        db.Conversations.Add(chat);
+        await db.SaveChangesAsync();
+        await GitAsync(worktree, "switch", "-c", $"agent/{workspaceId}");
+        var scoped = await operations.RequestAsync(agent, chat.Id, repository.Id, "GitPush", "push", workspaceId, null, default);
+        Assert.Equal("Approved", scoped.Status);
+        Assert.Equal(Operations.AutomaticDecision, scoped.DecidedBy);
+        var main = await operations.RequestAsync(agent, chat.Id, repository.Id, "GitPush", "push", workspaceId, "main", default);
+        Assert.Equal("Pending", main.Status);
     }
 
     private static async Task GitAsync(string directory, params string[] arguments)

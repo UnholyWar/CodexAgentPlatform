@@ -5,30 +5,40 @@
 
 <PageTitle>Kaynaklar · Codex Agent Platform</PageTitle>
 <section class="admin-page">
-    <header class="section-head"><h1>Kaynaklar</h1><button @ref="addButton" class="primary" disabled="@busy" @onclick="NewResource">＋ Kaynak ekle</button></header>
+    <header class="section-head"><h1>Kaynaklar</h1><button @ref="addButton" class="primary" disabled="@busy" @onclick="NewResource"><Icon Name="plus" /> Kaynak ekle</button></header>
     @if (notice is not null) { <p @ref="feedback" class="notice" role="status" tabindex="-1">@notice</p> }
     @if (selected is null && error is not null) { <p class="notice error" role="alert">@error</p> }
     <div class="split-panel">
         <div class="list">
             @foreach (var item in rows)
             {
-                <button class="list-row" disabled="@busy" aria-pressed="@(selected?.Id == item.Id ? "true" : "false")" @onclick="() => EditAsync(item.Id)"><span class="avatar" aria-hidden="true">⊞</span>
-                    <span><strong>@item.Name</strong><small>@item.Kind · @item.Address</small></span></button>
+                <button class="list-row" disabled="@busy" aria-pressed="@(selected?.Id == item.Id ? "true" : "false")" @onclick="() => EditAsync(item.Id)"><span class="avatar" aria-hidden="true"><Icon Name="@ResourceIcon(item.Kind)" /></span>
+                    <span class="resource-name"><strong>@item.Name</strong><small>@KindLabel(item.Kind) · @item.Address</small></span>
+                    @if (item.IsGlobal) { <span class="global-mark"><Icon Name="star" /> Global</span> }
+                </button>
             }
             @if (rows.Count == 0) { <p class="empty">Henüz kaynak eklenmedi.</p> }
         </div>
         @if (selected is not null)
         {
             <form class="card fields" aria-labelledby="resource-editor" @onsubmit="SaveAsync" @onsubmit:preventDefault>
+                <button type="button" class="editor-back" disabled="@busy" @onclick="CancelEditor"><Icon Name="chevron" /> Kaynak listesi</button>
                 <h2 id="resource-editor" @ref="editorHeading" tabindex="-1">@(savedName is null ? "Yeni kaynak" : "Kaynağı düzenle")</h2>
                 <label>Kaynak adı <input @bind="selected.Name" maxlength="100" required disabled="@busy" /></label>
-                <label>Tür <select @bind="selected.Kind" @bind:after="SourceTypeChanged" disabled="@busy">@foreach (var kind in Enum.GetValues<ResourceKind>()) { <option value="@kind">@kind</option> }</select></label>
+                <label>Tür <select @bind="selected.Kind" @bind:after="SourceTypeChanged" disabled="@busy">@foreach (var kind in Enum.GetValues<ResourceKind>()) { <option value="@kind">@KindLabel(kind)</option> }</select></label>
+                <fieldset class="scope-picker" disabled="@busy"><legend>Kapsam</legend>
+                    <label><input name="resource-scope" type="radio" checked="@(!selected.IsGlobal)" @onchange="() => SetScope(false)" /><Icon Name="folder" /> Projeye özel</label>
+                    <label><input name="resource-scope" type="radio" checked="@selected.IsGlobal" @onchange="() => SetScope(true)" /><Icon Name="star" /> Global</label>
+                </fieldset>
+                @if (!selected.IsGlobal)
+                {
                 <label>Proje
                     <select @bind="selected.ProjectId" @bind:after="ClearInvalidSshSelection" required disabled="@busy">
                         <option value="">Proje seçin</option>
                         @foreach (var project in projects) { <option value="@project.Id">@project.Name</option> }
                     </select>
                 </label>
+                }
                 <label>@(selected.Kind switch { ResourceKind.SshServer => "Hostname veya IP", ResourceKind.GitRepository => "HTTPS depo adresi", ResourceKind.DeploymentTarget => "Docker Swarm servis adı", _ => "Adres" })
                     <input @bind="selected.Address" maxlength="1024" required disabled="@busy" /></label>
                 @if (selected.Kind == ResourceKind.GitRepository)
@@ -64,8 +74,7 @@
                         </select>
                     </label>
                     <small id="source-ssh-help" class="muted">
-                        @(string.IsNullOrEmpty(selected.ProjectId) ? "Önce proje seçin."
-                            : hosts.Length == 0 ? "Bu projeye bir SSH kaynağı ekleyin." : "Seçili projenin SSH kaynakları gösteriliyor.")
+                        @(hosts.Length == 0 ? "Bu kapsam için önce bir SSH sunucusu ekleyin." : "Bu hedefte kullanılabilen SSH sunucuları gösteriliyor.")
                     </small>
                 }
                 @if (selected.Kind is not (ResourceKind.DeploymentTarget or ResourceKind.GitRepository or ResourceKind.SshServer) && Vault.Configured)
@@ -114,6 +123,23 @@
 </section>
 
 @code {
+    private static string KindLabel(ResourceKind kind) => kind switch
+    {
+        ResourceKind.GitRepository => "Git deposu", ResourceKind.SshServer => "SSH sunucusu",
+        ResourceKind.DeploymentTarget => "Dağıtım hedefi", ResourceKind.LocalWorkspace => "Yerel çalışma alanı",
+        ResourceKind.Environment => "Ortam", ResourceKind.ApiConnection => "API bağlantısı", _ => "Harici servis"
+    };
+
+    private static string ResourceIcon(ResourceKind kind) => kind switch
+    {
+        ResourceKind.GitRepository => "branch",
+        ResourceKind.SshServer => "server",
+        ResourceKind.LocalWorkspace => "folder",
+        ResourceKind.DeploymentTarget => "box",
+        ResourceKind.Environment => "settings",
+        _ => "link"
+    };
+
     private List<Resource> rows = [];
     private List<Project> projects = [];
     private Resource? selected;
@@ -137,7 +163,7 @@
     private async Task LoadAsync()
     {
         await using var db = await Dbs.CreateDbContextAsync();
-        rows = await db.Resources.AsNoTracking().OrderBy(x => x.Name).ToListAsync();
+        rows = await db.Resources.AsNoTracking().OrderByDescending(x => x.IsGlobal).ThenBy(x => x.Name).ToListAsync();
         projects = await db.Projects.AsNoTracking().OrderBy(x => x.Name).ToListAsync();
     }
 
@@ -145,7 +171,7 @@
     {
         if (busy) return;
         CancelEditor();
-        selected = new();
+        selected = new() { IsGlobal = projects.Count == 0 };
     }
 
     private async Task EditAsync(string id)
@@ -169,8 +195,16 @@
     }
 
     private IEnumerable<Resource> SshServers(Resource item) => rows.Where(host =>
-        host.Kind == ResourceKind.SshServer && host.Id != item.Id && host.ProjectId == item.ProjectId &&
-        !string.IsNullOrEmpty(item.ProjectId));
+        host.Kind == ResourceKind.SshServer && host.Id != item.Id &&
+        (host.IsGlobal || (item.ProjectId is not null && item.ProjectId == host.ProjectId)));
+
+    private void SetScope(bool global)
+    {
+        if (selected is not { } item) return;
+        item.IsGlobal = global;
+        if (global) item.ProjectId = null;
+        ClearInvalidSshSelection();
+    }
 
     private void SourceTypeChanged()
     {
@@ -270,19 +304,21 @@
                 throw new ArgumentException("Kaynak adı veya adres geçersiz.");
             await using var db = await Dbs.CreateDbContextAsync();
             await using var tx = await db.Database.BeginTransactionAsync();
-            if (!await db.Projects.AnyAsync(x => x.Id == item.ProjectId))
+            if (item.IsGlobal) item.ProjectId = null;
+            else if (!await db.Projects.AnyAsync(x => x.Id == item.ProjectId))
                 throw new ArgumentException("Kaynağı var olan bir projeye bağlayın.");
             var existing = await db.Resources.SingleOrDefaultAsync(x => x.Id == item.Id);
             if (existing is null && savedName is not null)
                 throw new InvalidOperationException("Kaynak artık bulunamıyor.");
-            if (existing is { Kind: ResourceKind.SshServer } && (existing.Kind != item.Kind || existing.ProjectId != item.ProjectId) &&
+            if (existing is { Kind: ResourceKind.SshServer } && (existing.Kind != item.Kind || existing.ProjectId != item.ProjectId || existing.IsGlobal != item.IsGlobal) &&
                 await HasDeploymentTargetsAsync(db, item.Id))
                 throw new InvalidOperationException("Kaynağın türünü veya projesini değiştirmeden önce bağlı dağıtım hedeflerini düzenleyin.");
             if (item.Kind == ResourceKind.GitRepository) _ = Operations.GitAddress(item);
             if (item.Kind == ResourceKind.DeploymentTarget &&
                 (!System.Text.RegularExpressions.Regex.IsMatch(item.Address, @"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,100}\z") ||
-                 !await db.Resources.AnyAsync(x => x.Id == item.SshServerId && x.Id != item.Id && x.Kind == ResourceKind.SshServer && x.ProjectId == item.ProjectId)))
-                throw new ArgumentException("Dağıtım için geçerli bir Swarm servis adı ve aynı projede kayıtlı SSH sunucusu gerekli.");
+                 !await db.Resources.AnyAsync(x => x.Id == item.SshServerId && x.Id != item.Id && x.Kind == ResourceKind.SshServer &&
+                    (x.IsGlobal || (item.ProjectId != null && x.ProjectId == item.ProjectId)))))
+                throw new ArgumentException("Geçerli bir Swarm servis adı ve bu kapsamda kullanılabilen bir SSH sunucusu gerekli.");
             if (item.Kind == ResourceKind.SshServer)
             {
                 item.Username = item.Username?.Trim();
@@ -297,7 +333,7 @@
             if (Uri.TryCreate(item.Address, UriKind.Absolute, out var address) && address.UserInfo.Length > 0)
                 throw new ArgumentException("Adreste erişim bilgisi kullanmayın.");
             var vaultId = existing is not null && existing.Address == item.Address && existing.Kind == item.Kind &&
-                existing.ProjectId == item.ProjectId && existing.Username == item.Username && existing.Port == item.Port &&
+                existing.IsGlobal == item.IsGlobal && existing.ProjectId == item.ProjectId && existing.Username == item.Username && existing.Port == item.Port &&
                 existing.HostFingerprint == item.HostFingerprint ? existing.VaultId : null;
             if (item.Kind == ResourceKind.DeploymentTarget || (item.Kind == ResourceKind.GitRepository && !gitUsesToken))
                 vaultId = null;

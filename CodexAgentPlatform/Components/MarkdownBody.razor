@@ -1,5 +1,6 @@
-<div class="markdown">@((MarkupString)SafeMarkdown.Render(Text))</div>
+<div class="markdown">@((MarkupString)SafeMarkdown.Render(Text, CompactCode))</div>
 
 @code {
     [Parameter] public string Text { get; set; } = "";
+    [Parameter] public bool CompactCode { get; set; }
 }

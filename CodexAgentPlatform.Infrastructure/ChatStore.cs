@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using CodexAgentPlatform.Application;
 using Microsoft.EntityFrameworkCore;
@@ -6,16 +7,38 @@ namespace CodexAgentPlatform.Infrastructure;
 
 public sealed class ChatUpdates
 {
+    private readonly ConcurrentDictionary<string, (long Id, string Text)> answers = new();
     public event Action<string>? Changed;
-    public void Publish(string id)
+    public event Action<string>? AnswerChanged;
+    public void Publish(string id) => Notify(Changed, id);
+
+    public void PublishAnswer(string chat, long id, string text)
     {
-        if (Changed is not { } subscribers) return;
+        answers[chat] = (id, text);
+        Notify(AnswerChanged, chat);
+    }
+
+    public void ApplyAnswer(string chat, ChatSnapshot snapshot)
+    {
+        if (answers.TryGetValue(chat, out var answer) && snapshot.Messages.FindLast(m => m.Id == answer.Id) is { } message)
+            message.Text = answer.Text;
+    }
+
+    public void ClearAnswer(string chat, long id)
+    {
+        if (answers.TryGetValue(chat, out var answer) && answer.Id == id)
+            answers.TryRemove(new KeyValuePair<string, (long, string)>(chat, answer));
+    }
+
+    private static void Notify(Action<string>? subscribers, string id)
+    {
+        if (subscribers is null) return;
         foreach (Action<string> callback in subscribers.GetInvocationList())
             try { callback(id); } catch (ObjectDisposedException) { }
     }
 }
 
-public sealed record ChatSnapshot(List<Message> Messages, List<Activity> Events, ChatRun? Run, List<Approval> Approvals);
+public sealed record ChatSnapshot(List<Message> Messages, List<Activity> Events, ChatRun? Run, List<Approval> Approvals, bool AutoApprove = false);
 
 public sealed class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpdates updates)
 {
@@ -33,13 +56,15 @@ public sealed class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpdates upd
         updates.Publish(id);
     }
 
-    public async Task<string> SendAsync(string? chatId, string text, string? selectedAgent, string? projectId, CancellationToken ct)
+    public async Task<string> SendAsync(string? chatId, string text, string? selectedAgent, string? projectId, CancellationToken ct,
+        bool autoApproveNewChat = false)
     {
         text = text.Trim();
+        if (string.IsNullOrWhiteSpace(projectId)) projectId = null;
         if (text.Length is 0 or > 16_000) throw new ArgumentException("Mesaj 1–16.000 karakter olmalı.");
         await using var db = await dbs.CreateDbContextAsync(ct);
         await using var tx = await db.Database.BeginTransactionAsync(ct);
-        var chat = chatId is null ? new Conversation { Title = TextLimits.Clip(text.Replace('\n', ' '), 65) }
+        var chat = chatId is null ? new Conversation { Title = TextLimits.Clip(text.Replace('\n', ' '), 65), AutoApprove = autoApproveNewChat }
             : await db.Conversations.SingleAsync(x => x.Id == chatId, ct);
         if (await db.Runs.AnyAsync(x => x.ConversationId == chat.Id && Enumerable.Contains(Active, x.Status), ct))
             throw new InvalidOperationException("Bu sohbette bir yanıt hazırlanıyor.");
@@ -121,7 +146,8 @@ public sealed class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpdates upd
         var run = await db.Runs.AsNoTracking().Where(x => x.ConversationId == id).OrderByDescending(x => x.CreatedAtUtc).FirstOrDefaultAsync(ct);
         var approvals = await db.Approvals.AsNoTracking().Where(x => x.ConversationId == id)
             .OrderByDescending(x => x.CreatedAtUtc).Take(12).ToListAsync(ct);
-        return new(messages, events, run, approvals);
+        var autoApprove = await db.Conversations.Where(c => c.Id == id).Select(c => c.AutoApprove).FirstOrDefaultAsync(ct);
+        return new(messages, events, run, approvals, autoApprove);
     }
 
     public async Task TouchAsync(string id, CancellationToken ct)
@@ -159,7 +185,8 @@ public sealed class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpdates upd
         else
         {
             var local = await work.Where(x => x.ConversationId == conversation).OrderByDescending(x => x.UpdatedAtUtc).FirstOrDefaultAsync(ct);
-            if (local is not null) return [local];
+            if (local is not null && (local.Status != WorkStatus.Completed || RequestsContinuation(input) ||
+                (local.Title.Length > 0 && input.Contains(local.Title, StringComparison.OrdinalIgnoreCase)))) return [local];
             work = work.Where(x => x.Title.Length >= 4 && input.Contains(x.Title));
         }
         var matches = await work.OrderByDescending(x => x.UpdatedAtUtc).Take(8).ToListAsync(ct);
@@ -169,12 +196,17 @@ public sealed class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpdates upd
 
     private static async Task<string?> RecentWorkspaceAsync(PlatformDb db, string conversation, string agent, string? project, CancellationToken ct)
     {
-        if (project is not null)
-            return await db.Work.Where(x => x.ConversationId == conversation && x.AgentId == agent && x.ProjectId == project)
-                .OrderByDescending(x => x.UpdatedAtUtc).Select(x => x.Workspace).FirstOrDefaultAsync(ct);
-        return await db.Runs.Where(x => x.ConversationId == conversation && x.AgentId == agent && x.ProjectId == null)
-            .OrderByDescending(x => x.CreatedAtUtc).Select(x => x.Workspace).FirstOrDefaultAsync(ct);
+        var recent = await db.Runs.Where(x => x.ConversationId == conversation && x.AgentId == agent &&
+                x.ProjectId == project && x.Workspace != null)
+            .OrderByDescending(x => x.UserMessageId).Select(x => x.Workspace).FirstOrDefaultAsync(ct);
+        if (recent is not null || project is null) return recent;
+        return await db.Work.Where(x => x.ConversationId == conversation && x.AgentId == agent && x.ProjectId == project)
+            .OrderByDescending(x => x.UpdatedAtUtc).Select(x => x.Workspace).FirstOrDefaultAsync(ct);
     }
+
+    private static bool RequestsContinuation(string input) =>
+        input.Trim().TrimEnd('.', '!').ToLowerInvariant() is
+            "devam" or "devam et" or "kaldığımız yerden devam et" or "continue" or "resume";
 
     private async Task<string> SaveExchangeAsync(PlatformDb db, Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction tx,
         Conversation chat, string? chatId, Agent agent, string input, string answer, CancellationToken ct)

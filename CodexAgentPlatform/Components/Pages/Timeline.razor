@@ -14,7 +14,7 @@
     <div class="list">
         @foreach (var entry in rows)
         {
-            <div class="list-row"><time>@TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(entry.EventOccurredAtUtc, DateTimeKind.Utc), zone).ToString("dd.MM.yyyy HH:mm")</time>
+            <div class="list-row timeline-row"><time>@TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(entry.EventOccurredAtUtc, DateTimeKind.Utc), zone).ToString("dd.MM.yyyy HH:mm")</time>
                 <span><strong>@entry.Kind</strong><small>@TextLimits.Clip(entry.Detail, 180)</small></span>
                 @if (entry.ConversationId is { } chat) { <a href="/chat/@chat">Sohbeti aç</a> }
             </div>
