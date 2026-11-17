@@ -1,0 +1,55 @@
+@page "/projects"
+@attribute [Authorize]
+@inject IDbContextFactory<PlatformDb> Dbs
+
+<PageTitle>Projeler · Codex Agent Platform</PageTitle>
+<section class="admin-page">
+    <header class="section-head"><h1>Projeler</h1><button class="primary" @onclick="() => selected = new()">＋ Proje ekle</button></header>
+    @if (error is not null) { <p class="notice error" role="alert">@error</p> }
+    <div class="split-panel">
+        <div class="list">
+            @foreach (var project in rows)
+            {
+                <button class="list-row" @onclick="() => Select(project)"><span class="avatar" aria-hidden="true">▱</span>
+                    <span><strong>@project.Name</strong><small>@project.DefaultBranch</small></span></button>
+            }
+            @if (rows.Count == 0) { <p class="empty">Henüz proje eklenmedi.</p> }
+        </div>
+        @if (selected is not null)
+        {
+            <form class="card fields" @onsubmit="SaveAsync" @onsubmit:preventDefault>
+                <label>Proje adı <input @bind="selected.Name" maxlength="80" required /></label>
+                <label>Varsayılan branch <input @bind="selected.DefaultBranch" maxlength="150" required /></label>
+                <div class="actions"><button class="primary">Kaydet</button><a class="button" href="/resources">Kaynaklara git</a></div>
+            </form>
+        }
+    </div>
+</section>
+
+@code {
+    private List<Project> rows = [];
+    private Project? selected;
+    private string? error;
+    protected override Task OnInitializedAsync() => Load();
+    private async Task Load()
+    {
+        await using var db = await Dbs.CreateDbContextAsync();
+        rows = await db.Projects.AsNoTracking().OrderBy(x => x.Name).ToListAsync();
+    }
+    private void Select(Project project) => selected = new Project { Id = project.Id, Name = project.Name, DefaultBranch = project.DefaultBranch };
+    private async Task SaveAsync()
+    {
+        if (selected is not { } draft) return;
+        error = null;
+        draft.Name = draft.Name.Trim();
+        draft.DefaultBranch = draft.DefaultBranch.Trim();
+        if (draft.Name.Length is 0 or > 80 || draft.DefaultBranch.Length is 0 or > 150)
+        { error = "Proje adı ve varsayılan branch gerekli."; return; }
+        await using var db = await Dbs.CreateDbContextAsync();
+        var row = await db.Projects.SingleOrDefaultAsync(x => x.Id == draft.Id);
+        if (row is null) db.Projects.Add(draft);
+        else (row.Name, row.DefaultBranch) = (draft.Name, draft.DefaultBranch);
+        try { await db.SaveChangesAsync(); selected = null; await Load(); }
+        catch (DbUpdateException) { error = "Proje adı zaten kullanılıyor."; }
+    }
+}

@@ -1,0 +1,34 @@
+<label>Model
+    <select value="@(Model ?? "")" @onchange="ChangeModel">
+        <option value="">Otomatik / varsayılan</option>
+        @if (Model is not null && !Models.Any(m => m.Id == Model)) { <option value="@Model">@Model</option> }
+        @foreach (var model in Models) { <option value="@model.Id">@model.Name</option> }
+    </select>
+</label>
+<label>Reasoning effort
+    <select value="@(Effort ?? "")" @onchange="ChangeEffort">
+        <option value="">Modelin varsayılanı</option>
+        @if (Effort is not null && !Efforts.Contains(Effort)) { <option value="@Effort">@Effort</option> }
+        @foreach (var effort in Efforts) { <option value="@effort">@effort</option> }
+    </select>
+</label>
+
+@code {
+    [Parameter] public IReadOnlyList<CodexModel> Models { get; set; } = [];
+    [Parameter] public string? Model { get; set; }
+    [Parameter] public EventCallback<string?> ModelChanged { get; set; }
+    [Parameter] public string? Effort { get; set; }
+    [Parameter] public EventCallback<string?> EffortChanged { get; set; }
+
+    private string[] Efforts => (Models.FirstOrDefault(m => m.Id == Model) ??
+        (Model is null ? Models.FirstOrDefault(m => m.IsDefault) : null))?.Efforts ?? [];
+
+    private async Task ChangeModel(ChangeEventArgs e)
+    {
+        await ModelChanged.InvokeAsync(NonEmpty(e.Value?.ToString()));
+        await EffortChanged.InvokeAsync(null);
+    }
+
+    private Task ChangeEffort(ChangeEventArgs e) => EffortChanged.InvokeAsync(NonEmpty(e.Value?.ToString()));
+    private static string? NonEmpty(string? value) => string.IsNullOrWhiteSpace(value) ? null : value;
+}

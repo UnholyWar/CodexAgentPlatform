@@ -1,0 +1,59 @@
+@page "/approvals"
+@attribute [Authorize]
+@implements IDisposable
+@inject Operations Operations
+@inject IDbContextFactory<PlatformDb> Dbs
+@inject ChatUpdates Updates
+@inject AuthenticationStateProvider Authentication
+
+<PageTitle>Onaylar · Codex Agent Platform</PageTitle>
+<section class="admin-page">
+    <header class="section-head"><h1>Onaylar</h1><button class="button" @onclick="LoadAsync">Yenile</button></header>
+    @if (error is not null) { <p class="notice error" role="alert">@error</p> }
+    @foreach (var row in rows)
+    {
+        <article class="card fields">
+            <div class="section-head"><h2>@row.Kind</h2><span class="status">@row.Status</span></div>
+            <p class="scope">@row.Scope</p>
+            @if (row.Result is { } result) { <pre>@result</pre> }
+            @if (row.Status == "Pending" && row.ExpiresAtUtc > DateTime.UtcNow)
+            {
+                <small class="muted">Son onay zamanı @row.ExpiresAtUtc.ToString("HH:mm:ss") UTC</small>
+                <div class="actions">
+                    <button class="primary" @onclick="() => DecideAsync(row, true)">@(row.Scope.StartsWith("ÜRETİM") ? "Üretim işlemini onayla" : "Onayla")</button>
+                    <button class="button" @onclick="() => DecideAsync(row, false)">Reddet</button>
+                </div>
+            }
+            @if (row.ConversationId is { } chat) { <a href="/chat/@chat">Sohbeti aç</a> }
+        </article>
+    }
+    @if (rows.Count == 0) { <div class="card empty">Onay talebi yok.</div> }
+</section>
+
+@code {
+    private List<Approval> rows = [];
+    private string? error;
+    protected override async Task OnInitializedAsync() { Updates.Changed += OnUpdate; await LoadAsync(); }
+    private async Task LoadAsync()
+    {
+        await using var db = await Dbs.CreateDbContextAsync();
+        rows = await db.Approvals.AsNoTracking().OrderByDescending(r => r.CreatedAtUtc).Take(60).ToListAsync();
+    }
+    private async Task DecideAsync(Approval approval, bool allow)
+    {
+        error = null;
+        try
+        {
+            var user = (await Authentication.GetAuthenticationStateAsync()).User;
+            await Operations.DecideAsync(approval.Id, allow, user.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? "", default);
+            Updates.Publish(approval.ConversationId ?? "");
+            await LoadAsync();
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or UnauthorizedAccessException) { error = ex.Message; }
+    }
+    private void OnUpdate(string id)
+    {
+        if (id == "") _ = InvokeAsync(async () => { await LoadAsync(); StateHasChanged(); });
+    }
+    public void Dispose() => Updates.Changed -= OnUpdate;
+}

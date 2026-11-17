@@ -1,0 +1,43 @@
+@page "/timeline"
+@attribute [Authorize]
+@inject MemoryStore Memory
+@inject IDbContextFactory<PlatformDb> Dbs
+
+<PageTitle>Zaman çizelgesi · Codex Agent Platform</PageTitle>
+<section class="admin-page">
+    <header class="section-head"><h1>Zaman çizelgesi</h1></header>
+    <form class="filter" @onsubmit="LoadAsync" @onsubmit:preventDefault>
+        <input placeholder="Örn. dün, geçen salı veya iki hafta önce" aria-label="Tarih ifadesi" @bind="query" maxlength="120" />
+        <button class="button">Filtrele</button>
+    </form>
+    @if (error is not null) { <p class="notice error" role="alert">@error</p> }
+    <div class="list">
+        @foreach (var entry in rows)
+        {
+            <div class="list-row"><time>@TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(entry.EventOccurredAtUtc, DateTimeKind.Utc), zone).ToString("dd.MM.yyyy HH:mm")</time>
+                <span><strong>@entry.Kind</strong><small>@TextLimits.Clip(entry.Detail, 180)</small></span>
+                @if (entry.ConversationId is { } chat) { <a href="/chat/@chat">Sohbeti aç</a> }
+            </div>
+        }
+        @if (rows.Count == 0) { <p class="empty">Bu aralıkta olay bulunamadı.</p> }
+    </div>
+</section>
+
+@code {
+    private List<Activity> rows = [];
+    private string? query, error;
+    private TimeZoneInfo zone = TimeZoneInfo.Utc;
+    protected override async Task OnInitializedAsync()
+    {
+        await using var db = await Dbs.CreateDbContextAsync();
+        zone = TimeZoneInfo.FindSystemTimeZoneById(await db.Preferences.Select(x => x.TimeZone).SingleAsync());
+        await LoadAsync();
+    }
+    private async Task LoadAsync()
+    {
+        error = null;
+        var range = string.IsNullOrWhiteSpace(query) ? null : TemporalQuery.Parse(query, DateTime.UtcNow, zone);
+        if (range is null && !string.IsNullOrWhiteSpace(query)) { error = "Tarih ifadesi tanınmadı."; return; }
+        rows = await Memory.TimelineAsync(range, null, null, default);
+    }
+}

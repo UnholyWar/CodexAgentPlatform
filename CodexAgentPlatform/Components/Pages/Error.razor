@@ -1,0 +1,29 @@
+﻿@page "/Error"
+@attribute [ExcludeFromInteractiveRouting]
+
+<PageTitle>İşlem başarısız · Codex Agent Platform</PageTitle>
+
+<section class="admin-page">
+<h1>İşlem başarısız</h1>
+<p>İstek işlenirken bir hata oluştu.</p>
+
+@if (ShowRequestId)
+{
+    <p>
+        <strong>İstek kimliği</strong> <code>@RequestId</code>
+    </p>
+}
+
+<p><a href="/">Sohbete dön</a></p>
+</section>
+
+@code{
+    [CascadingParameter]
+    private HttpContext? HttpContext { get; set; }
+
+    private string? RequestId { get; set; }
+    private bool ShowRequestId => !string.IsNullOrEmpty(RequestId);
+
+    protected override void OnInitialized() =>
+        RequestId = System.Diagnostics.Activity.Current?.Id ?? HttpContext?.TraceIdentifier;
+}

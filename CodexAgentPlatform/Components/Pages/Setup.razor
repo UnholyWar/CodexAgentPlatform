@@ -1,0 +1,37 @@
+@page "/setup"
+@layout AccessLayout
+@attribute [AllowAnonymous]
+@attribute [ExcludeFromInteractiveRouting]
+@inject UserManager<PlatformUser> Users
+@inject NavigationManager Navigation
+@inject IWebHostEnvironment HostEnvironment
+@inject IConfiguration Configuration
+
+<PageTitle>İlk kurulum · Codex Agent Platform</PageTitle>
+<h1>İlk kurulum</h1>
+<p class="muted">Platformu kullanmaya başlamak için yönetici hesabını oluşturun.</p>
+@if (Error is not null)
+{
+    <p class="notice error" role="alert">@(Error == "code" ? "Kurulum kodu geçersiz." : "Kullanıcı adı veya şifre kurallara uymuyor.")</p>
+}
+<form method="post" action="/session/setup" class="fields">
+    <AntiforgeryToken />
+    <label>Kurulum kodu <input name="bootstrap" type="password" autocomplete="off" maxlength="64" required /></label>
+    <small class="muted">@(Local ? "Yerel geliştirme oturumunda geçici şifre admin kullanılabilir." : "Kod, sunucudaki data/credentials/bootstrap-code dosyasındadır.")</small>
+    <label>Yeni kullanıcı adı <input name="username" autocomplete="username" minlength="3" maxlength="64" required /></label>
+    <label>Yeni şifre <input name="password" type="password" autocomplete="new-password" minlength="14" maxlength="128" required /></label>
+    <label>Yeni şifreyi doğrula <input name="confirm" type="password" autocomplete="new-password" minlength="14" maxlength="128" required /></label>
+    <small class="muted">En az 14 karakter, küçük ve büyük harf, rakam ve özel karakter kullanın. Kullanıcı adınız admin olamaz.</small>
+    <button class="primary" type="submit">Yönetici hesabını oluştur</button>
+</form>
+
+@code {
+    [CascadingParameter] private HttpContext? HttpContext { get; set; }
+    [SupplyParameterFromQuery] public string? Error { get; set; }
+    private bool Local => HttpContext is not null && CodexAgentPlatform.Auth.OwnerEndpoints.LocalSetupAllowed(HttpContext, HostEnvironment, Configuration);
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (await Users.FindByIdAsync(PlatformUser.OwnerId) is not null) Navigation.NavigateTo("/login", forceLoad: true);
+    }
+}

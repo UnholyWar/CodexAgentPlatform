@@ -1,0 +1,34 @@
+@page "/work"
+@attribute [Authorize]
+@inject IDbContextFactory<PlatformDb> Dbs
+
+<PageTitle>Çalışmalar · Codex Agent Platform</PageTitle>
+<section class="admin-page">
+    <header class="section-head"><h1>Çalışmalar</h1></header>
+    <div class="list">
+        @foreach (var work in rows)
+        {
+            <details class="work-row">
+                <summary><strong>@work.Title</strong> <span class="status">@work.Status</span> <small>@work.UpdatedAtUtc.ToString("dd.MM.yyyy HH:mm") UTC</small></summary>
+                <div class="details-body">
+                    <p>@work.Description</p>
+                    @if (work.LastStep is not null) { <p><strong>Son adım</strong> @work.LastStep</p> }
+                    @if (work.NextStep is not null) { <p><strong>Sonraki adım</strong> @work.NextStep</p> }
+                    @if (work.Branch is not null) { <p><strong>Branch</strong> <code>@work.Branch</code></p> }
+                    @if (work.Commit is not null) { <p><strong>Commit</strong> <code>@work.Commit</code></p> }
+                    <a href="/chat/@work.ConversationId">İlgili sohbeti aç</a>
+                </div>
+            </details>
+        }
+        @if (rows.Count == 0) { <p class="empty">Çalışma kaydı bulunamadı.</p> }
+    </div>
+</section>
+
+@code {
+    private List<WorkItem> rows = [];
+    protected override async Task OnInitializedAsync()
+    {
+        await using var db = await Dbs.CreateDbContextAsync();
+        rows = await db.Work.AsNoTracking().OrderByDescending(x => x.UpdatedAtUtc).Take(100).ToListAsync();
+    }
+}

@@ -1,0 +1,118 @@
+@page "/memory"
+@attribute [Authorize]
+@inject MemoryStore Store
+@inject IDbContextFactory<PlatformDb> Dbs
+
+<PageTitle>Hafıza · Codex Agent Platform</PageTitle>
+<section class="admin-page">
+    <header class="section-head"><h1>Hafıza</h1><button class="primary" @onclick="NewNote">＋ Not ekle</button></header>
+    <form class="filter" @onsubmit="LoadAsync" @onsubmit:preventDefault>
+        <input placeholder="Başlık, özet veya etiket…" aria-label="Hafıza ara" @bind="query" maxlength="150" />
+        <label class="check"><input type="checkbox" @bind="archived" /> Arşiv dahil</label>
+        <button class="button">Ara</button>
+    </form>
+    @if (error is not null) { <p class="notice error" role="alert">@error</p> }
+    <div class="split-panel">
+        <div class="list">
+            @foreach (var note in rows)
+            {
+                <button class="list-row" @onclick="() => OpenAsync(note)">
+                    <span><strong>@note.Title</strong><small>@note.Summary</small><small>@note.UpdatedAtUtc.ToString("dd.MM.yyyy HH:mm") UTC · @note.Verification</small></span>
+                    <small>@(note.Archived ? "Arşiv" : $"v{note.Version}")</small>
+                </button>
+            }
+            @if (rows.Count == 0) { <p class="empty">Hafıza kaydı bulunamadı.</p> }
+        </div>
+        @if (editing)
+        {
+            <form class="card fields" @onsubmit="SaveAsync" @onsubmit:preventDefault>
+                <h2>@(selected is null ? "Yeni not" : selected.Title)</h2>
+                <label>Başlık <input @bind="title" maxlength="160" required /></label>
+                <label>Özet <input @bind="summary" maxlength="600" /></label>
+                <label>Etiketler <input @bind="tags" maxlength="300" /></label>
+                <label>Doğrulama
+                    <select @bind="verification"><option value="hypothesis">Hipotez</option><option value="inference">Çıkarım</option><option value="verified">Doğrulandı</option></select>
+                </label>
+                @if (selected is null)
+                {
+                    <label>Proje <select @bind="project"><option value="">Genel</option>
+                        @foreach (var p in projects) { <option value="@p.Id">@p.Name</option> }
+                    </select></label>
+                }
+                else
+                {
+                    <p class="muted">@ProjectName(selected.ProjectId) · @selected.CreatedAtUtc.ToString("dd.MM.yyyy") · v@selected.Version</p>
+                }
+                <label>Markdown <textarea class="mono" @bind="body" maxlength="32000" rows="11" required></textarea></label>
+                <div class="actions">
+                    <button class="primary">Kaydet</button>
+                    @if (selected is { Archived: false }) { <button type="button" class="button" @onclick="ArchiveAsync">Arşivle</button> }
+                </div>
+                @if (selected is { Version: > 1 })
+                {
+                    <label>Önceki sürümü düzenleyiciye yükle
+                        <select value="@selected.Version" @onchange="ReadVersionAsync">
+                            @foreach (var v in Enumerable.Range(1, selected.Version).Reverse()) { <option value="@v">v@v</option> }
+                        </select>
+                    </label>
+                }
+                <details><summary>Önizleme</summary><MarkdownBody Text="@body" /></details>
+            </form>
+        }
+    </div>
+</section>
+
+@code {
+    private List<MemoryNote> rows = [];
+    private List<Project> projects = [];
+    private MemoryNote? selected;
+    private string? query, error, project;
+    private string title = "", summary = "", tags = "", verification = "hypothesis", body = "";
+    private bool archived, editing;
+    protected override async Task OnInitializedAsync()
+    {
+        await using var db = await Dbs.CreateDbContextAsync();
+        projects = await db.Projects.AsNoTracking().OrderBy(x => x.Name).ToListAsync();
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync() => rows = await Store.SearchAsync(query, null, null, archived, default);
+    private void NewNote()
+    {
+        selected = null; error = null; project = null; editing = true;
+        title = summary = tags = body = ""; verification = "hypothesis";
+    }
+    private Task OpenAsync(MemoryNote note) => RunAsync(async () =>
+    {
+        body = await Store.ReadAsync(note.Id, null, null, default);
+        selected = note; editing = true;
+        (title, summary, tags, verification, project) = (note.Title, note.Summary, note.Tags, note.Verification, note.ProjectId);
+    });
+    private Task SaveAsync() => RunAsync(async () =>
+    {
+        var saved = await Store.SaveAsync(selected?.Id, new MemoryDraft(title, summary, tags, body, verification, selected?.SourceReferences),
+            selected?.AgentId, string.IsNullOrEmpty(project) ? null : project, selected?.SourceTaskId, null, default,
+            admin: true, expectedVersion: selected?.Version);
+        selected = saved;
+        await LoadAsync();
+    });
+    private Task ArchiveAsync() => RunAsync(async () =>
+    {
+        if (selected is { } note) await Store.ArchiveAsync(note.Id, null, null, null, true, default);
+        editing = false; selected = null;
+        await LoadAsync();
+    });
+    private Task ReadVersionAsync(ChangeEventArgs e) => RunAsync(async () =>
+    {
+        if (selected is { } note && int.TryParse(e.Value?.ToString(), out var number))
+            body = await Store.ReadAsync(note.Id, number, null, default);
+    });
+    private async Task RunAsync(Func<Task> action)
+    {
+        error = null;
+        try { await action(); }
+        catch (Exception ex) when (ex is InvalidOperationException or IOException or DbUpdateException)
+        { error = ex is InvalidOperationException ? ex.Message : "Hafıza kaydı okunamadı veya yazılamadı."; }
+    }
+    private string ProjectName(string? id) => projects.Find(p => p.Id == id)?.Name ?? "Genel";
+}

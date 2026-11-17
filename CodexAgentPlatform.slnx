@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="CodexAgentPlatform.Application/CodexAgentPlatform.Application.csproj" />
+  <Project Path="CodexAgentPlatform.Infrastructure/CodexAgentPlatform.Infrastructure.csproj" />
+  <Project Path="CodexAgentPlatform.Tests/CodexAgentPlatform.Tests.csproj" />
+  <Project Path="CodexAgentPlatform/CodexAgentPlatform.csproj" />
+</Solution>

@@ -1,0 +1,30 @@
+services:
+  platform:
+    build:
+      context: .
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 45s
+    ports:
+      - "127.0.0.1:8443:8443"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_URLS: https://+:8443
+      ASPNETCORE_Kestrel__Certificates__Default__Path: /run/secrets/platform_tls
+      ASPNETCORE_Kestrel__Certificates__Default__Password: ${PLATFORM_TLS_PASSWORD:?Set PLATFORM_TLS_PASSWORD}
+      Platform__VaultKeyFile: /run/secrets/vault_key
+      Platform__LocalCodexLogin: "true"
+    volumes:
+      - platform-data:/data
+      - platform-workspaces:/workspaces
+    secrets:
+      - platform_tls
+      - vault_key
+secrets:
+  platform_tls:
+    file: ./secrets/platform.pfx
+  vault_key:
+    file: ./secrets/vault.key
+volumes:
+  platform-data:
+  platform-workspaces:

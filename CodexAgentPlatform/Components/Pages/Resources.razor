@@ -1,0 +1,132 @@
+@page "/resources"
+@attribute [Authorize]
+@inject IDbContextFactory<PlatformDb> Dbs
+@inject Vault Vault
+
+<PageTitle>Kaynaklar · Codex Agent Platform</PageTitle>
+<section class="admin-page">
+    <header class="section-head"><h1>Kaynaklar</h1><button class="primary" @onclick="NewResource">＋ Kaynak ekle</button></header>
+    @if (error is not null) { <p class="notice error" role="alert">@error</p> }
+    <div class="split-panel">
+        <div class="list">
+            @foreach (var item in rows)
+            {
+                <button class="list-row" @onclick="() => Edit(item.Id)"><span class="avatar" aria-hidden="true">⊞</span>
+                    <span><strong>@item.Name</strong><small>@item.Kind · @item.Address</small></span></button>
+            }
+            @if (rows.Count == 0) { <p class="empty">Henüz kaynak eklenmedi.</p> }
+        </div>
+        @if (selected is not null)
+        {
+            <form class="card fields" @onsubmit="SaveAsync" @onsubmit:preventDefault>
+                <label>Kaynak adı <input @bind="selected.Name" maxlength="100" required /></label>
+                <label>Tür <select @bind="selected.Kind">@foreach (var kind in Enum.GetValues<ResourceKind>()) { <option value="@kind">@kind</option> }</select></label>
+                <label>Proje
+                    <select @bind="selected.ProjectId">
+                        <option value="">Proje seçin</option>
+                        @foreach (var project in projects) { <option value="@project.Id">@project.Name</option> }
+                    </select>
+                </label>
+                <label>@(selected.Kind switch { ResourceKind.SshServer => "Hostname veya IP", ResourceKind.DeploymentTarget => "Docker Swarm servis adı", _ => "Adres" })
+                    <input @bind="selected.Address" maxlength="1024" required /></label>
+                @if (selected.Kind is ResourceKind.SshServer or ResourceKind.GitRepository)
+                {
+                    <label>Kullanıcı adı <input @bind="selected.Username" maxlength="120" /></label>
+                }
+                @if (selected.Kind == ResourceKind.SshServer)
+                {
+                    <label>Port <input type="number" @bind="selected.Port" min="1" max="65535" /></label>
+                    <label>Host key fingerprint <input @bind="selected.HostFingerprint" placeholder="SHA256:..." maxlength="64" required /></label>
+                    <label>İsteğe bağlı SFTP metin dosyası <input @bind="selected.SftpFile" placeholder="/srv/reports/status.txt" maxlength="512" /></label>
+                }
+                @if (selected.Kind == ResourceKind.DeploymentTarget)
+                {
+                    <label>SSH sunucusu
+                        <select @bind="selected.SshServerId" required>
+                            <option value="">Seçin</option>
+                            @foreach (var host in rows.Where(x => x.Kind == ResourceKind.SshServer))
+                            { <option value="@host.Id">@host.Name</option> }
+                        </select>
+                    </label>
+                }
+                @if (selected.Kind != ResourceKind.DeploymentTarget && Vault.Configured)
+                {
+                    <label>Yeni Vault değeri
+                        <textarea @bind="credential" rows="3" autocomplete="off" maxlength="65536"></textarea>
+                    </label>
+                    <small class="muted">@(selected.VaultId is null ? "Bu kaynak için Vault değeri yok." : "Vault değeri kayıtlı. Alanı boş bırakırsanız korunur.")</small>
+                }
+                else if (selected.Kind != ResourceKind.DeploymentTarget) { <small class="muted">Vault anahtar dosyası yapılandırılmadı.</small> }
+                <label class="check"><input type="checkbox" @bind="selected.Production" /> Üretim kaynağı</label>
+                <div><button class="primary" type="submit">Kaydet</button></div>
+            </form>
+        }
+    </div>
+</section>
+
+@code {
+    private List<Resource> rows = [];
+    private List<Project> projects = [];
+    private Resource? selected;
+    private string? credential, error;
+    protected override Task OnInitializedAsync() => LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        await using var db = await Dbs.CreateDbContextAsync();
+        rows = await db.Resources.AsNoTracking().OrderBy(x => x.Name).ToListAsync();
+        projects = await db.Projects.AsNoTracking().OrderBy(x => x.Name).ToListAsync();
+    }
+
+    private void NewResource() { selected = new(); credential = null; error = null; }
+    private async Task Edit(string id)
+    {
+        credential = null; error = null;
+        await using var db = await Dbs.CreateDbContextAsync();
+        selected = await db.Resources.AsNoTracking().SingleAsync(x => x.Id == id);
+    }
+
+    private async Task SaveAsync()
+    {
+        if (selected is not { } item) return;
+        error = null;
+        try
+        {
+            item.Name = item.Name.Trim();
+            item.Address = item.Address.Trim();
+            if (item.Name.Length is 0 or > 100 || item.Address.Length is 0 or > 1024)
+                throw new ArgumentException("Kaynak adı veya adres geçersiz.");
+            await using var db = await Dbs.CreateDbContextAsync();
+            if (!await db.Projects.AnyAsync(x => x.Id == item.ProjectId))
+                throw new ArgumentException("Kaynağı var olan bir projeye bağlayın.");
+            var existing = await db.Resources.SingleOrDefaultAsync(x => x.Id == item.Id);
+            if (item.Kind == ResourceKind.GitRepository) _ = Operations.GitAddress(item);
+            if (item.Kind == ResourceKind.SshServer &&
+                (Uri.CheckHostName(item.Address) == UriHostNameType.Unknown || item.Port is < 1 or > 65535 ||
+                 string.IsNullOrWhiteSpace(item.Username) || !System.Text.RegularExpressions.Regex.IsMatch(item.HostFingerprint ?? "", @"^SHA256:[a-zA-Z0-9+/]{43}=?$")))
+                throw new ArgumentException("SSH için geçerli sunucu, port, kullanıcı ve SHA256 host key gerekli.");
+            if (item.Kind == ResourceKind.DeploymentTarget &&
+                (!System.Text.RegularExpressions.Regex.IsMatch(item.Address, @"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,100}\z") ||
+                 !await db.Resources.AnyAsync(x => x.Id == item.SshServerId && x.Kind == ResourceKind.SshServer && x.ProjectId == item.ProjectId)))
+                throw new ArgumentException("Dağıtım için geçerli bir Swarm servis adı ve aynı projede kayıtlı SSH sunucusu gerekli.");
+            if (item.Kind == ResourceKind.SshServer)
+                item.SftpFile = string.IsNullOrWhiteSpace(item.SftpFile) ? null : item.SftpFile.Trim();
+            else item.SftpFile = null;
+            if (item.Kind != ResourceKind.DeploymentTarget) item.SshServerId = null;
+            if (Uri.TryCreate(item.Address, UriKind.Absolute, out var address) && address.UserInfo.Length > 0)
+                throw new ArgumentException("Adreste erişim bilgisi kullanmayın.");
+            if (existing is not null && (existing.Address != item.Address || existing.Kind != item.Kind ||
+                existing.ProjectId != item.ProjectId || existing.Username != item.Username || existing.Port != item.Port ||
+                existing.HostFingerprint != item.HostFingerprint))
+                item.VaultId = null;
+            if (!string.IsNullOrWhiteSpace(credential)) item.VaultId = await Vault.StoreAsync(credential, default);
+            if (existing is null) db.Resources.Add(item); else db.Entry(existing).CurrentValues.SetValues(item);
+            db.Events.Add(new Activity { ProjectId = item.ProjectId, Kind = "ResourceSaved", Detail = item.Name });
+            await db.SaveChangesAsync();
+            selected = null; credential = null;
+            await LoadAsync();
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or IOException or System.Security.Cryptography.CryptographicException)
+        { error = ex is ArgumentException or InvalidOperationException ? ex.Message : "Kaynak veya Vault kaydı yazılamadı."; }
+    }
+}

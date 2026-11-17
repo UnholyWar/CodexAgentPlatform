@@ -1,0 +1,448 @@
+using System.Collections.Concurrent;
+using System.Text.Json;
+using System.Threading.Channels;
+using CodexAgentPlatform.Application;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+
+namespace CodexAgentPlatform.Infrastructure;
+
+public sealed class ChatWorker(IDbContextFactory<PlatformDb> dbs, ICodexConnection codex, AgentTools tools,
+    ContextBudget context, PlatformPaths paths, Operations operations, ChatUpdates updates, ILogger<ChatWorker> log,
+    int concurrency = 2) : BackgroundService
+{
+    private sealed class Running(ChatRun run, CancellationTokenSource cancel)
+    {
+        public ChatRun Run { get; } = run;
+        public CancellationTokenSource Cancel { get; } = cancel;
+        public Channel<CodexEvent> Inbox { get; } = Channel.CreateUnbounded<CodexEvent>(new UnboundedChannelOptions
+        {
+            SingleReader = true, AllowSynchronousContinuations = false
+        });
+        public string? RoutedThread { get; set; }
+        public volatile bool Pause;
+    }
+
+    private readonly ConcurrentDictionary<string, Running> active = new();
+    private readonly ConcurrentDictionary<string, Running> routes = new();
+
+    public async Task PauseAsync(string conversation, CancellationToken ct)
+    {
+        await using var db = await dbs.CreateDbContextAsync(ct);
+        var pending = await db.Runs.Where(x => x.ConversationId == conversation && x.Status == WorkStatus.Pending)
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, WorkStatus.Paused)
+                .SetProperty(x => x.UpdatedAtUtc, DateTime.UtcNow), ct);
+        if (pending == 0 && active.Values.FirstOrDefault(x => x.Run.ConversationId == conversation) is { } running)
+        {
+            running.Pause = true;
+            await running.Cancel.CancelAsync();
+        }
+        updates.Publish(conversation);
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        var processing = new List<Task>();
+        var approvalWorker = ProcessApprovalsAsync(stoppingToken);
+        codex.Received += Route;
+        try
+        {
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                foreach (var done in processing.Where(x => x.IsCompleted).ToArray())
+                {
+                    await done;
+                    processing.Remove(done);
+                }
+                try
+                {
+                    while (processing.Count < Math.Clamp(concurrency, 1, 4) && await ClaimAsync(stoppingToken) is { } run)
+                    {
+                        var running = new Running(run, CancellationTokenSource.CreateLinkedTokenSource(stoppingToken));
+                        running.Cancel.CancelAfter(TimeSpan.FromMinutes(25));
+                        active[run.Id] = running;
+                        processing.Add(ProcessAsync(running, stoppingToken));
+                        updates.Publish(run.ConversationId);
+                    }
+                }
+                catch (Exception ex) when (!stoppingToken.IsCancellationRequested)
+                {
+                    log.LogError(ex, "Chat queue could not claim a run.");
+                }
+                await Task.Delay(350, stoppingToken);
+            }
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
+        finally
+        {
+            try { await Task.WhenAll(processing.Append(approvalWorker)); }
+            finally { codex.Received -= Route; }
+        }
+    }
+
+    private async Task ProcessApprovalsAsync(CancellationToken ct)
+    {
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                try
+                {
+                    if (await operations.ExecuteNextAsync(ct))
+                    {
+                        updates.Publish("");
+                        continue;
+                    }
+                }
+                catch (Exception ex) when (!ct.IsCancellationRequested)
+                {
+                    log.LogError(ex, "Approval queue could not execute an operation.");
+                }
+                await Task.Delay(900, ct);
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+    }
+
+    private async Task<ChatRun?> ClaimAsync(CancellationToken ct)
+    {
+        await using var db = await dbs.CreateDbContextAsync(ct);
+        var occupied = active.Values.Select(x => x.Run.Workspace!).ToArray();
+        var run = await db.Runs.AsNoTracking().Where(x => x.Status == WorkStatus.Pending &&
+            x.Workspace != null && !Enumerable.Contains(occupied, x.Workspace)).OrderBy(x => x.CreatedAtUtc).FirstOrDefaultAsync(ct);
+        if (run is null) return null;
+        var now = DateTime.UtcNow;
+        var claimed = await db.Runs.Where(x => x.Id == run.Id && x.Status == WorkStatus.Pending)
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, WorkStatus.Running).SetProperty(x => x.UpdatedAtUtc, now), ct);
+        if (claimed != 1) return null;
+        run.Status = WorkStatus.Running;
+        return run;
+    }
+
+    private void Route(CodexEvent item)
+    {
+        if (item.Method == "transport/closed")
+        {
+            foreach (var running in routes.Values) running.Inbox.Writer.TryComplete(new IOException("Codex App Server bağlantısı kapandı."));
+            return;
+        }
+        var thread = item.Parameters.String("threadId");
+        if (thread is not null && routes.TryGetValue(thread, out var target) && target.Inbox.Writer.TryWrite(item)) return;
+        if (item.RequestId is { } id) _ = RejectUnroutedAsync(id, item.Method);
+    }
+
+    private async Task RejectUnroutedAsync(JsonElement id, string method)
+    {
+        try
+        {
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            if (method == "currentTime/read")
+                await codex.ReplyAsync(id, new { timestamp = DateTime.UtcNow.ToString("O") }, deadline.Token);
+            else
+                await codex.RejectAsync(id, "No active authorized platform operation.", deadline.Token);
+        }
+        catch (Exception ex) { log.LogDebug("Could not reply to unmapped request ({Type}).", ex.GetType().Name); }
+    }
+
+    private async Task ProcessAsync(Running running, CancellationToken stoppingToken)
+    {
+        var run = running.Run;
+        var ct = running.Cancel.Token;
+        var text = new Dictionary<string, string>();
+        JsonElement lastUsage = default;
+        Delegation? delegateRequest = null;
+        var finished = false;
+        WorkStatus status;
+        string? failure = null;
+        try
+        {
+            await using var db = await dbs.CreateDbContextAsync(ct);
+            var agent = await db.Agents.AsNoTracking().SingleAsync(x => x.Id == run.AgentId, ct);
+            if (!ToolAccess.AllowsProject(agent, run.ProjectId))
+                throw new UnauthorizedAccessException("Ajan veya proje erişimi kapatıldı.");
+            var workspace = paths.Workspace(run.Workspace!);
+            var canUseWorkspace = ToolAccess.Has(agent, "workspace");
+            var workspaceReady = canUseWorkspace && (!OperatingSystem.IsWindows() ||
+                (await codex.CallAsync("windowsSandbox/readiness", null, ct)).String("status") == "ready");
+            var permission = workspaceReady ? "platform_work" : "platform_chat";
+            var workspaceKey = workspaceReady ? run.Workspace! : run.Workspace + ":chat";
+            var stored = await db.Threads.SingleOrDefaultAsync(x => x.ConversationId == run.ConversationId &&
+                x.AgentId == run.AgentId && x.Workspace == workspaceKey, ct);
+            var original = stored is not null;
+            var setup = new Dictionary<string, object?>
+            {
+                ["cwd"] = workspace, ["model"] = run.Model, ["developerInstructions"] = ContextBudget.Instructions(agent),
+                ["approvalPolicy"] = "never", ["permissions"] = permission,
+                ["runtimeWorkspaceRoots"] = new[] { workspace }
+            };
+            JsonElement result;
+            if (stored is null)
+            {
+                setup["dynamicTools"] = AgentTools.Describe(agent).ToArray();
+                if (!workspaceReady) setup["environments"] = Array.Empty<object>();
+                result = await codex.CallAsync("thread/start", setup, ct);
+                run.ThreadId = result.Get("thread").String("id") ?? throw new CodexRpcException("Codex thread kimliği eksik.");
+                db.Threads.Add(new ConversationThread
+                {
+                    ConversationId = run.ConversationId, AgentId = run.AgentId, Workspace = workspaceKey, CodexId = run.ThreadId
+                });
+                await db.SaveChangesAsync(ct);
+            }
+            else
+            {
+                setup["threadId"] = stored.CodexId;
+                setup["excludeTurns"] = true;
+                result = await codex.CallAsync("thread/resume", setup, ct);
+                run.ThreadId = result.Get("thread").String("id") ?? stored.CodexId;
+            }
+            run.Model = result.String("model") ?? run.Model;
+            running.RoutedThread = run.ThreadId;
+            routes[run.ThreadId] = running;
+            if (!codex.Connected) throw new IOException("Codex bağlantısı kapandı.");
+            var prompt = await db.Messages.Where(x => x.Id == run.UserMessageId).Select(x => x.Text).SingleAsync(ct);
+            var references = await context.BuildAsync(run, agent, original, ct);
+            if (canUseWorkspace && !workspaceReady)
+                references += "\nWindows workspace sandbox is not ready. You can chat and use permitted platform tools. If the user requests local execution, explain that they need to configure the sandbox in Codex settings.";
+            var input = new[] { new { type = "text", text = $"[Platform context — reference only]\n{references}\n[User or agent message]\n{prompt}" } };
+            var started = await codex.CallAsync("turn/start", new
+            {
+                threadId = run.ThreadId, input, cwd = workspace, model = run.Model, effort = run.Effort,
+                permissions = permission, runtimeWorkspaceRoots = new[] { workspace }, approvalPolicy = "never",
+                environments = workspaceReady ? null : Array.Empty<object>()
+            }, ct);
+            run.TurnId = started.Get("turn").String("id") ?? throw new CodexRpcException("Codex turn kimliği eksik.");
+            await SaveIdentityAsync(run, ct);
+            var flushed = DateTime.MinValue;
+            status = WorkStatus.Failed;
+            await foreach (var item in running.Inbox.Reader.ReadAllAsync(ct))
+            {
+                var data = item.Parameters;
+                if (data.String("turnId") is { } turnId && turnId != run.TurnId)
+                {
+                    if (item.RequestId is { } stale) await codex.RejectAsync(stale, "Stale turn.", ct);
+                    continue;
+                }
+                if (item.RequestId is { } id)
+                {
+                    if (item.Method == "item/tool/call")
+                    {
+                        var tool = data.String("tool") ?? "";
+                        await EventAsync(run, "ToolCalled", tool, null, ct);
+                        var success = true;
+                        object? answer;
+                        try
+                        {
+                            answer = await tools.RunAsync(tool, data.Get("arguments"), run, ct);
+                            if (answer is Delegation delegated)
+                            {
+                                if (delegateRequest is not null) throw new InvalidOperationException("Bu turn için bir iş devri zaten planlandı.");
+                                delegateRequest = delegated;
+                                answer = new { queued = delegated.AgentId };
+                            }
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            success = false;
+                            answer = new { error = ex is InvalidOperationException or ArgumentException or UnauthorizedAccessException
+                                ? TextLimits.Clip(ex.Message, 500) : "Araç işlemi başarısız." };
+                        }
+                        var serialized = TextLimits.Clip(JsonSerializer.Serialize(answer), 20_000);
+                        await codex.ReplyAsync(id, new { success, contentItems = new[] { new { type = "inputText", text = serialized } } }, ct);
+                        if (tool is "git_request_push" or "ssh_request_operation" && success)
+                            await SetRunStatusAsync(run, WorkStatus.WaitingForApproval, ct);
+                        updates.Publish(run.ConversationId);
+                    }
+                    else if (item.Method is "item/commandExecution/requestApproval" or "item/fileChange/requestApproval")
+                    {
+                        await codex.ReplyAsync(id, new { decision = "decline" }, ct);
+                        await EventAsync(run, "SandboxApprovalDeclined", "Sandbox dışında işlem reddedildi.", null, ct);
+                    }
+                    else await codex.RejectAsync(id, "Request is outside the approved platform tool scope.", ct);
+                    continue;
+                }
+
+                var component = data.Get("item");
+                var key = data.String("itemId") ?? component.String("id") ?? "";
+                switch (item.Method)
+                {
+                    case "item/agentMessage/delta":
+                        text[key] = TextLimits.Clip(text.GetValueOrDefault(key) + data.String("delta"), 120_000);
+                        if (DateTime.UtcNow - flushed > TimeSpan.FromMilliseconds(250))
+                        {
+                            await SaveAnswerAsync(run, Answer(text), ct);
+                            flushed = DateTime.UtcNow;
+                        }
+                        break;
+                    case "item/completed":
+                        var type = component.String("type");
+                        if (type == "agentMessage")
+                        {
+                            text[key] = TextLimits.Clip(component.String("text"), 120_000);
+                            await SaveAnswerAsync(run, Answer(text), ct);
+                        }
+                        else if (type is "commandExecution" or "fileChange" or "webSearch")
+                        {
+                            var output = component.String("aggregatedOutput");
+                            var changes = component.Get("changes");
+                            var detail = component.String("command") ?? component.String("query") ??
+                                (changes.ValueKind == JsonValueKind.Undefined ? "" : changes.GetRawText());
+                            await EventAsync(run, type, TextLimits.Clip(detail, 2000), output, ct);
+                        }
+                        break;
+                    case "turn/diff/updated":
+                        await EventAsync(run, "Diff", "Çalışma alanı değişiklikleri", data.String("diff"), ct);
+                        break;
+                    case "thread/tokenUsage/updated":
+                        lastUsage = data.Get("tokenUsage").Get("total");
+                        break;
+                    case "turn/completed":
+                        var final = data.Get("turn");
+                        if (final.String("id") != run.TurnId) break;
+                        status = final.String("status") switch
+                        {
+                            "completed" => WorkStatus.Completed, "interrupted" => WorkStatus.Interrupted, _ => WorkStatus.Failed
+                        };
+                        failure = final.Get("error").String("message");
+                        finished = true;
+                        break;
+                }
+                if (finished) break;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            status = running.Pause ? WorkStatus.Paused : WorkStatus.Interrupted;
+            failure = running.Pause ? "Çalışma duraklatıldı." : stoppingToken.IsCancellationRequested ?
+                "Uygulama kapatıldı." : "Çalışma zaman sınırına ulaştı.";
+        }
+        catch (Exception ex)
+        {
+            status = ex is IOException or ChannelClosedException ? WorkStatus.Interrupted : WorkStatus.Failed;
+            failure = ex is CodexRpcException or TimeoutException or UnauthorizedAccessException
+                ? TextLimits.Clip(ex.Message, 500) : "Codex işlemi kesildi. Codex ayarlarından bağlantıyı kontrol edin.";
+            log.LogWarning("Run {Run} ended with {Type}.", run.Id, ex.GetType().Name);
+        }
+        finally
+        {
+            if (!finished && run.ThreadId is { } threadId && run.TurnId is { } turnId && codex.Connected)
+            {
+                try
+                {
+                    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                    await codex.CallAsync("turn/interrupt", new { threadId, turnId }, timeout.Token);
+                }
+                catch (Exception ex) { log.LogDebug("Turn interrupt failed ({Type}).", ex.GetType().Name); }
+            }
+            if (running.RoutedThread is { } routed) routes.TryRemove(routed, out _);
+        }
+
+        try
+        {
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            await FinishAsync(run, status, failure, Answer(text), lastUsage, status == WorkStatus.Completed ? delegateRequest : null, deadline.Token);
+        }
+        catch (Exception ex) { log.LogError(ex, "Could not finalize run {Run}.", run.Id); }
+        finally
+        {
+            active.TryRemove(run.Id, out _);
+            running.Cancel.Dispose();
+            updates.Publish(run.ConversationId);
+        }
+    }
+
+    private async Task SaveIdentityAsync(ChatRun run, CancellationToken ct)
+    {
+        await using var db = await dbs.CreateDbContextAsync(ct);
+        await db.Runs.Where(x => x.Id == run.Id).ExecuteUpdateAsync(s => s.SetProperty(x => x.ThreadId, run.ThreadId)
+            .SetProperty(x => x.TurnId, run.TurnId).SetProperty(x => x.Model, run.Model), ct);
+        await db.Agents.Where(x => x.Id == run.AgentId).ExecuteUpdateAsync(s => s.SetProperty(x => x.LastActivityUtc, DateTime.UtcNow), ct);
+    }
+
+    private async Task SetRunStatusAsync(ChatRun run, WorkStatus status, CancellationToken ct)
+    {
+        await using var db = await dbs.CreateDbContextAsync(ct);
+        await db.Runs.Where(x => x.Id == run.Id).ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, status), ct);
+    }
+
+    private async Task SaveAnswerAsync(ChatRun run, string answer, CancellationToken ct)
+    {
+        await using var db = await dbs.CreateDbContextAsync(ct);
+        await db.Messages.Where(x => x.Id == run.AssistantMessageId)
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.Text, answer), ct);
+        updates.Publish(run.ConversationId);
+    }
+
+    private async Task EventAsync(ChatRun run, string kind, string details, string? output, CancellationToken ct)
+    {
+        string? artifact = null;
+        if (!string.IsNullOrWhiteSpace(output))
+        {
+            artifact = $"{Guid.NewGuid():N}.txt";
+            await File.WriteAllTextAsync(Path.Combine(paths.Data, "logs", artifact), TextLimits.Clip(output, 500_000), ct);
+            details += "\n" + TextLimits.Clip(output, 6000);
+        }
+        await using var db = await dbs.CreateDbContextAsync(ct);
+        db.Events.Add(new Activity { ConversationId = run.ConversationId, AgentId = run.AgentId, WorkId = run.WorkId,
+            ProjectId = run.ProjectId, Kind = kind, Detail = details, Artifact = artifact });
+        await db.SaveChangesAsync(ct);
+        updates.Publish(run.ConversationId);
+    }
+
+    private async Task FinishAsync(ChatRun run, WorkStatus status, string? error, string answer, JsonElement usage,
+        Delegation? delegation, CancellationToken ct)
+    {
+        await using var db = await dbs.CreateDbContextAsync(ct);
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        var row = await db.Runs.SingleAsync(x => x.Id == run.Id, ct);
+        row.Status = status;
+        row.UpdatedAtUtc = DateTime.UtcNow;
+        row.Error = TextLimits.Clip(error, 500);
+        var msg = await db.Messages.SingleAsync(x => x.Id == run.AssistantMessageId, ct);
+        if (!string.IsNullOrEmpty(answer)) msg.Text = answer;
+        var work = run.WorkId is null ? null : await db.Work.SingleOrDefaultAsync(x => x.Id == run.WorkId, ct);
+        if (work?.Status == WorkStatus.Running)
+        {
+            var pending = await db.Approvals.AnyAsync(x => x.ConversationId == run.ConversationId && x.Status == "Pending", ct);
+            work.Status = status == WorkStatus.Completed ? pending ? WorkStatus.WaitingForApproval : WorkStatus.WaitingForUser : status;
+            work.UpdatedAtUtc = DateTime.UtcNow;
+        }
+        if (usage.ValueKind == JsonValueKind.Object && run.ThreadId is { } thread && run.TurnId is { } turn &&
+            !await db.Usage.AnyAsync(x => x.ThreadId == thread && x.TurnId == turn, ct))
+        {
+            var prior = await db.Usage.Where(x => x.ThreadId == thread).GroupBy(x => x.ThreadId)
+                .Select(g => new { Input = g.Sum(x => x.Input), Output = g.Sum(x => x.Output),
+                    Cached = g.Sum(x => x.Cached), Total = g.Sum(x => x.Total) }).FirstOrDefaultAsync(ct);
+            db.Usage.Add(new TokenUsage { ThreadId = thread, TurnId = turn, AgentId = run.AgentId,
+                ConversationId = run.ConversationId, WorkId = run.WorkId, Model = run.Model,
+                Input = Math.Max(0, usage.Number("inputTokens") - (prior?.Input ?? 0)),
+                Output = Math.Max(0, usage.Number("outputTokens") - (prior?.Output ?? 0)),
+                Cached = Math.Max(0, usage.Number("cachedInputTokens") - (prior?.Cached ?? 0)),
+                Total = Math.Max(0, usage.Number("totalTokens") - (prior?.Total ?? 0))
+            });
+        }
+        db.Events.Add(new Activity { ConversationId = run.ConversationId, AgentId = run.AgentId, WorkId = run.WorkId,
+            ProjectId = run.ProjectId, Kind = $"Turn{status}", Detail = error ?? "" });
+        await db.SaveChangesAsync(ct);
+        if (delegation is not null)
+        {
+            var agent = await db.Agents.AsNoTracking().SingleOrDefaultAsync(x => x.Id == delegation.AgentId, ct);
+            if (agent is not null && ToolAccess.AllowsProject(agent, run.ProjectId))
+            {
+                var settings = await db.Preferences.AsNoTracking().SingleAsync(ct);
+                var brief = new Message { ConversationId = run.ConversationId, Role = "agent", AgentId = run.AgentId, Text = delegation.Brief };
+                var response = new Message { ConversationId = run.ConversationId, Role = "assistant", AgentId = agent.Id };
+                db.Messages.AddRange(brief, response);
+                await db.SaveChangesAsync(ct);
+                db.Runs.Add(new ChatRun { AgentId = agent.Id, ConversationId = run.ConversationId, ProjectId = run.ProjectId,
+                    Workspace = Guid.NewGuid().ToString("N"), DelegationDepth = 1, UserMessageId = brief.Id, AssistantMessageId = response.Id,
+                    Model = agent.Model ?? settings.Model, Effort = agent.Effort ?? (agent.Model is null ? settings.Effort : null) });
+                await db.SaveChangesAsync(ct);
+            }
+        }
+        await tx.CommitAsync(ct);
+        if (work is not null) await WorkspaceMemory.WriteWorkAsync(paths, work, ct);
+    }
+
+    private static string Answer(Dictionary<string, string> text) => TextLimits.Clip(string.Join("\n\n", text.Values), 180_000);
+}

@@ -1,0 +1,11 @@
+.vs/
+**/bin/
+**/obj/
+data/
+workspaces/
+codex-data/
+codex-workspaces/
+secrets/
+*.user
+*.pfx
+TestResults/

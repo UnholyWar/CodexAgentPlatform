@@ -1,0 +1,44 @@
+@inherits LayoutComponentBase
+
+<AuthorizeView>
+    <Authorized Context="session">
+        <div class="platform">
+            <aside class="rail">
+                <a class="brand" href="/"><span class="brand-mark" aria-hidden="true">C</span><span>Codex Agent<br />Platform</span></a>
+                <nav aria-label="Çalışma alanı">
+                    <NavLink class="nav-item" href="/" Match="NavLinkMatch.All"><span aria-hidden="true">◫</span>Sohbet</NavLink>
+                    <NavLink class="nav-item" href="/conversations"><span aria-hidden="true">▤</span>Sohbet geçmişi</NavLink>
+                    <NavLink class="nav-item" href="/agents"><span aria-hidden="true">◎</span>Ajanlar</NavLink>
+                    <NavLink class="nav-item" href="/work"><span aria-hidden="true">□</span>Çalışmalar</NavLink>
+                    <NavLink class="nav-item" href="/memory"><span aria-hidden="true">◇</span>Hafıza</NavLink>
+                    <NavLink class="nav-item" href="/timeline"><span aria-hidden="true">◷</span>Zaman çizelgesi</NavLink>
+                    <hr />
+                    <NavLink class="nav-item" href="/projects"><span aria-hidden="true">▱</span>Projeler</NavLink>
+                    <NavLink class="nav-item" href="/resources"><span aria-hidden="true">⊞</span>Kaynaklar</NavLink>
+                    <NavLink class="nav-item" href="/approvals"><span aria-hidden="true">✓</span>Onaylar</NavLink>
+                    <NavLink class="nav-item" href="/codex"><span aria-hidden="true">⌘</span>Codex ayarları</NavLink>
+                    <NavLink class="nav-item" href="/system"><span aria-hidden="true">⚙</span>Sistem</NavLink>
+                </nav>
+                <div class="rail-footer">
+                    <span class="avatar avatar-small" aria-hidden="true">@Initial(session.User.Identity?.Name)</span>
+                    <span class="owner-name">@session.User.Identity?.Name</span>
+                    <form action="/session/logout" method="post">
+                        <AntiforgeryToken />
+                        <button type="submit" class="icon-button" title="Çıkış yap" aria-label="Çıkış yap">↪</button>
+                    </form>
+                </div>
+            </aside>
+            <main class="main-pane">@Body</main>
+        </div>
+    </Authorized>
+    <NotAuthorized>
+        <main class="access-shell">@Body</main>
+    </NotAuthorized>
+</AuthorizeView>
+<div id="blazor-error-ui" data-nosnippet>
+    Bağlantıda bir hata oluştu. <a href="" class="reload">Yenile</a><button class="dismiss" aria-label="Kapat">×</button>
+</div>
+
+@code {
+    private static string Initial(string? name) => string.IsNullOrWhiteSpace(name) ? "Y" : name[..1].ToUpperInvariant();
+}

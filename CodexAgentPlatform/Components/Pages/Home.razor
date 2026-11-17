@@ -1,0 +1,227 @@
+@page "/"
+@page "/chat/{Id}"
+@attribute [Authorize]
+@implements IDisposable
+@inject ChatStore Chats
+@inject ChatUpdates Updates
+@inject ChatWorker Worker
+@inject IDbContextFactory<PlatformDb> Dbs
+@inject NavigationManager Navigation
+@inject IJSRuntime JS
+
+<PageTitle>Sohbet · Codex Agent Platform</PageTitle>
+<section class="chat-shell">
+    <header class="page-bar">
+        <div class="page-heading"><h1>@Title</h1></div>
+        <div class="actions">
+            @if (snapshot.Run is { } run && ChatStore.Active.Contains(run.Status))
+            {
+                <button class="button" @onclick="PauseAsync">Durdur</button>
+            }
+            @if (Id is not null) { <a class="button" href="/">＋ Yeni sohbet</a> }
+        </div>
+    </header>
+    <div class="chat-scroll" id="chat-scroll">
+        @if (snapshot.Messages.Count == 0)
+        {
+            <div class="empty-chat">
+                <div class="empty-mark" aria-hidden="true">⌘</div>
+                <h2>Bugün ne üzerinde çalışıyoruz?</h2>
+                <p>Bir soru sorun veya üzerinde çalışılacak işi anlatın.</p>
+                <div class="prompt-row">
+                    <button @onclick='() => draft = "Developer, Python ile küçük bir hesap makinesi yaz ve test et."'>Kod yaz</button>
+                    <button @onclick='() => draft = "Architect, dün hangi konular üzerinde çalıştık?"'>Geçmişi hatırla</button>
+                    <button @onclick='() => draft = "QA, bu proje için bir regresyon test planı hazırla."'>Test planla</button>
+                </div>
+            </div>
+        }
+        else
+        {
+            <div class="transcript">
+                @if (snapshot.Messages.Count >= limit && limit < 500)
+                {
+                    <button class="button older" @onclick="LoadOlderAsync">Önceki mesajları göster</button>
+                }
+                @foreach (var message in snapshot.Messages)
+                {
+                    <article class="message @message.Role" @key="message.Id">
+                        <div class="avatar" aria-hidden="true">@(message.Role == "user" ? "S" : "C")</div>
+                        <div class="message-main">
+                            <div class="message-meta">
+                                <strong>@(message.Role == "user" ? "Siz" : AgentName(message.AgentId))</strong>
+                                <time datetime="@message.CreatedAtUtc.ToString("O")">@LocalTime(message.CreatedAtUtc)</time>
+                            </div>
+                            @if (message.Text.Length == 0)
+                            {
+                                @if (snapshot.Run?.AssistantMessageId == message.Id && IsActive)
+                                {
+                                    <div class="thinking"><span></span> Yanıt hazırlanıyor</div>
+                                }
+                            }
+                            else if (message.Role == "user") { <div class="user-text">@message.Text</div> }
+                            else { <MarkdownBody Text="@message.Text" /> }
+                        </div>
+                    </article>
+                }
+                @if (!string.IsNullOrWhiteSpace(snapshot.Run?.Error))
+                {
+                    <p class="notice error" role="status">@snapshot.Run.Error</p>
+                }
+                @foreach (var approval in snapshot.Approvals)
+                {
+                    <div class="notice"><span>Onay · @approval.Status</span><strong>@approval.Scope</strong>
+                        <a href="/approvals">Onayları aç</a>
+                        @if (approval.Result is { } result) { <pre>@result</pre> }
+                    </div>
+                }
+                @if (snapshot.Events.Count > 0)
+                {
+                    <details class="event-panel">
+                        <summary>Çalışma olayları <span>@snapshot.Events.Count</span></summary>
+                        @foreach (var entry in snapshot.Events)
+                        {
+                            <div class="event-line"><span>@LocalTime(entry.EventOccurredAtUtc)</span><strong>@entry.Kind</strong>
+                                @if (entry.Detail.Length > 0) { <pre>@entry.Detail</pre> }
+                                @if (entry.Artifact is { } href && href.EndsWith(".txt")) { <a href="/artifacts/@href">Tam çıktıyı indir</a> }
+                            </div>
+                        }
+                    </details>
+                }
+            </div>
+        }
+    </div>
+    <footer class="composer-zone">
+        @if (issue is not null) { <p class="notice error" role="alert">@issue</p> }
+        <form class="composer" @onsubmit="SendAsync" @onsubmit:preventDefault>
+            <textarea aria-label="Mesajınız" placeholder="Ajanlara bir mesaj yazın…" @bind="draft" @bind:event="oninput" maxlength="16000" rows="2"></textarea>
+            <div class="composer-bar">
+                <div class="composer-selects">
+                    <select aria-label="Ajan" @bind="selectedAgent" disabled="@IsActive">
+                        <option value="">Ajan · Otomatik</option>
+                        @foreach (var a in agents.Where(a => !a.Archived)) { <option value="@a.Id">@a.Name</option> }
+                    </select>
+                    @if (projects.Count > 0)
+                    {
+                        <select aria-label="Proje" @bind="projectId" disabled="@IsActive">
+                            <option value="">Proje · Otomatik</option>
+                            @foreach (var p in projects) { <option value="@p.Id">@p.Name</option> }
+                        </select>
+                    }
+                </div>
+                <button type="submit" class="primary send" disabled="@((IsActive && !ChatStore.IsPauseRequest(draft)) || sending || string.IsNullOrWhiteSpace(draft))">Gönder <span aria-hidden="true">↑</span></button>
+            </div>
+        </form>
+    </footer>
+</section>
+
+@code {
+    [Parameter] public string? Id { get; set; }
+    private ChatSnapshot snapshot = new([], [], null, []);
+    private List<Agent> agents = [];
+    private List<Project> projects = [];
+    private TimeZoneInfo zone = TimeZoneInfo.Utc;
+    private string? title, loaded, issue, selectedAgent, projectId;
+    private string draft = "";
+    private int limit = 60;
+    private bool sending, disposed, scroll;
+    private int refreshQueued;
+    private bool IsActive => snapshot.Run is { } run && ChatStore.Active.Contains(run.Status);
+    private string Title => title ?? "Sohbet";
+
+    protected override async Task OnInitializedAsync()
+    {
+        Updates.Changed += OnChange;
+        await using var db = await Dbs.CreateDbContextAsync();
+        agents = await db.Agents.OrderBy(x => x.Name).ToListAsync();
+        projects = await db.Projects.OrderBy(x => x.Name).ToListAsync();
+        zone = TimeZoneInfo.FindSystemTimeZoneById(await db.Preferences.Select(x => x.TimeZone).SingleAsync());
+    }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (loaded != Id)
+        {
+            loaded = Id;
+            issue = null;
+            limit = 60;
+            if (Id is null) { title = null; snapshot = new([], [], null, []); return; }
+            await using var db = await Dbs.CreateDbContextAsync();
+            title = await db.Conversations.Where(x => x.Id == Id).Select(x => x.Title).SingleOrDefaultAsync();
+            if (title is null) { Navigation.NavigateTo("/conversations"); return; }
+            await Chats.TouchAsync(Id, default);
+            scroll = true;
+        }
+        await RefreshAsync();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!scroll) return;
+        scroll = false;
+        try { await JS.InvokeVoidAsync("platformChat.scroll", "chat-scroll"); }
+        catch (JSDisconnectedException) { }
+    }
+
+    private async Task RefreshAsync()
+    {
+        if (Id is not { } id) return;
+        var result = await Chats.ReadAsync(id, limit, default);
+        if (!disposed && Id == id) snapshot = result;
+    }
+
+    private async Task SendAsync()
+    {
+        if (sending || string.IsNullOrWhiteSpace(draft)) return;
+        if (IsActive)
+        {
+            if (Id is { } activeChat && ChatStore.IsPauseRequest(draft))
+            {
+                await Chats.RecordPauseAsync(activeChat, draft.Trim(), default);
+                draft = "";
+                await Worker.PauseAsync(activeChat, default);
+            }
+            return;
+        }
+        sending = true;
+        issue = null;
+        try
+        {
+            var id = await Chats.SendAsync(Id, draft, selectedAgent, projectId, default);
+            draft = "";
+            scroll = true;
+            if (Id != id) Navigation.NavigateTo($"/chat/{id}");
+            else await RefreshAsync();
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or UnauthorizedAccessException or DbUpdateException)
+        { issue = ex is DbUpdateException ? "Mesaj eşzamanlı bir işlem nedeniyle kaydedilemedi." : ex.Message; }
+        finally { sending = false; }
+    }
+
+    private async Task PauseAsync()
+    {
+        if (Id is not null) await Worker.PauseAsync(Id, default);
+    }
+
+    private async Task LoadOlderAsync()
+    {
+        limit = Math.Min(limit + 60, 500);
+        await RefreshAsync();
+    }
+
+    private void OnChange(string id)
+    {
+        if (disposed || Id is null || (id != Id && id != "") || Interlocked.Exchange(ref refreshQueued, 1) != 0) return;
+        _ = InvokeAsync(async () =>
+        {
+            Interlocked.Exchange(ref refreshQueued, 0);
+            if (disposed) return;
+            await RefreshAsync();
+            scroll = true;
+            StateHasChanged();
+        });
+    }
+
+    private string AgentName(string? id) => agents.Find(a => a.Id == id)?.Name ?? "Codex";
+    private string LocalTime(DateTime time) => TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(time, DateTimeKind.Utc), zone).ToString("dd.MM · HH:mm");
+    public void Dispose() { disposed = true; Updates.Changed -= OnChange; }
+}

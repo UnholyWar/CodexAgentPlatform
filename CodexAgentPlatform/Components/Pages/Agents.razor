@@ -1,0 +1,128 @@
+@page "/agents"
+@attribute [Authorize]
+@inject IDbContextFactory<PlatformDb> Dbs
+@inject CodexAccounts Accounts
+@inject PlatformPaths Paths
+
+<PageTitle>Ajanlar · Codex Agent Platform</PageTitle>
+<section class="admin-page">
+    <header class="section-head"><h1>Ajanlar</h1><button class="primary" @onclick="NewAgent">＋ Ajan ekle</button></header>
+    @if (error is not null) { <p class="notice error" role="alert">@error</p> }
+    <div class="split-panel">
+        <div class="list">
+            @foreach (var agent in agents)
+            {
+                <button class="list-row" @onclick="() => EditAsync(agent.Id)">
+                    <span class="avatar" aria-hidden="true">@agent.Name.FirstOrDefault()</span>
+                    <span><strong>@agent.Name</strong><small>@agent.Title</small></span>
+                    <small>@(agent.Archived ? "Arşiv" : stats.GetValueOrDefault(agent.Id).ToString("N0") + " token")</small>
+                </button>
+            }
+        </div>
+        @if (edit is not null)
+        {
+            <form class="card fields" @onsubmit="SaveAsync" @onsubmit:preventDefault>
+                <h2>@(isNew ? "Yeni ajan" : edit.Name)</h2>
+                <label>Ad <input @bind="edit.Name" required maxlength="60" /></label>
+                <label>Unvan <input @bind="edit.Title" required maxlength="120" /></label>
+                <label>Rol talimatları <textarea @bind="edit.Instructions" maxlength="8000" rows="5"></textarea></label>
+                <div class="fields side-by-side"><ModelFields Models="models" @bind-Model="edit.Model" @bind-Effort="edit.Effort" /></div>
+                <div><button type="button" class="button" @onclick="LoadModelsAsync">Modelleri yükle</button></div>
+                <fieldset>
+                    <legend>Araç izinleri</legend>
+                    @foreach (var tool in tools)
+                    {
+                        <label class="check"><input type="checkbox" checked="@allowedTools.Contains(tool.Key)"
+                            @onchange="e => Toggle(allowedTools, tool.Key, e)" /> @tool.Value</label>
+                    }
+                </fieldset>
+                @if (projects.Count > 0)
+                {
+                    <fieldset>
+                        <legend>Proje izinleri</legend>
+                        @foreach (var project in projects)
+                        {
+                            <label class="check"><input type="checkbox" checked="@allowedProjects.Contains(project.Id)"
+                                @onchange="e => Toggle(allowedProjects, project.Id, e)" /> @project.Name</label>
+                        }
+                    </fieldset>
+                }
+                <label class="check"><input type="checkbox" @bind="edit.Archived" /> Arşivle</label>
+                <div><button class="primary" type="submit">Kaydet</button></div>
+            </form>
+        }
+    </div>
+</section>
+
+@code {
+    private List<Agent> agents = [];
+    private List<Project> projects = [];
+    private Dictionary<string, long> stats = [];
+    private List<CodexModel> models = [];
+    private Agent? edit;
+    private bool isNew;
+    private string? error;
+    private HashSet<string> allowedTools = [], allowedProjects = [];
+    private static readonly Dictionary<string, string> tools = new()
+    {
+        ["memory"] = "Hafıza", ["resources"] = "Proje kaynakları", ["workspace"] = "Çalışma alanı ve terminal",
+        ["git"] = "Git", ["ssh"] = "SSH", ["delegate"] = "İş devri"
+    };
+
+    protected override Task OnInitializedAsync() => ReloadAsync();
+    private async Task ReloadAsync()
+    {
+        await using var db = await Dbs.CreateDbContextAsync();
+        agents = await db.Agents.AsNoTracking().OrderBy(x => x.Archived).ThenBy(x => x.Name).ToListAsync();
+        projects = await db.Projects.AsNoTracking().OrderBy(x => x.Name).ToListAsync();
+        stats = await db.Usage.GroupBy(x => x.AgentId).Select(g => new { Id = g.Key, Total = g.Sum(x => x.Total) })
+            .ToDictionaryAsync(x => x.Id, x => x.Total);
+    }
+    private void NewAgent() { edit = new(); isNew = true; error = null; allowedTools = ["memory"]; allowedProjects = []; }
+    private async Task EditAsync(string id)
+    {
+        error = null;
+        await using var db = await Dbs.CreateDbContextAsync();
+        edit = await db.Agents.AsNoTracking().SingleAsync(x => x.Id == id);
+        isNew = false;
+        allowedTools = ToolAccess.Split(edit.AllowedTools).ToHashSet();
+        allowedProjects = ToolAccess.Split(edit.AllowedProjects).ToHashSet();
+    }
+    private async Task LoadModelsAsync()
+    {
+        error = null;
+        try { models = await Accounts.ModelsAsync(default); }
+        catch (Exception ex) { error = ex is CodexRpcException ? ex.Message : "Codex model listesi alınamadı."; }
+    }
+    private async Task SaveAsync()
+    {
+        if (edit is not { } draft) return;
+        error = null;
+        try
+        {
+            await using var db = await Dbs.CreateDbContextAsync();
+            var row = isNew ? new Agent { Id = draft.Id } : await db.Agents.SingleAsync(x => x.Id == draft.Id);
+            row.Name = draft.Name.Trim();
+            row.Title = draft.Title.Trim();
+            if (row.Name.Length is < 2 or > 60 || row.Title.Length is < 2 or > 120 || draft.Instructions.Length > 8000)
+                throw new ArgumentException("Ajan adı, unvanı veya rol talimatı geçersiz.");
+            row.Instructions = draft.Instructions;
+            row.Model = draft.Model;
+            row.Effort = draft.Effort;
+            row.Archived = draft.Archived;
+            row.AllowedTools = string.Join(',', allowedTools);
+            row.AllowedProjects = string.Join(',', allowedProjects);
+            if (isNew) db.Agents.Add(row);
+            await db.SaveChangesAsync();
+            await WorkspaceMemory.WriteAgentAsync(Paths, row, default);
+            edit = null;
+            await ReloadAsync();
+        }
+        catch (Exception ex) when (ex is DbUpdateException or ArgumentException or IOException)
+        { error = ex is ArgumentException ? ex.Message : "Ajan bilgileri veya Markdown kimliği kaydedilemedi."; }
+    }
+    private static void Toggle(HashSet<string> set, string id, ChangeEventArgs e)
+    {
+        if (e.Value is true) set.Add(id); else set.Remove(id);
+    }
+}

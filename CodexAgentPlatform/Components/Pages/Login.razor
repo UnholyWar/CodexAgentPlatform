@@ -1,0 +1,28 @@
+@page "/login"
+@layout AccessLayout
+@attribute [AllowAnonymous]
+@attribute [ExcludeFromInteractiveRouting]
+@inject UserManager<PlatformUser> Users
+@inject NavigationManager Navigation
+
+<PageTitle>Giriş · Codex Agent Platform</PageTitle>
+<h1>Yönetici girişi</h1>
+@if (Error is not null)
+{
+    <p class="notice error" role="alert">Kullanıcı adı veya şifre geçersiz.</p>
+}
+<form method="post" action="/session/login" class="fields">
+    <AntiforgeryToken />
+    <label>Kullanıcı adı <input name="username" autocomplete="username" maxlength="64" required /></label>
+    <label>Şifre <input name="password" type="password" autocomplete="current-password" maxlength="128" required /></label>
+    <button class="primary" type="submit">Giriş yap</button>
+</form>
+
+@code {
+    [SupplyParameterFromQuery] public string? Error { get; set; }
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (await Users.FindByIdAsync(PlatformUser.OwnerId) is null) Navigation.NavigateTo("/setup", forceLoad: true);
+    }
+}

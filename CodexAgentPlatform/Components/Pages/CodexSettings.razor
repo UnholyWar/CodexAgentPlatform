@@ -1,0 +1,191 @@
+@page "/codex"
+@attribute [Authorize]
+@implements IDisposable
+@inject ICodexConnection Codex
+@inject CodexAccounts Accounts
+@inject IDbContextFactory<PlatformDb> Dbs
+@inject IConfiguration Configuration
+
+<PageTitle>Codex ayarları · Codex Agent Platform</PageTitle>
+<section class="admin-page">
+    <header class="section-head"><h1>Codex ayarları</h1><button class="button" disabled="@busy" @onclick="Inspect">Bağlantıyı test et</button></header>
+    @if (error is not null) { <p class="notice error" role="alert">@error</p> }
+    @if (notice is not null) { <p class="notice" role="status">@notice</p> }
+    <div class="stat-grid">
+        <div class="card"><span>Codex CLI</span><strong>@(version ?? "Sürüm okunmadı")</strong></div>
+        <div class="card"><span>App Server</span><strong>@(Codex.Connected ? "Bağlı" : "Bağlı değil")</strong></div>
+        <div class="card"><span>Hesap</span><strong>@(account ?? "Bağlı değil")</strong></div>
+    </div>
+    <article class="card fields">
+        <h2>ChatGPT hesabı</h2>
+        <div class="actions">
+            @if (account is null && LoginEnabled)
+            {
+                <button class="primary" disabled="@(busy || loginId is not null)" @onclick="Connect">Cihaz koduyla giriş yap</button>
+            }
+            @if (account is not null)
+            {
+                <button class="button" disabled="@busy" @onclick="Disconnect">Codex oturumunu kapat</button>
+            }
+            <button class="button" disabled="@busy" @onclick="Reconnect">Yeniden bağlan</button>
+        </div>
+        @if (verification is not null && code is not null)
+        {
+            <p><a href="@verification" target="_blank" rel="noopener noreferrer">ChatGPT cihaz doğrulamasını aç</a> ve <code class="device-code">@(code)</code> kodunu girin.</p>
+            <div class="actions"><button class="button" @onclick="CancelLogin">İptal et</button><button class="button" @onclick="Inspect">Durumu yenile</button></div>
+        }
+        @if (!LoginEnabled) { <p class="muted">Yerel ChatGPT hesap bağlantısı bu kurulumda devre dışı.</p> }
+    </article>
+    @if (OperatingSystem.IsWindows())
+    {
+        <article class="card fields">
+            <h2>Windows sandbox</h2>
+            <p>Yerel dosya ve terminal işlemleri için durum <strong>@(sandboxStatus ?? "Kontrol edilmedi")</strong></p>
+            <div class="actions">
+                <button class="button" disabled="@busy" @onclick="() => RunAsync(ReadSandboxAsync)">Durumu kontrol et</button>
+                @if (sandboxStatus == "updateRequired")
+                {
+                    <button class="primary" disabled="@(busy || sandboxStarting)" @onclick="SetupSandbox">Windows sandbox’ı kur</button>
+                }
+            </div>
+        </article>
+    }
+    @if (prefs is not null)
+    {
+        <article class="card fields">
+            <h2>Varsayılan model</h2>
+            <p class="muted">@models.Count kullanılabilir model. Değişiklik sonraki mesajlarda uygulanır.</p>
+            <div class="fields side-by-side"><ModelFields Models="models" @bind-Model="prefs.Model" @bind-Effort="prefs.Effort" /></div>
+            <div><button class="primary" disabled="@busy" @onclick="Save">Kaydet</button></div>
+        </article>
+    }
+    <article class="card">
+        <h2>Token kullanımı</h2>
+        <div class="data-list"><span>Girdi <strong>@input.ToString("N0")</strong></span><span>Önbellek <strong>@cached.ToString("N0")</strong></span><span>Çıktı <strong>@output.ToString("N0")</strong></span><span>Toplam <strong>@total.ToString("N0")</strong></span></div>
+    </article>
+</section>
+
+@code {
+    private string? version, account, error, notice, loginId, verification, code;
+    private bool busy;
+    private bool sandboxStarting;
+    private string? sandboxStatus;
+    private long input, cached, output, total;
+    private List<CodexModel> models = [];
+    private Preferences? prefs;
+    private bool LoginEnabled => Configuration.GetValue<bool>("Platform:LocalCodexLogin");
+
+    protected override async Task OnInitializedAsync()
+    {
+        Codex.Received += OnEvent;
+        await using var db = await Dbs.CreateDbContextAsync();
+        prefs = await db.Preferences.AsNoTracking().SingleAsync();
+        var usage = await db.Usage.GroupBy(x => 1).Select(g => new { Input = g.Sum(x => x.Input), Cache = g.Sum(x => x.Cached),
+            Output = g.Sum(x => x.Output), Total = g.Sum(x => x.Total) }).FirstOrDefaultAsync();
+        if (usage is not null) (input, cached, output, total) = (usage.Input, usage.Cache, usage.Output, usage.Total);
+        if (Codex.Connected) await RunAsync(ReadAsync);
+    }
+
+    private Task Inspect() => RunAsync(async () => { version = await Codex.VersionAsync(default); await ReadAsync(); await ReadSandboxAsync(); notice = "App Server yanıt verdi."; });
+    private Task Reconnect() => RunAsync(async () =>
+    {
+        await using var db = await Dbs.CreateDbContextAsync();
+        if (await db.Runs.AnyAsync(x => Enumerable.Contains(ChatStore.Active, x.Status))) throw new InvalidOperationException("Yeniden bağlanmadan önce etkin çalışmaları durdurun.");
+        ClearCode();
+        await Codex.ReconnectAsync(default);
+        version = await Codex.VersionAsync(default);
+        await ReadAsync();
+        await ReadSandboxAsync();
+    });
+
+    private Task Connect() => RunAsync(async () =>
+    {
+        if (!LoginEnabled) return;
+        var result = await Accounts.LoginAsync(default);
+        if (!Uri.TryCreate(result.String("verificationUrl"), UriKind.Absolute, out var uri) ||
+            uri.Scheme != "https" || uri.Host != "auth.openai.com")
+            throw new InvalidOperationException("Beklenmeyen cihaz doğrulama adresi.");
+        verification = uri.AbsoluteUri;
+        code = result.String("userCode");
+        loginId = result.String("loginId");
+    });
+
+    private Task CancelLogin() => RunAsync(async () => { if (loginId is { } id) await Accounts.CancelAsync(id, default); ClearCode(); });
+    private Task Disconnect() => RunAsync(async () =>
+    {
+        await using var db = await Dbs.CreateDbContextAsync();
+        if (await db.Runs.AnyAsync(x => Enumerable.Contains(ChatStore.Active, x.Status))) throw new InvalidOperationException("Codex oturumu kapatılmadan önce etkin çalışmaları durdurun.");
+        await Accounts.LogoutAsync(default);
+        ClearCode();
+        await ReadAsync();
+    });
+
+    private async Task ReadAsync()
+    {
+        var result = (await Accounts.ReadAsync(default)).Get("account");
+        account = result.String("planType") is { } plan ? $"ChatGPT · {plan}" : result.String("type");
+        if (account is not null) ClearCode();
+        models = await Accounts.ModelsAsync(default);
+    }
+
+    private async Task ReadSandboxAsync()
+    {
+        if (OperatingSystem.IsWindows())
+            sandboxStatus = (await Accounts.WindowsReadinessAsync(default)).String("status");
+    }
+
+    private Task SetupSandbox() => RunAsync(async () =>
+    {
+        await ReadSandboxAsync();
+        if (sandboxStatus != "updateRequired") return;
+        sandboxStarting = (await Accounts.WindowsSetupAsync(default)).True("started");
+        if (sandboxStarting) notice = "Windows sandbox kurulumu başlatıldı. Windows onayını sunucu makinesinde tamamlayın.";
+    });
+
+    private Task Save() => RunAsync(async () =>
+    {
+        if (prefs is null) return;
+        await using var db = await Dbs.CreateDbContextAsync();
+        await db.Preferences.ExecuteUpdateAsync(s => s.SetProperty(x => x.Model, prefs.Model)
+            .SetProperty(x => x.Effort, prefs.Effort));
+        notice = "Model tercihleri kaydedildi.";
+    });
+
+    private async Task RunAsync(Func<Task> action)
+    {
+        if (busy) return;
+        busy = true; error = null; notice = null;
+        try { await action(); }
+        catch (Exception ex) { error = ex is CodexRpcException or InvalidOperationException or TimeoutException
+            ? ex.Message : "Codex CLI başlatılamadı. Yürütülebilir dosya yolunu ve çalışma ortamını kontrol edin."; }
+        finally { busy = false; }
+    }
+
+    private void OnEvent(CodexEvent item)
+    {
+        if (item.Method == "windowsSandbox/setupCompleted")
+        {
+            _ = InvokeAsync(async () =>
+            {
+                sandboxStarting = false;
+                await RunAsync(ReadSandboxAsync);
+                if (item.Parameters.True("success")) notice = "Windows sandbox kurulumu tamamlandı.";
+                else error = item.Parameters.String("error") ?? "Windows sandbox kurulumu tamamlanamadı.";
+                StateHasChanged();
+            });
+            return;
+        }
+        if (item.Method != "account/login/completed") return;
+        _ = InvokeAsync(async () =>
+        {
+            if (item.Parameters.String("loginId") != loginId) return;
+            ClearCode();
+            if (item.Parameters.True("success")) await RunAsync(ReadAsync);
+            else error = "Cihaz doğrulaması tamamlanamadı.";
+            StateHasChanged();
+        });
+    }
+
+    private void ClearCode() => (loginId, verification, code) = (null, null, null);
+    public void Dispose() => Codex.Received -= OnEvent;
+}

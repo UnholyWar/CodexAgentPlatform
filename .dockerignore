@@ -1,0 +1,12 @@
+.vs
+.git
+**/bin
+**/obj
+**/*.user
+**/data
+**/workspaces
+codex-data
+codex-workspaces
+secrets
+**/*.pfx
+TestResults

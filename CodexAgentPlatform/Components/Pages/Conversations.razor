@@ -1,0 +1,28 @@
+@page "/conversations"
+@attribute [Authorize]
+@inject ChatStore Chats
+
+<PageTitle>Sohbet geçmişi · Codex Agent Platform</PageTitle>
+<section class="admin-page">
+    <header class="section-head"><h1>Sohbet geçmişi</h1><a class="primary" href="/">＋ Yeni sohbet</a></header>
+    <form class="filter" @onsubmit="SearchAsync" @onsubmit:preventDefault>
+        <input placeholder="Başlıklarda ve mesajlarda ara" aria-label="Sohbet ara" @bind="query" maxlength="120" />
+        <button class="button">Ara</button>
+    </form>
+    <div class="list">
+        @foreach (var chat in rows)
+        {
+            <a class="list-row" href="/chat/@chat.Id"><span class="avatar" aria-hidden="true">◫</span>
+                <strong>@chat.Title</strong><small>@chat.UpdatedAtUtc.ToString("dd.MM.yyyy HH:mm") UTC</small>
+            </a>
+        }
+        @if (rows.Count == 0) { <p class="empty">Sohbet bulunamadı.</p> }
+    </div>
+</section>
+
+@code {
+    private List<Conversation> rows = [];
+    private string? query;
+    protected override Task OnInitializedAsync() => SearchAsync();
+    private async Task SearchAsync() => rows = await Chats.RecentAsync(query, default);
+}
