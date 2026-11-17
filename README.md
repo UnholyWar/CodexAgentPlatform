@@ -1,107 +1,132 @@
 # Codex Agent Platform
 
-.NET 10 hedefleyen Blazor Interactive Server uygulaması. Yönetici, sohbetten Codex ajanlarıyla çalışır. Konuşmalar ve görev olayları SQLite’ta, sürümlenmiş bilgi notları Markdown dosyalarında saklanır. Arka plan çalışması tarayıcı bağlantısından bağımsızdır.
+.NET 10 ve Blazor Interactive Server ile çalışan tek yöneticili Codex arayüzü. Sohbetler ve uygulama kayıtları SQLite’ta, proje dosyaları ve hafıza notları diskte saklanır.
 
-## Docker ile hızlı başlatma
+## Canlı kurulum
 
-Depo kökünde PowerShell kullanın. İlk kurulumda [Docker Compose bölümündeki](#docker-compose) `docker compose up` satırından önce gelen komutlarla `secrets/platform.pfx` ve `secrets/vault.key` dosyalarını oluşturun. Mevcut kurulumda aynı dosyaları ve sertifika parolasını kullanın. Parolayı bu PowerShell oturumunda `$env:PLATFORM_TLS_PASSWORD` değişkenine verin.
+Sunucuda Docker ve host üzerinde Nginx gerekir. Örnekte `development.onurozgultekin.com` kullanılır. Alt alan adının A kaydını sunucunun genel IPv4 adresine yönlendirin. HTTPS’i Nginx karşılar. Uygulama host üzerinde yalnızca `127.0.0.1:18090` adresinden dinlenir.
 
-```powershell
-$tls = (Resolve-Path 'secrets/platform.pfx').Path
-$vault = (Resolve-Path 'secrets/vault.key').Path
-$dataVolume = 'codexagentplatform_platform-data'
-$workspacesVolume = 'codexagentplatform_platform-workspaces'
-$env:ASPNETCORE_Kestrel__Certificates__Default__Password = $env:PLATFORM_TLS_PASSWORD
+### 1. İsteğe bağlı HTTP başlangıç kontrolü
 
-docker run -d --name codex-agent-platform --init --restart unless-stopped --stop-timeout 45 `
-  -p '127.0.0.1:8443:8443' `
-  -e 'ASPNETCORE_ENVIRONMENT=Production' `
-  -e 'ASPNETCORE_URLS=https://+:8443' `
-  -e 'ASPNETCORE_Kestrel__Certificates__Default__Path=/run/secrets/platform_tls' `
-  -e ASPNETCORE_Kestrel__Certificates__Default__Password `
-  -e 'Platform__VaultKeyFile=/run/secrets/vault_key' `
-  -e 'Platform__LocalCodexLogin=true' `
-  --mount "type=volume,source=$dataVolume,target=/data" `
-  --mount "type=volume,source=$workspacesVolume,target=/workspaces" `
-  --mount "type=bind,source=$tls,target=/run/secrets/platform_tls,readonly" `
-  --mount "type=bind,source=$vault,target=/run/secrets/vault_key,readonly" `
+İlk kurulumda imajın açıldığını kontrol etmek için aşağıdaki geçici container’ı çalıştırın. Canlı container çalışıyorsa bu adımı atlayın.
+
+```bash
+docker run -d --name codex-agent-platform-check \
+  -p 127.0.0.1:18090:8080 \
+  -e ASPNETCORE_ENVIRONMENT=Production \
+  -e 'ASPNETCORE_URLS=http://+:8080' \
+  -v codexagentplatform_platform-data:/data \
+  -v codexagentplatform_platform-workspaces:/workspaces \
+  ghcr.io/unholywar/codexagentplatform:latest
+
+docker logs --tail 50 codex-agent-platform-check
+curl -sS -o /dev/null -w 'HTTP %{http_code}\n' http://127.0.0.1:18090/
+```
+
+Oturum açmadan ana adrese yapılan istekte `302` beklenir. `/setup` formu güvenli çerez kullandığı için doğrudan HTTP isteğinde `500` verir. Kurulum formunu aşağıdaki HTTPS adresinden açın.
+
+### 2. Canlı container’ı çalıştır
+
+Başlangıç kontrolü container’ı çalışıyorsa `docker stop codex-agent-platform-check` ile durdurun. Aynı volume’ları kullanan önceki uygulama container’ı varsa onu da yeni container’ı başlatmadan önce durdurun.
+
+```bash
+docker network inspect codex-agent-backend >/dev/null 2>&1 ||
+  docker network create codex-agent-backend
+
+docker run -d --name codex-agent-platform \
+  --init --restart unless-stopped \
+  --network codex-agent-backend \
+  -p 127.0.0.1:18090:8080 \
+  -e ASPNETCORE_ENVIRONMENT=Production \
+  -e 'ASPNETCORE_URLS=http://+:8080' \
+  -e ASPNETCORE_FORWARDEDHEADERS_ENABLED=true \
+  -e Platform__LocalCodexLogin=true \
+  -v codexagentplatform_platform-data:/data \
+  -v codexagentplatform_platform-workspaces:/workspaces \
   ghcr.io/unholywar/codexagentplatform:latest
 ```
 
-Tarayıcıda [https://localhost:8443](https://localhost:8443) adresini açın. İlk açılışta kurulum kodunu `docker exec codex-agent-platform cat /data/credentials/bootstrap-code` ile okuyun. Oluşturulan container’ı durdurmak için `docker stop codex-agent-platform`, tekrar açmak için `docker start codex-agent-platform` kullanın.
+`ASPNETCORE_FORWARDEDHEADERS_ENABLED` ile uygulama Nginx’in ilettiği HTTPS bilgisini okur. Host portunu loopback’e bağlı tutun ve `codex-agent-backend` ağına başka container bağlamayın.
 
-`/data` volume’u sohbetleri, SQLite veritabanını ve Codex oturumunu saklar. `/workspaces` volume’u proje çalışma alanlarını saklar. Örnekteki adlar varsayılan `codexagentplatform` Compose projesiyle eşleşir. Compose’u farklı bir proje adıyla çalıştırdıysanız `docker volume ls` ile mevcut adları bulun ve iki değişkeni güncelleyin. Aynı volume’lara geçmeden önce eski container’ı durdurun.
+### 3. Nginx ve HTTPS
 
-## Visual Studio veya komut satırından çalıştırma
+`/etc/nginx/sites-available/development.onurozgultekin.com` dosyasını oluşturun. Nginx’in yüklediği mevcut ana site yapılandırmasını ayrı tutun.
 
-1. Visual Studio’da `CodexAgentPlatform.slnx` dosyasını açın. Başlangıç projesi `CodexAgentPlatform`, profil `https` olsun.
-2. HTTPS sertifikası ilk kez kullanılacaksa `dotnet dev-certs https --trust` çalıştırın.
-3. CLI’nin kurulu olduğunu `codex --version` ile kontrol edin. Windows geliştirme profilinde uygulama, PATH’te bulunamayan CLI için Codex masaüstü kurulumuna da bakar. Özel bir kurulumda `Platform__CodexExecutable` ayarına yürütülebilir dosyanın tam yolunu verin.
-4. İlk açılışta kurulum sayfasında yeni yönetici adınızı ve en az 14 karakterlik güçlü şifrenizi belirleyin. Geliştirmede doğrudan loopback bağlantısı ve `Platform__LocalBootstrap=true` varsa geçici şifre `admin` kabul edilir. Diğer ortamlarda kurulum kodunu veri dizinindeki `credentials/bootstrap-code` dosyasından okuyun. Kurulum tamamlandığında geçici erişim geçersiz olur.
-5. **Codex ayarları** ekranında bağlantıyı test edin ve **Cihaz koduyla giriş yap** düğmesini kullanın. Cihaz kodu seçeneği hesabınızın veya çalışma alanınızın güvenlik ayarlarında etkin olmalıdır. Oturum bu uygulamanın `data/codex` dizininde tutulur.
-6. **Ajanlar** ekranında ajan rollerini, proje izinlerini, model ve reasoning effort ayarlarını düzenleyin. Sohbette ajan seçebilir veya `@Developer`, `@Architect`, `@QA`, `@DevOps` ile başlayabilirsiniz.
+```nginx
+map $http_upgrade $codex_connection_upgrade {
+    default upgrade;
+    ''      close;
+}
 
-```powershell
-dotnet run --project CodexAgentPlatform --launch-profile https
+server {
+    listen 80;
+    server_name development.onurozgultekin.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:18090;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $codex_connection_upgrade;
+    }
+}
 ```
 
-App Server, uygulama tarafından JSONL üzerinden `stdio` ile başlatılır. Uygulama tek yöneticiye ait yerel kullanım için tasarlanmıştır. App Server hesabıyla kimlik doğrulamanın kapsamı ve ayrı barındırılan servis akışı için [OpenAI’nin App Server belgelerine](https://learn.chatgpt.com/docs/app-server#auth-endpoints) bakın. [Headless cihaz kodu akışı](https://learn.chatgpt.com/docs/auth#login-on-headless-devices).
+DNS kaydı çözülüyor ve sunucuda Certbot’un Nginx eklentisi hazırsa siteyi etkinleştirin.
 
-## Docker Compose
+```bash
+ln -s /etc/nginx/sites-available/development.onurozgultekin.com \
+      /etc/nginx/sites-enabled/development.onurozgultekin.com
+nginx -t && systemctl reload nginx &&
+  certbot --nginx -d development.onurozgultekin.com --redirect
+```
 
-Compose yönetim arayüzünü yalnızca `https://localhost:8443` üzerinde yayınlar. Sertifikayı ve ayrı bir AES-256 Vault anahtarını repo dışında oluşturup örnekteki `secrets` yollarına yerleştirin. Örnekteki PowerShell komutları yerel geliştirme sertifikası kullanır.
+### 4. İlk kurulum ve bağlantı
+
+```bash
+curl -sS -o /dev/null -w 'HTTP %{http_code}\n' \
+  https://development.onurozgultekin.com/setup
+docker exec codex-agent-platform cat /data/credentials/bootstrap-code
+```
+
+İlk kurulumda HTTP `200` beklenir. [Kurulum sayfasına](https://development.onurozgultekin.com/setup) sunucuda üretilen kodu girip yönetici hesabını ve en az 14 karakterlik şifresini oluşturun. Kurulum tamamlanınca kod geçersiz olur ve `/setup` giriş sayfasına yönlendirir.
+
+**Codex ayarları → Cihaz koduyla giriş yap** üzerinden çıkan tek kullanımlık kodu OpenAI doğrulama sayfasına girin. ChatGPT hesabınızın güvenlik ayarlarında cihaz koduyla giriş etkin olmalıdır. Ardından **Bağlantıyı test et** ile hesabı ve model listesini kontrol edin. [Cihaz koduyla oturum açma](https://learn.chatgpt.com/docs/auth#login-on-headless-devices)
+
+`Platform__LocalCodexLogin=true` web arayüzünde yeni hesap bağlama düğmesini açar. Bu seçenek kapalıyken App Server, diskteki kayıtlı hesabı kullanabilir. `Production` modu HTTPS ve güvenli çerezleri yönetir. Hesap oturumu `/data/codex` altında kalır ve normal yeniden başlatmalarda kullanılır.
+
+Düğmeler tıklamaya yanıt vermiyorsa Blazor betiğinin yanıtını kontrol edin.
+
+```bash
+curl -sS -D - -o /dev/null \
+  https://development.onurozgultekin.com/_framework/blazor.web.js
+```
+
+HTTP `200` ve JavaScript içerik türü beklenir. Betik `404` dönüyorsa framework dosyalarını içeren güncel imajı kullanın.
+
+### Yeni imaja geçiş
+
+Yeni sürüm yayımlandığında `docker pull ghcr.io/unholywar/codexagentplatform:latest` çalıştırın. Mevcut container’ı durdurup geri dönüş için farklı bir ada alın, ardından 2. adımdaki canlı komutu aynı volume adlarıyla yeniden çalıştırın. Nginx, aynı yerel porta yönlendirmeye devam eder.
+
+## Kalıcı veriler
+
+- `codexagentplatform_platform-data` → `/data`. SQLite, sohbetler, hafıza notları, Codex oturumu ve uygulama verileri.
+- `codexagentplatform_platform-workspaces` → `/workspaces`. Proje çalışma alanları.
+- Yeniden dağıtırken aynı volume adlarını kullanın. Mevcut kurulum farklı bir Compose proje adı kullanıyorsa önce `docker volume ls` ile gerçek adları bulun. **Sistem** ekranından SQLite yedeği alabilirsiniz.
+- Git veya SSH erişim bilgileri saklanacaksa 32 baytlık base64 Vault anahtarını salt okunur dosya olarak bağlayıp container içindeki yolunu `Platform__VaultKeyFile` ile verin. Geri yüklemede aynı anahtarı kullanın.
+
+Depodaki [Docker Compose dosyası](docker-compose.yml), TLS’i uygulamanın karşıladığı alternatif loopback kurulumudur. Bu seçenekte PFX, sertifika parolası ve Vault anahtarı gerekir.
+
+## Yerel geliştirme
+
+Depo kökünden çalıştırın. Visual Studio’da `CodexAgentPlatform.slnx` dosyasını ve `https` profilini seçebilirsiniz.
 
 ```powershell
-New-Item -ItemType Directory -Force secrets
-$env:PLATFORM_TLS_PASSWORD = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(24))
 dotnet dev-certs https --trust
-dotnet dev-certs https -ep secrets/platform.pfx -p $env:PLATFORM_TLS_PASSWORD
-[IO.File]::WriteAllText((Join-Path $PWD 'secrets/vault.key'), [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32)))
-docker compose up -d --build
-docker compose exec platform cat /data/credentials/bootstrap-code
-```
-
-- Docker image’ı .NET 10, Git, Python, Bubblewrap ve sabitlenmiş Codex CLI içerir. Servis `app` kullanıcısıyla çalışır. Docker secret’ları bu kullanıcı tarafından okunabilir olmalıdır.
-- `/data` ve `/workspaces` ayrı adlandırılmış volume’larda kalır. Yeniden kurulumda aynı Vault anahtarıyla çalışın. `docker compose down -v` bu iki volume’u kaldırır.
-- Linux ve WSL’de dosya sistemi kısıtları Bubblewrap’e dayanır. Windows’ta kurulu CLI’nin desteklediği sandbox hazır olmalıdır. Container platformu Bubblewrap’in gerektirdiği namespace işlemlerine izin vermiyorsa terminal komutları başarısız olur. [Codex sandbox platform gereksinimleri](https://learn.chatgpt.com/docs/permissions#how-enforcement-works).
-- Windows’ta **Codex ayarları** sandbox durumunu gösterir. MXC kullanılamıyorsa yerel yönetici onayıyla yükseltilmiş Windows sandbox’ı kurulabilir. Kurulum yapılana kadar sohbet yerel çalışma ortamı kapalı olarak çalışır. [Windows sandbox seçenekleri](https://learn.chatgpt.com/docs/windows/windows-sandbox).
-- **Sistem** ekranındaki SQLite yedeği çevrimiçi alınabilir. Tam geri yükleme için `/data` ve `/workspaces` volume’larını tutarlı biçimde, Vault anahtarını ayrı saklayın.
-
-## Proje erişimi ve çalışma geçmişi
-
-- Önce **Projeler** ekranında projeyi oluşturun, ardından **Kaynaklar** ekranında Git, SSH veya dağıtım kaynağını kaydedin. **Ajanlar** ekranında ilgili izinleri verin ve sohbet kutusunda projeyi seçin.
-- Git kaynağı HTTPS adresi kullanır. Opsiyonel Git kimlik bilgisi ve SSH private key, Vault anahtar dosyası yapılandırıldığında şifrelenir. Ajan araçları Vault değerini almaz.
-- Git değişiklikleri yönetilen worktree’de yapılır. Push onayı kaynak adresi, kaynak branch, hedef branch ve tam commit’e bağlanır. Üretim onayı bu kapsamı ekranda gösterir. Push force seçeneği kullanmaz.
-- SSH yapılandırması doğrulanmış `SHA256:` host key fingerprint ve private key gerektirir. Hazır komut setinde servis ve Docker incelemesi, bağlantı testi ve kayıtlı bir SFTP metin dosyasını okuma vardır. Docker restart, digest’e sabitlenmiş Swarm dağıtımı ve Swarm rollback açık onay gerektirir.
-- Konuşma, çalışma durumu, bilgi notları ve olay geçmişi ayrı saklanır. Hafıza araçları arama sonuçlarını sınırlar, gerektiğinde Markdown notunun bir bölümünü getirir. Başka bir sohbetten zamana göre çalışma bulma, oluşturma tarihinin yanında kaydedilmiş olayları kullanır.
-- Bir işlem sırasında **Durdur** düğmesini kullanabilir veya `Şimdilik dur` yazabilirsiniz. Uygulama yeniden başlarsa yarıda kalan turn ve onaylar kesilmiş olarak işaretlenir. Yeni mesajla devam edildiğinde Codex’in kayıtlı thread’i ve çalışma dizini kullanılır.
-
-## Testler
-
-```powershell
-dotnet test CodexAgentPlatform.slnx
-$env:CAP_TEST_CODEX_EXE = (Get-Command codex).Source
-$env:CAP_TEST_GIT_EXE = (Get-Command git).Source
+dotnet run --project CodexAgentPlatform --launch-profile https
 dotnet test CodexAgentPlatform.slnx
 ```
 
-Testler HTTPS oturumu, ilk kurulum, migration, SQLite yedeği, FTS5, hafıza sürümleri, zamansal arama, ajan izinleri, mock streaming, oturum kurtarma ve token tekilleştirmesini kapsar. Yürütülebilir yollar sağlandığında kurulu CLI ile hesapsız protokol testi ve gerçek bir Git worktree’de push onayı kapsam testi de çalışır. Gerçek hesapla streaming testi için, cihaz doğrulaması yapılmış test kurulumunun veri dizinini ayrıca `CAP_TEST_AUTH_DATA` değişkenine verin. Bu test gerçek Codex isteği gönderir.
-
-## Ayarlar
-
-| Ayar | Varsayılan |
-| --- | --- |
-| `Platform__Data` | Web projesi altında `data` |
-| `Platform__Workspaces` | Web projesi altında `workspaces` |
-| `Platform__CodexExecutable` | PATH üzerindeki `codex`. Windows geliştirme profilinde Codex masaüstü kurulumu da aranır. |
-| `Platform__LocalCodexLogin` | Geliştirme profilleri ve loopback Compose örneğinde `true` |
-| `Platform__Concurrency` | `2`, geçerli aralık 1–4 |
-| `Platform__LocalBootstrap` | `false`, yalnızca geliştirme ve doğrudan loopback için etkinleştirin |
-| `Platform__AllowLocalHttp` | `false`, yalnızca geliştirme profili için etkinleştirin |
-| `Platform__VaultKeyFile` | 32 baytlık base64 anahtarı içeren harici dosya |
-
-Şema değişiklikleri için EF Core migration oluşturun. Başlangıçta bekleyen göçler uygulanır. FTS5 sanal tabloları ve trigger’ları ilk migration’da tanımlanır.
-
-```powershell
-dotnet ef migrations add MigrationName --project CodexAgentPlatform.Infrastructure --startup-project CodexAgentPlatform
-```
+Yerel adres [https://localhost:7213](https://localhost:7213). Codex CLI’nin kurulu olduğunu `codex --version` ile kontrol edin. Özel CLI yolu için `Platform__CodexExecutable` kullanılır. Yerel terminal işlemleri için [Codex sandbox gereksinimlerine](https://learn.chatgpt.com/docs/permissions#how-enforcement-works) bakın.

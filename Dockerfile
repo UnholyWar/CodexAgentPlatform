@@ -7,7 +7,8 @@ RUN dotnet restore CodexAgentPlatform/CodexAgentPlatform.csproj
 COPY CodexAgentPlatform.Application/ CodexAgentPlatform.Application/
 COPY CodexAgentPlatform.Infrastructure/ CodexAgentPlatform.Infrastructure/
 COPY CodexAgentPlatform/ CodexAgentPlatform/
-RUN dotnet publish CodexAgentPlatform/CodexAgentPlatform.csproj -c Release --no-restore -o /publish
+RUN dotnet publish CodexAgentPlatform/CodexAgentPlatform.csproj -c Release --no-restore -o /publish \
+    && test -s /publish/wwwroot/_framework/blazor.web.js
 
 FROM node:24-bookworm-slim AS codex
 ARG CODEX_VERSION=0.167.0
