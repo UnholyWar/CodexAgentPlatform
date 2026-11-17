@@ -13,21 +13,25 @@
     @if (notice is not null) { <p class="notice" role="status">@notice</p> }
     <div class="stat-grid">
         <div class="card"><span>Codex CLI</span><strong>@(version ?? "Sürüm okunmadı")</strong></div>
-        <div class="card"><span>App Server</span><strong>@(Codex.Connected ? "Bağlı" : "Bağlı değil")</strong></div>
-        <div class="card"><span>Hesap</span><strong>@(account ?? "Bağlı değil")</strong></div>
+        <div class="card"><span>Yerel App Server</span><strong>@(Codex.Connected ? "Bağlı" : "Bağlı değil")</strong></div>
+        <div class="card"><span>ChatGPT oturumu</span><strong>@(accountChecked ? account ?? "Oturum kapalı" : "Durum doğrulanmadı")</strong></div>
     </div>
     <article class="card fields">
         <h2>ChatGPT hesabı</h2>
+        @if (accountChecked && account is null && loginId is null)
+        {
+            <p class="muted">Bu uygulamada açık bir ChatGPT oturumu yok.</p>
+        }
         <div class="actions">
             @if (account is null && LoginEnabled)
             {
                 <button class="primary" disabled="@(busy || loginId is not null)" @onclick="Connect">Cihaz koduyla giriş yap</button>
             }
-            @if (account is not null)
+            @if (accountChecked && account is not null)
             {
                 <button class="button" disabled="@busy" @onclick="Disconnect">Codex oturumunu kapat</button>
             }
-            <button class="button" disabled="@busy" @onclick="Reconnect">Yeniden bağlan</button>
+            <button class="button" disabled="@busy" @onclick="Reconnect">App Server’a yeniden bağlan</button>
         </div>
         @if (verification is not null && code is not null)
         {
@@ -67,7 +71,7 @@
 
 @code {
     private string? version, account, error, notice, loginId, verification, code;
-    private bool busy;
+    private bool busy, accountChecked;
     private bool sandboxStarting;
     private string? sandboxStatus;
     private long input, cached, output, total;
@@ -86,15 +90,21 @@
         if (Codex.Connected) await RunAsync(ReadAsync);
     }
 
-    private Task Inspect() => RunAsync(async () => { version = await Codex.VersionAsync(default); await ReadAsync(); await ReadSandboxAsync(); notice = "App Server yanıt verdi."; });
+    private Task Inspect() => RunAsync(async () =>
+    {
+        await ReadAsync();
+        version = await Codex.VersionAsync(default);
+        await ReadSandboxAsync();
+        notice = "App Server yanıt verdi.";
+    });
     private Task Reconnect() => RunAsync(async () =>
     {
         await using var db = await Dbs.CreateDbContextAsync();
         if (await db.Runs.AnyAsync(x => Enumerable.Contains(ChatStore.Active, x.Status))) throw new InvalidOperationException("Yeniden bağlanmadan önce etkin çalışmaları durdurun.");
         ClearCode();
         await Codex.ReconnectAsync(default);
-        version = await Codex.VersionAsync(default);
         await ReadAsync();
+        version = await Codex.VersionAsync(default);
         await ReadSandboxAsync();
     });
 
@@ -115,17 +125,30 @@
     {
         await using var db = await Dbs.CreateDbContextAsync();
         if (await db.Runs.AnyAsync(x => Enumerable.Contains(ChatStore.Active, x.Status))) throw new InvalidOperationException("Codex oturumu kapatılmadan önce etkin çalışmaları durdurun.");
+        accountChecked = false;
         await Accounts.LogoutAsync(default);
         ClearCode();
-        await ReadAsync();
+        await ReadAccountAsync();
+        if (account is not null) throw new InvalidOperationException("Codex hâlâ açık bir hesap oturumu bildiriyor.");
+        notice = "Bu uygulamadaki Codex oturumu kapatıldı.";
+        models = await Accounts.ModelsAsync(default);
     });
 
     private async Task ReadAsync()
     {
-        var result = (await Accounts.ReadAsync(default)).Get("account");
-        account = result.String("planType") is { } plan ? $"ChatGPT · {plan}" : result.String("type");
-        if (account is not null) ClearCode();
+        await ReadAccountAsync();
         models = await Accounts.ModelsAsync(default);
+    }
+
+    private async Task ReadAccountAsync()
+    {
+        accountChecked = false;
+        var result = (await Accounts.ReadAsync(default)).Get("account");
+        if (result.ValueKind is not (System.Text.Json.JsonValueKind.Null or System.Text.Json.JsonValueKind.Object))
+            throw new InvalidOperationException("Codex hesap durumunu doğrulayamadı.");
+        account = result.String("planType") is { } plan ? $"ChatGPT · {plan}" : result.String("type");
+        accountChecked = true;
+        if (account is not null) ClearCode();
     }
 
     private async Task ReadSandboxAsync()
