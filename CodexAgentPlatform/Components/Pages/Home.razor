@@ -97,7 +97,7 @@
     <footer class="composer-zone">
         @if (issue is not null) { <p class="notice error" role="alert">@issue</p> }
         <form class="composer" @onsubmit="SendAsync" @onsubmit:preventDefault>
-            <textarea aria-label="Mesajınız" placeholder="Ajanlara bir mesaj yazın…" @bind="draft" @bind:event="oninput" maxlength="16000" rows="2"></textarea>
+            <textarea aria-label="Mesajınız" placeholder="Ajanlara bir mesaj yazın…" @bind="draft" @bind:event="oninput" maxlength="16000" rows="2" data-send-on-enter="true" enterkeyhint="send"></textarea>
             <div class="composer-bar">
                 <div class="composer-selects">
                     <select aria-label="Ajan" @bind="selectedAgent" disabled="@IsActive">

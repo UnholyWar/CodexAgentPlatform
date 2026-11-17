@@ -15,10 +15,6 @@ profile=codex-agent-platform-container
 seccomp=/etc/docker/codex-agent-platform-seccomp.json
 name=codex-agent-platform
 network=codex-agent-backend
-data_volume=codexagentplatform_platform-data
-workspace_volume=codexagentplatform_platform-workspaces
-vault_volume=codexagentplatform_vault-key
-vault_dir=/run/platform-vault
 port=127.0.0.1:18090:8080
 source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 stamp=$(date -u +%Y%m%d%H%M%S)
@@ -31,17 +27,20 @@ layout=$(docker inspect -f '{{.Config.User}} {{.HostConfig.NetworkMode}} {{json 
 expected_layout="app $network {\"8080/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"18090\"}]}"
 [[ $layout == "$expected_layout" ]] || fail 'Container kullanıcısı, ağı veya portu beklenen canlı kurulumla eşleşmedi.'
 
-mounts=$(docker inspect -f '{{range .Mounts}}{{printf "%s %s %s %t\n" .Destination .Type .Name .RW}}{{end}}' "$old" | sort)
-expected_mounts=$(printf '/data volume %s true\n/workspaces volume %s true' "$data_volume" "$workspace_volume")
-expected_with_vault=$(printf '%s\n%s volume %s false\n' "$expected_mounts" "$vault_dir" "$vault_volume" | sort)
-vault_args=()
-case "$mounts" in
-  "$expected_mounts") ;;
-  "$expected_with_vault")
-    vault_args=(--mount "type=volume,src=$vault_volume,dst=$vault_dir,readonly") ;;
-  *) fail 'Container volume düzeni beklenen canlı kurulumla eşleşmedi.' ;;
-esac
 [[ $(docker inspect -f '{{.State.Running}}' "$old") == true ]] || fail 'Mevcut container çalışmıyor.'
+[[ $(docker inspect -f '{{len .HostConfig.Tmpfs}}' "$old") == 0 ]] ||
+  fail 'Container özel tmpfs bağlantıları içeriyor. Otomatik geçiş durduruldu.'
+
+mount_layout() {
+  docker inspect -f '{{range .Mounts}}{{printf "%q %q %q %q %q %t %q\n" .Destination .Type .Name .Source .Driver .RW .Propagation}}{{end}}' "$1" |
+    LC_ALL=C sort
+}
+
+writable_mounts=$(docker inspect -f '{{range .Mounts}}{{if and .RW (or (eq .Type "volume") (eq .Type "bind"))}}{{println .Destination}}{{end}}{{end}}' "$old")
+for target in /data /workspaces; do
+  grep -Fxq "$target" <<< "$writable_mounts" || fail "$target için yazılabilir ve kalıcı bir disk bağlantısı bulunamadı."
+done
+mounts=$(mount_layout "$old")
 
 env_args=()
 while IFS= read -r -d '' variable; do
@@ -55,11 +54,14 @@ apparmor_parser -r -W "$apparmor_file"
 install -D -m 0644 "$source_dir/seccomp.json" "$seccomp"
 
 replacement=''
+switched=false
 restore() {
   local status=$?
   trap - EXIT
   if (( status != 0 )) && [[ -n $replacement ]]; then
     docker rm -f "$replacement" >/dev/null || true
+  fi
+  if (( status != 0 )) && [[ $switched == true ]]; then
     if [[ $(docker inspect -f '{{.Name}}' "$old") != "/$name" ]]; then
       docker rename "$old" "$name" || true
     fi
@@ -79,8 +81,11 @@ replacement=$(docker create --pull never --name "$next" \
   --init --restart unless-stopped --network "$network" -p "$port" \
   --cap-drop=ALL --security-opt=no-new-privileges:true \
   --security-opt="apparmor=$profile" --security-opt="seccomp=$seccomp" \
-  "${env_args[@]}" "${vault_args[@]}" -v "$data_volume:/data" -v "$workspace_volume:/workspaces" "$image")
+  --volumes-from "$old" "${env_args[@]}" "$image")
 
+[[ $(mount_layout "$replacement") == "$mounts" ]] ||
+  fail 'Yeni container aynı disk bağlantılarını devralamadı. Çalışan container durdurulmadan geçiş iptal edildi.'
+switched=true
 docker stop -t 45 "$old" >/dev/null
 docker rename "$old" "$backup"
 docker rename "$replacement" "$name"
