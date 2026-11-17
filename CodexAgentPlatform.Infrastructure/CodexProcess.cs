@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
@@ -8,7 +9,8 @@ using Microsoft.Extensions.Logging;
 
 namespace CodexAgentPlatform.Infrastructure;
 
-public sealed class CodexProcess(PlatformPaths paths, string executable, ILogger<CodexProcess> log)
+public sealed class CodexProcess(PlatformPaths paths, string? executable, ILogger<CodexProcess> log,
+    bool allowWindowsDesktopFallback = false)
     : ICodexConnection, IAsyncDisposable
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
@@ -35,6 +37,10 @@ public sealed class CodexProcess(PlatformPaths paths, string executable, ILogger
             if (proc.ExitCode != 0)
                 throw new CodexRpcException("Codex CLI sürümü okunamadı.");
             return (await output).Trim();
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            throw new TimeoutException("Codex CLI sürüm sorgusuna zamanında yanıt vermedi.");
         }
         finally { Kill(proc); }
     }
@@ -118,7 +124,55 @@ public sealed class CodexProcess(PlatformPaths paths, string executable, ILogger
 
     private Process Start(params string[] args)
     {
-        var info = new ProcessStartInfo(executable)
+        try
+        {
+            var configured = string.IsNullOrWhiteSpace(executable) ? null : executable.Trim();
+            try
+            {
+                return StartProcess(configured ?? "codex", args);
+            }
+            catch (Win32Exception ex) when (ex.NativeErrorCode is 2 or 3 &&
+                configured is null && allowWindowsDesktopFallback && OperatingSystem.IsWindows())
+            {
+                var desktopCli = FindWindowsDesktopCli();
+                if (desktopCli is null) throw;
+                return StartProcess(desktopCli, args);
+            }
+        }
+        catch (Win32Exception ex)
+        {
+            log.LogWarning("Codex CLI could not start. Native error code: {ErrorCode}", ex.NativeErrorCode);
+            var message = ex.NativeErrorCode switch
+            {
+                2 or 3 => "Codex CLI bulunamadı. Platform__CodexExecutable ayarına codex yürütülebilir dosyasının tam yolunu verin.",
+                5 => "Windows, Codex CLI’yi çalıştırma izni vermedi. Dosyanın erişim izinlerini kontrol edin.",
+                193 => "Seçilen Codex dosyası geçerli bir Windows yürütülebilir dosyası değil. codex.exe dosyasının tam yolunu kullanın.",
+                _ => $"Codex CLI başlatılamadı (işletim sistemi hata kodu: {ex.NativeErrorCode})."
+            };
+            throw new CodexRpcException(message);
+        }
+    }
+
+    private static string? FindWindowsDesktopCli()
+    {
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        if (string.IsNullOrWhiteSpace(localAppData)) return null;
+        var directory = new DirectoryInfo(Path.Combine(localAppData, "OpenAI", "Codex", "bin"));
+        if (!directory.Exists) return null;
+
+        var versioned = directory.EnumerateDirectories()
+            .Where(x => x.Name.Length == 16 && x.Name.All(char.IsAsciiHexDigit))
+            .Select(x => new FileInfo(Path.Combine(x.FullName, "codex.exe")))
+            .Where(x => x.Exists)
+            .OrderByDescending(x => x.LastWriteTimeUtc)
+            .FirstOrDefault();
+        var unversioned = new FileInfo(Path.Combine(directory.FullName, "codex.exe"));
+        return versioned?.FullName ?? (unversioned.Exists ? unversioned.FullName : null);
+    }
+
+    private Process StartProcess(string path, string[] args)
+    {
+        var info = new ProcessStartInfo(path)
         {
             WorkingDirectory = paths.Workspaces, UseShellExecute = false, CreateNoWindow = true,
             RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true,

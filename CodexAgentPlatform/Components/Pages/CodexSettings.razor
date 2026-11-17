@@ -156,8 +156,16 @@
         if (busy) return;
         busy = true; error = null; notice = null;
         try { await action(); }
-        catch (Exception ex) { error = ex is CodexRpcException or InvalidOperationException or TimeoutException
-            ? ex.Message : "Codex CLI başlatılamadı. Yürütülebilir dosya yolunu ve çalışma ortamını kontrol edin."; }
+        catch (Exception ex)
+        {
+            error = ex switch
+            {
+                CodexRpcException or InvalidOperationException or TimeoutException => ex.Message,
+                UnauthorizedAccessException => "Codex çalışma dizinine erişilemiyor. Uygulamanın veri dizini izinlerini kontrol edin.",
+                IOException => "Codex App Server bağlantısı kurulamadı veya kesildi. Yeniden bağlanıp bağlantıyı test edin.",
+                _ => "Codex ayarları işlemi başarısız oldu. Uygulama günlüklerini kontrol edin."
+            };
+        }
         finally { busy = false; }
     }
 

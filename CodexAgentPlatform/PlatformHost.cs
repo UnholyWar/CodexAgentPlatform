@@ -33,8 +33,8 @@ public static class PlatformHost
         builder.Services.AddSingleton<ContextBudget>();
         builder.Services.AddSingleton(new Vault(paths, config["Platform:VaultKeyFile"]));
         builder.Services.AddSingleton<Operations>();
-        builder.Services.AddSingleton<ICodexConnection>(sp => new CodexProcess(paths, config["Platform:CodexExecutable"] ?? "codex",
-            sp.GetRequiredService<ILogger<CodexProcess>>()));
+        builder.Services.AddSingleton<ICodexConnection>(sp => new CodexProcess(paths, config["Platform:CodexExecutable"],
+            sp.GetRequiredService<ILogger<CodexProcess>>(), allowWindowsDesktopFallback: builder.Environment.IsDevelopment()));
         builder.Services.AddSingleton<CodexAccounts>();
         builder.Services.AddSingleton(sp => ActivatorUtilities.CreateInstance<ChatWorker>(sp,
             Math.Clamp(config.GetValue("Platform:Concurrency", 2), 1, 4)));

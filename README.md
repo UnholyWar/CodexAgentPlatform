@@ -6,7 +6,7 @@
 
 1. Visual Studio’da `CodexAgentPlatform.slnx` dosyasını açın. Başlangıç projesi `CodexAgentPlatform`, profil `https` olsun.
 2. HTTPS sertifikası ilk kez kullanılacaksa `dotnet dev-certs https --trust` çalıştırın.
-3. CLI’nin kurulu olduğunu `codex --version` ile kontrol edin. Özel bir kurulumda `Platform__CodexExecutable` ayarına yürütülebilir dosyanın tam yolunu verin.
+3. CLI’nin kurulu olduğunu `codex --version` ile kontrol edin. Windows geliştirme profilinde uygulama, PATH’te bulunamayan CLI için Codex masaüstü kurulumuna da bakar. Özel bir kurulumda `Platform__CodexExecutable` ayarına yürütülebilir dosyanın tam yolunu verin.
 4. İlk açılışta kurulum sayfasında yeni yönetici adınızı ve en az 14 karakterlik güçlü şifrenizi belirleyin. Geliştirmede doğrudan loopback bağlantısı ve `Platform__LocalBootstrap=true` varsa geçici şifre `admin` kabul edilir. Diğer ortamlarda kurulum kodunu veri dizinindeki `credentials/bootstrap-code` dosyasından okuyun. Kurulum tamamlandığında geçici erişim geçersiz olur.
 5. **Codex ayarları** ekranında bağlantıyı test edin ve **Cihaz koduyla giriş yap** düğmesini kullanın. Cihaz kodu seçeneği hesabınızın veya çalışma alanınızın güvenlik ayarlarında etkin olmalıdır. Oturum bu uygulamanın `data/codex` dizininde tutulur.
 6. **Ajanlar** ekranında ajan rollerini, proje izinlerini, model ve reasoning effort ayarlarını düzenleyin. Sohbette ajan seçebilir veya `@Developer`, `@Architect`, `@QA`, `@DevOps` ile başlayabilirsiniz.
@@ -63,7 +63,7 @@ Testler HTTPS oturumu, ilk kurulum, migration, SQLite yedeği, FTS5, hafıza sü
 | --- | --- |
 | `Platform__Data` | Web projesi altında `data` |
 | `Platform__Workspaces` | Web projesi altında `workspaces` |
-| `Platform__CodexExecutable` | `codex` |
+| `Platform__CodexExecutable` | PATH üzerindeki `codex`. Windows geliştirme profilinde Codex masaüstü kurulumu da aranır. |
 | `Platform__LocalCodexLogin` | Geliştirme profilleri ve loopback Compose örneğinde `true` |
 | `Platform__Concurrency` | `2`, geçerli aralık 1–4 |
 | `Platform__LocalBootstrap` | `false`, yalnızca geliştirme ve doğrudan loopback için etkinleştirin |

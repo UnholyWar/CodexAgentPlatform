@@ -8,6 +8,23 @@ namespace CodexAgentPlatform.Tests;
 
 public sealed class LiveCodexTests
 {
+    [CodexFact("CAP_TEST_CODEX_WITHOUT_PATH")]
+    public async Task WindowsDevelopmentDiscoversDesktopCliAndStartsAppServerWithoutPathEntry()
+    {
+        Assert.True(OperatingSystem.IsWindows());
+        await using var storage = await TestStorage.CreateAsync();
+        await using var codex = new CodexProcess(storage.Paths, null, NullLogger<CodexProcess>.Instance,
+            allowWindowsDesktopFallback: true);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+        var ct = timeout.Token;
+        Assert.Contains("codex", await codex.VersionAsync(ct), StringComparison.OrdinalIgnoreCase);
+        var accounts = new CodexAccounts(codex);
+        Assert.Equal(JsonValueKind.Object, (await accounts.ReadAsync(ct)).ValueKind);
+        Assert.NotEmpty(await accounts.ModelsAsync(ct));
+        Assert.Contains((await accounts.WindowsReadinessAsync(ct)).String("status"),
+            new[] { "ready", "notConfigured", "updateRequired" });
+    }
+
     [CodexFact("CAP_TEST_CODEX_EXE")]
     public async Task InstalledCliSupportsInitializeAccountAndReconnectOverStdio()
     {
