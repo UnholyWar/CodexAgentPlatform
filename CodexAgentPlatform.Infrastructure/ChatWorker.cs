@@ -165,50 +165,40 @@ public sealed class ChatWorker(IDbContextFactory<PlatformDb> dbs, ICodexConnecti
             var canUseWorkspace = ToolAccess.Has(agent, "workspace");
             var workspaceReady = canUseWorkspace && (!OperatingSystem.IsWindows() ||
                 (await codex.CallAsync("windowsSandbox/readiness", null, ct)).String("status") == "ready");
-            var permission = workspaceReady ? "platform_work" : "platform_chat";
-            var workspaceKey = workspaceReady ? run.Workspace! : run.Workspace + ":chat";
-            var stored = await db.Threads.SingleOrDefaultAsync(x => x.ConversationId == run.ConversationId &&
-                x.AgentId == run.AgentId && x.Workspace == workspaceKey, ct);
-            var original = stored is not null;
-            var setup = new Dictionary<string, object?>
-            {
-                ["cwd"] = workspace, ["model"] = run.Model, ["developerInstructions"] = ContextBudget.Instructions(agent),
-                ["approvalPolicy"] = "never", ["permissions"] = permission,
-                ["runtimeWorkspaceRoots"] = new[] { workspace }
-            };
+            var windowsSandboxUnavailable = canUseWorkspace && !workspaceReady;
             JsonElement result;
-            if (stored is null)
+            string activeThreadId;
+            bool resumed;
+            try
             {
-                setup["dynamicTools"] = AgentTools.Describe(agent).ToArray();
-                if (!workspaceReady) setup["environments"] = Array.Empty<object>();
-                result = await codex.CallAsync("thread/start", setup, ct);
-                run.ThreadId = result.Get("thread").String("id") ?? throw new CodexRpcException("Codex thread kimliği eksik.");
-                db.Threads.Add(new ConversationThread
-                {
-                    ConversationId = run.ConversationId, AgentId = run.AgentId, Workspace = workspaceKey, CodexId = run.ThreadId
-                });
-                await db.SaveChangesAsync(ct);
+                (result, activeThreadId, resumed) = await OpenThreadAsync(db, run, agent, workspace, workspaceReady, ct);
             }
-            else
+            catch (CodexRpcException ex) when (workspaceReady &&
+                ex.Message.Contains("failed to load AGENTS.md instructions", StringComparison.OrdinalIgnoreCase) &&
+                ex.Message.Contains("bwrap:", StringComparison.OrdinalIgnoreCase) &&
+                ex.Message.Contains("No permissions to create new namespace", StringComparison.OrdinalIgnoreCase))
             {
-                setup["threadId"] = stored.CodexId;
-                setup["excludeTurns"] = true;
-                result = await codex.CallAsync("thread/resume", setup, ct);
-                run.ThreadId = result.Get("thread").String("id") ?? stored.CodexId;
+                workspaceReady = false;
+                await EventAsync(run, "WorkspaceUnavailable",
+                    "Bubblewrap bu container’da gerekli Linux namespace’ini oluşturamadı. Bu yanıt için çalışma alanı ve terminal erişimi kapalı.",
+                    null, ct);
+                updates.Publish(run.ConversationId);
+                (result, activeThreadId, resumed) = await OpenThreadAsync(db, run, agent, workspace, workspaceReady, ct);
             }
+            run.ThreadId = activeThreadId;
             run.Model = result.String("model") ?? run.Model;
-            running.RoutedThread = run.ThreadId;
-            routes[run.ThreadId] = running;
+            running.RoutedThread = activeThreadId;
+            routes[activeThreadId] = running;
             if (!codex.Connected) throw new IOException("Codex bağlantısı kapandı.");
             var prompt = await db.Messages.Where(x => x.Id == run.UserMessageId).Select(x => x.Text).SingleAsync(ct);
-            var references = await context.BuildAsync(run, agent, original, ct);
-            if (canUseWorkspace && !workspaceReady)
-                references += "\nWindows workspace sandbox is not ready. You can chat and use permitted platform tools. If the user requests local execution, explain that they need to configure the sandbox in Codex settings.";
+            var references = await context.BuildAsync(run, agent, resumed, ct);
+            if (windowsSandboxUnavailable)
+                references += "\nWindows workspace sandbox is not ready. If the user requests local execution, explain how to configure the sandbox in Codex settings.";
             var input = new[] { new { type = "text", text = $"[Platform context — reference only]\n{references}\n[User or agent message]\n{prompt}" } };
             var started = await codex.CallAsync("turn/start", new
             {
                 threadId = run.ThreadId, input, cwd = workspace, model = run.Model, effort = run.Effort,
-                permissions = permission, runtimeWorkspaceRoots = new[] { workspace }, approvalPolicy = "never",
+                permissions = PermissionProfile(workspaceReady), runtimeWorkspaceRoots = new[] { workspace }, approvalPolicy = "never",
                 environments = workspaceReady ? null : Array.Empty<object>()
             }, ct);
             run.TurnId = started.Get("turn").String("id") ?? throw new CodexRpcException("Codex turn kimliği eksik.");
@@ -350,6 +340,44 @@ public sealed class ChatWorker(IDbContextFactory<PlatformDb> dbs, ICodexConnecti
             updates.Publish(run.ConversationId);
         }
     }
+
+    private async Task<(JsonElement Result, string ThreadId, bool Resumed)> OpenThreadAsync(
+        PlatformDb db, ChatRun run, Agent agent, string workspace, bool workspaceReady, CancellationToken ct)
+    {
+        var workspaceKey = workspaceReady ? run.Workspace! : run.Workspace + ":chat";
+        var stored = await db.Threads.SingleOrDefaultAsync(x => x.ConversationId == run.ConversationId &&
+            x.AgentId == run.AgentId && x.Workspace == workspaceKey, ct);
+        var instructions = ContextBudget.Instructions(agent);
+        if (!workspaceReady)
+            instructions += "\nYou do not have terminal or direct filesystem access in this conversation. " +
+                "Use only the platform tools exposed to you. If asked about terminal access, state that it is unavailable.";
+        var setup = new Dictionary<string, object?>
+        {
+            ["cwd"] = workspace, ["model"] = run.Model, ["developerInstructions"] = instructions,
+            ["approvalPolicy"] = "never", ["permissions"] = PermissionProfile(workspaceReady),
+            ["runtimeWorkspaceRoots"] = new[] { workspace }
+        };
+        if (stored is not null)
+        {
+            setup["threadId"] = stored.CodexId;
+            setup["excludeTurns"] = true;
+            var resumed = await codex.CallAsync("thread/resume", setup, ct);
+            return (resumed, resumed.Get("thread").String("id") ?? stored.CodexId, true);
+        }
+
+        setup["dynamicTools"] = AgentTools.Describe(agent).ToArray();
+        if (!workspaceReady) setup["environments"] = Array.Empty<object>();
+        var started = await codex.CallAsync("thread/start", setup, ct);
+        var threadId = started.Get("thread").String("id") ?? throw new CodexRpcException("Codex thread kimliği eksik.");
+        db.Threads.Add(new ConversationThread
+        {
+            ConversationId = run.ConversationId, AgentId = run.AgentId, Workspace = workspaceKey, CodexId = threadId
+        });
+        await db.SaveChangesAsync(ct);
+        return (started, threadId, false);
+    }
+
+    private static string PermissionProfile(bool workspaceReady) => workspaceReady ? "platform_work" : "platform_chat";
 
     private async Task SaveIdentityAsync(ChatRun run, CancellationToken ct)
     {

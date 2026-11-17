@@ -62,6 +62,40 @@ public sealed class ChatTests
         finally { await worker.StopAsync(default); worker.Dispose(); }
     }
 
+    [Theory]
+    [InlineData("developer", true)]
+    [InlineData("architect", false)]
+    public async Task ChatOnlyThreadsHaveExplicitCapabilitiesAndNeverReplayTheTurn(string agentId, bool workspaceDenied)
+    {
+        await using var storage = await TestStorage.CreateAsync();
+        var codex = new FakeCodex { DenyWorkspaceNamespace = workspaceDenied };
+        var updates = new ChatUpdates();
+        var chats = new ChatStore(storage, updates);
+        var worker = Worker(storage, codex, updates);
+        await worker.StartAsync(default);
+        try
+        {
+            var chat = await chats.SendAsync(null, "İlk mesaj", agentId, null, default);
+            await WaitAsync(async () => (await chats.ReadAsync(chat, 10, default)).Run?.Status == WorkStatus.Completed);
+            var result = await chats.ReadAsync(chat, 10, default);
+            Assert.Collection(result.Messages, x => Assert.Equal("İlk mesaj", x.Text), x => Assert.Equal("Test yanıtı", x.Text));
+            Assert.Equal(workspaceDenied ? 2 : 1, codex.ThreadRequests.Count);
+            if (workspaceDenied) Assert.Equal("platform_work", codex.ThreadRequests[0].String("permissions"));
+            var chatRequest = codex.ThreadRequests[^1];
+            AssertChatOnly(chatRequest);
+            Assert.Contains("You do not have terminal or direct filesystem access in this conversation.",
+                chatRequest.String("developerInstructions"));
+            AssertChatOnly(Assert.Single(codex.TurnRequests));
+
+            await using var db = storage.CreateDbContext();
+            var thread = Assert.Single(await db.Threads.Where(x => x.ConversationId == chat).ToListAsync());
+            Assert.Equal(result.Run!.Workspace + ":chat", thread.Workspace);
+            Assert.Equal(workspaceDenied ? 1 : 0,
+                await db.Events.CountAsync(x => x.ConversationId == chat && x.Kind == "WorkspaceUnavailable"));
+        }
+        finally { await worker.StopAsync(default); worker.Dispose(); }
+    }
+
     [Fact]
     public async Task TaskAndMemoryToolsPersistStructuredWork()
     {
@@ -95,6 +129,14 @@ public sealed class ChatTests
     }
 
     private static JsonElement Args(object payload) => JsonSerializer.SerializeToElement(payload);
+
+    private static void AssertChatOnly(JsonElement request)
+    {
+        Assert.Equal("platform_chat", request.String("permissions"));
+        var environments = request.Get("environments");
+        Assert.Equal(JsonValueKind.Array, environments.ValueKind);
+        Assert.Equal(0, environments.GetArrayLength());
+    }
     private static async Task WaitAsync(Func<Task<bool>> predicate)
     {
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
@@ -105,7 +147,10 @@ public sealed class ChatTests
     {
         public bool Connected { get; private set; }
         public bool DropNext { get; set; }
+        public bool DenyWorkspaceNamespace { get; set; }
         public List<string> Methods { get; } = [];
+        public List<JsonElement> ThreadRequests { get; } = [];
+        public List<JsonElement> TurnRequests { get; } = [];
         public string? TurnModel { get; private set; }
         private int count;
         public event Action<CodexEvent>? Received;
@@ -118,11 +163,23 @@ public sealed class ChatTests
             Connected = true;
             Methods.Add(method);
             const string threadId = "t1";
+            if (method == "windowsSandbox/readiness" && DenyWorkspaceNamespace)
+                return Task.FromResult(Args(new { status = "ready" }));
             if (method is "thread/start" or "thread/resume")
+            {
+                var request = Args(parameters!);
+                ThreadRequests.Add(request);
+                if (DenyWorkspaceNamespace && request.String("permissions") == "platform_work")
+                    return Task.FromException<JsonElement>(new CodexRpcException(
+                        "error creating thread: failed to load AGENTS.md instructions for environment `local`: " +
+                        "fs sandbox helper failed with status exit status: 1: bwrap: No permissions to create new namespace"));
                 return Task.FromResult(Args(new { thread = new { id = threadId } }));
+            }
             if (method == "turn/start")
             {
-                TurnModel = Args(parameters!).String("model");
+                var request = Args(parameters!);
+                TurnRequests.Add(request);
+                TurnModel = request.String("model");
                 var turnId = $"turn-{++count}";
                 if (DropNext)
                 {

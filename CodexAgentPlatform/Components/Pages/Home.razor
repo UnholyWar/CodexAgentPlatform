@@ -67,6 +67,10 @@
                 {
                     <p class="notice error" role="status">@snapshot.Run.Error</p>
                 }
+                @if (WorkspaceNotice is { } workspaceNotice)
+                {
+                    <p class="notice" role="status">@workspaceNotice</p>
+                }
                 @foreach (var approval in snapshot.Approvals)
                 {
                     <div class="notice"><span>Onay · @approval.Status</span><strong>@approval.Scope</strong>
@@ -126,6 +130,10 @@
     private bool sending, disposed, scroll;
     private int refreshQueued;
     private bool IsActive => snapshot.Run is { } run && ChatStore.Active.Contains(run.Status);
+    private string? WorkspaceNotice => snapshot.Run is { } run
+        ? snapshot.Events.FirstOrDefault(entry => entry.Kind == "WorkspaceUnavailable" && entry.AgentId == run.AgentId &&
+            entry.EventOccurredAtUtc >= run.CreatedAtUtc)?.Detail
+        : null;
     private string Title => title ?? "Sohbet";
 
     protected override async Task OnInitializedAsync()
