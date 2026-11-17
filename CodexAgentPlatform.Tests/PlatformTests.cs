@@ -101,6 +101,14 @@ public sealed class PlatformTests
     }
 
     [Fact]
+    public void SshSourceAcceptsPrivateKeyAndRejectsPublicKey()
+    {
+        using var rsa = System.Security.Cryptography.RSA.Create(2048);
+        Operations.ValidateSshPrivateKey(rsa.ExportRSAPrivateKeyPem());
+        Assert.Throws<ArgumentException>(() => Operations.ValidateSshPrivateKey(rsa.ExportRSAPublicKeyPem()));
+    }
+
+    [Fact]
     public async Task VaultAndBrokerEnforceScopeBeforeConnecting()
     {
         await using var fixture = await TestStorage.CreateAsync();

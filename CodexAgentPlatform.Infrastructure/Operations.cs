@@ -270,6 +270,22 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         finally { CryptographicOperations.ZeroMemory(bytes); }
     }
 
+    public static void ValidateSshPrivateKey(string secret)
+    {
+        var bytes = Encoding.UTF8.GetBytes(secret);
+        try
+        {
+            using var stream = new MemoryStream(bytes, writable: false);
+            using var key = new PrivateKeyFile(stream);
+        }
+        catch (Exception ex) when (ex is Renci.SshNet.Common.SshException or CryptographicException or
+            ArgumentException or FormatException or NotSupportedException or InvalidOperationException)
+        {
+            throw new ArgumentException("Geçerli, parolasız bir SSH özel anahtarı girin.");
+        }
+        finally { CryptographicOperations.ZeroMemory(bytes); }
+    }
+
     private static async Task<object> ReadSftpAsync(Resource resource, PrivateKeyFile key, string secret, CancellationToken ct)
     {
         var path = resource.SftpFile;
@@ -327,7 +343,8 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         {
             secret = await vault.ReadAsync(vaultId, ct);
             if (secret.Contains('\r') || secret.Contains('\n')) throw new InvalidOperationException("Geçersiz Git erişim bilgisi.");
-            var base64 = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{authentication.Username ?? "x-access-token"}:{secret}"));
+            var username = string.IsNullOrWhiteSpace(authentication.Username) ? "x-access-token" : authentication.Username.Trim();
+            var base64 = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{username}:{secret}"));
             options[$"http.{GitAddress(authentication)}.extraHeader"] = "Authorization: Basic " + base64;
         }
         start.Environment["GIT_CONFIG_COUNT"] = options.Count.ToString(System.Globalization.CultureInfo.InvariantCulture);

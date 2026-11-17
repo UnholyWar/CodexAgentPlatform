@@ -106,6 +106,27 @@ curl -sS -D - -o /dev/null \
 
 HTTP `200` ve JavaScript içerik türü beklenir. Betik `404` dönüyorsa framework dosyalarını içeren güncel imajı kullanın.
 
+### Canlı container’da terminali etkinleştir
+
+Ubuntu'da Docker'ın varsayılan güvenlik profilleri Bubblewrap'in iç Linux namespace'lerini engelleyebilir. Sohbet çalışırken çalışma alanı ve terminal kapalı görünüyorsa [Docker sandbox kurulum betiğini](deploy/docker-sandbox/enable.sh) çalışan sunucuda yürütün. Depoyu kopyalarken `deploy/docker-sandbox` klasörünü içeriğiyle birlikte taşıyın.
+
+```bash
+sudo bash deploy/docker-sandbox/enable.sh
+```
+
+Bu betik 2. adımdaki canlı kurulumu hedefler. Aynı imajı, uygulama ortam değişkenlerini, portu, ağı ve volume’ları kullanır. Geçiş sırasında kısa bir kesinti olur. HTTP, Bubblewrap ve çalışma alanı testlerinden biri başarısız olursa önceki container yeniden başlatılır. Başarılı geçişten sonra DevOps Engineer ile bir projede `pwd` çalıştırın ve terminal çıktısını kontrol edin.
+
+Betiğin yüklediği AppArmor ve seccomp profilleri OpenAI’nin Docker içinde Bubblewrap çalıştırmak için yayımladığı yapılandırmaya dayanır. [OpenAI Docker sandbox belgeleri](https://github.com/openai/codex-security/blob/main/docker/README.md)
+
+Terminali etkinleştirdiyseniz sonraki imaj güncellemelerinde 2. adımdaki `docker run` komutuna bu seçenekleri de ekleyin.
+
+```bash
+  --cap-drop=ALL \
+  --security-opt=no-new-privileges:true \
+  --security-opt=apparmor=codex-agent-platform-container \
+  --security-opt=seccomp=/etc/docker/codex-agent-platform-seccomp.json \
+```
+
 ### Yeni imaja geçiş
 
 Yeni sürüm yayımlandığında `docker pull ghcr.io/unholywar/codexagentplatform:latest` çalıştırın. Mevcut container’ı durdurup geri dönüş için farklı bir ada alın, ardından 2. adımdaki canlı komutu aynı volume adlarıyla yeniden çalıştırın. Nginx, aynı yerel porta yönlendirmeye devam eder.
@@ -115,7 +136,39 @@ Yeni sürüm yayımlandığında `docker pull ghcr.io/unholywar/codexagentplatfo
 - `codexagentplatform_platform-data` → `/data`. SQLite, sohbetler, hafıza notları, Codex oturumu ve uygulama verileri.
 - `codexagentplatform_platform-workspaces` → `/workspaces`. Proje çalışma alanları.
 - Yeniden dağıtırken aynı volume adlarını kullanın. Mevcut kurulum farklı bir Compose proje adı kullanıyorsa önce `docker volume ls` ile gerçek adları bulun. **Sistem** ekranından SQLite yedeği alabilirsiniz.
-- Git veya SSH erişim bilgileri saklanacaksa 32 baytlık base64 Vault anahtarını salt okunur dosya olarak bağlayıp container içindeki yolunu `Platform__VaultKeyFile` ile verin. Geri yüklemede aynı anahtarı kullanın.
+
+## Private Git ve SSH kaynakları
+
+Uygulama Git erişim belirteçlerini ve SSH özel anahtarlarını şifreleyerek `/data/credentials` altında saklar. Vault anahtarını ayrı bir Docker volume’unda tutabilirsiniz. Çalışan canlı kurulumda ilk kez anahtar oluşturmak için aşağıdaki komutu Docker hostunda çalıştırın.
+
+```bash
+platform_image=$(docker inspect -f '{{.Image}}' codex-agent-platform)
+
+docker run --rm --user 0:0 --entrypoint /bin/sh \
+  -v codexagentplatform_vault-key:/vault "$platform_image" -ec '
+    if [ ! -e /vault/master.key ]; then
+      umask 077
+      set -C
+      node -e "process.stdout.write(require(\"node:crypto\").randomBytes(32).toString(\"base64\") + \"\\n\")" >/vault/master.key
+    fi
+    test -s /vault/master.key
+    chown app:app /vault/master.key
+    chmod 0400 /vault/master.key
+  '
+```
+
+Mevcut container’ı durdurup geri dönüş için farklı bir ada alın. 2. adımdaki canlı `docker run` komutuna aşağıdaki seçenekleri ekleyin. Önceden Vault kullandıysanız mevcut anahtar dosyasını bağlamaya devam edin.
+
+```bash
+  --mount type=volume,src=codexagentplatform_vault-key,dst=/run/platform-vault,readonly \
+  -e Platform__VaultKeyFile=/run/platform-vault/master.key \
+```
+
+Sonraki imaj güncellemelerinde aynı volume’u ve anahtar yolunu kullanın. Veri yedeğini geri yüklerken Vault kayıtlarını açmak için aynı anahtar gerekir.
+
+- **GitRepository** eklerken projeyi ve HTTPS depo adresini girin. Özel depo için **Özel depo** seçeneğini işaretleyip erişim belirtecini (PAT) girin. GitHub’da belirteci ilgili depoyla sınırlayın. Klonlama ve pull için okuma, push için yazma yetkisi gerekir. [GitHub erişim belirteçleri](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)
+- **SshServer** eklerken container içinden erişilebilen hostname veya IP’yi girin. Kullanıcı ve port varsayılanları `root` ve `22`. Uzak sunucunun izin verdiği kullanıcıyı ve portu seçin. Bağlantıya özel bir SSH anahtar çifti hazırlayın. `.pub` dosyasını o kullanıcının `~/.ssh/authorized_keys` dosyasına ekleyin, parolasız özel anahtarı ise uygulamadaki **SSH özel anahtarı** alanına girin. [OpenSSH yetkili anahtarlar](https://man.openbsd.org/sshd#AUTHORIZED_KEYS_FILE_FORMAT)
+- **Sunucu anahtarının parmak izi** alanına hedef SSH sunucusunun doğrulanmış `SHA256:…` değerini girin. Örneğin Ed25519 host anahtarı için hedef sunucuda `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` çalıştırın. Kaydettikten sonra DevOps Engineer’a aynı projedeki SSH kaynağının bağlantısını test etmesini söyleyin. [OpenSSH parmak izi](https://man.openbsd.org/ssh-keygen#l)
 
 Depodaki [Docker Compose dosyası](docker-compose.yml), TLS’i uygulamanın karşıladığı alternatif loopback kurulumudur. Bu seçenekte PFX, sertifika parolası ve Vault anahtarı gerekir.
 
