@@ -129,7 +129,16 @@ Terminali etkinleştirdiyseniz sonraki imaj güncellemelerinde 2. adımdaki `doc
 
 ### Yeni imaja geçiş
 
-Yeni sürüm yayımlandığında `docker pull ghcr.io/unholywar/codexagentplatform:latest` çalıştırın. Mevcut container’ı durdurup geri dönüş için farklı bir ada alın, ardından 2. adımdaki canlı komutu aynı volume adlarıyla yeniden çalıştırın. Nginx, aynı yerel porta yönlendirmeye devam eder.
+Sandbox betiğiyle kurulan canlı container’ı güncellemek için yeni imajı çekip aynı betiğe verin.
+
+```bash
+docker pull ghcr.io/unholywar/codexagentplatform:latest
+sudo bash deploy/docker-sandbox/enable.sh --image ghcr.io/unholywar/codexagentplatform:latest
+```
+
+Betik mevcut disk bağlantılarını, uygulama ortam ayarlarını, portu ve sandbox profillerini kullanır. Yeni container kontrolleri geçemezse önceki container’ı yeniden başlatır.
+
+Canlı container 2. adımdaki `docker run` komutuyla yönetiliyorsa önce imajı çekin. Mevcut container’ı durdurup geri dönüş için farklı bir ada alın, ardından canlı komutu mevcut bağlantılarla yeniden çalıştırın.
 
 ## Kalıcı veriler
 

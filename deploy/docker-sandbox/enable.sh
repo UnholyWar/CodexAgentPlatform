@@ -6,6 +6,12 @@ fail() {
   exit 1
 }
 
+requested_image=''
+if (( $# > 0 )); then
+  [[ $# == 2 && $1 == --image && -n $2 ]] || fail 'Kullanım: bash enable.sh [--image İMAJ]'
+  requested_image=$2
+fi
+
 [[ $EUID == 0 ]] || fail 'Sunucuda sudo bash enable.sh ile çalıştırın.'
 for command in docker curl apparmor_parser; do
   command -v "$command" >/dev/null || fail "Gerekli komut bulunamadı: $command"
@@ -22,7 +28,18 @@ backup="$name-before-sandbox-$stamp"
 next="$name-sandbox-$stamp"
 
 old=$(docker inspect --type container -f '{{.Id}}' "$name")
-image=$(docker inspect -f '{{.Image}}' "$old")
+old_image=$(docker inspect -f '{{.Image}}' "$old")
+image=$old_image
+if [[ -n $requested_image ]]; then
+  image=$(docker image inspect -f '{{.Id}}' -- "$requested_image") ||
+    fail 'Seçilen imaj yerelde bulunamadı. Önce docker pull çalıştırın.'
+  if [[ $image == "$old_image" ]]; then
+    printf 'Container seçilen imajla zaten çalışıyor.\n'
+    exit 0
+  fi
+  [[ $(docker image inspect -f '{{.Config.User}}' "$image") == app ]] ||
+    fail 'Seçilen imaj beklenen app kullanıcısını içermiyor.'
+fi
 layout=$(docker inspect -f '{{.Config.User}} {{.HostConfig.NetworkMode}} {{json .HostConfig.PortBindings}}' "$old")
 expected_layout="app $network {\"8080/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"18090\"}]}"
 [[ $layout == "$expected_layout" ]] || fail 'Container kullanıcısı, ağı veya portu beklenen canlı kurulumla eşleşmedi.'
@@ -42,10 +59,25 @@ for target in /data /workspaces; do
 done
 mounts=$(mount_layout "$old")
 
+env_format='{{range .Config.Env}}{{printf "%s\x00" .}}{{end}}'
+image_defaults=()
+if [[ $image != "$old_image" ]]; then
+  mapfile -d '' -t image_defaults < <(docker image inspect -f "$env_format" "$old_image")
+fi
+is_old_image_default() {
+  local setting
+  for setting in "${image_defaults[@]}"; do
+    if [[ $1 == "$setting" ]]; then return 0; fi
+  done
+  return 1
+}
+
 env_args=()
 while IFS= read -r -d '' variable; do
-  env_args+=(--env "$variable")
-done < <(docker inspect -f '{{range .Config.Env}}{{printf "%s\x00" .}}{{end}}' "$old")
+  if ! is_old_image_default "$variable"; then
+    env_args+=(--env "$variable")
+  fi
+done < <(docker inspect -f "$env_format" "$old")
 
 apparmor_file=/etc/apparmor.d/$profile
 apparmor_parser -Q -W "$source_dir/codex-agent-platform.apparmor"
