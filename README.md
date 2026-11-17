@@ -2,6 +2,16 @@
 
 .NET 10 hedefleyen Blazor Interactive Server uygulaması. Yönetici, sohbetten Codex ajanlarıyla çalışır. Konuşmalar ve görev olayları SQLite’ta, sürümlenmiş bilgi notları Markdown dosyalarında saklanır. Arka plan çalışması tarayıcı bağlantısından bağımsızdır.
 
+## Yerelde hızlı başlatma
+
+Depo kökünde PowerShell ile çalıştırın.
+
+```powershell
+dotnet run --project CodexAgentPlatform --launch-profile https
+```
+
+Tarayıcıda [https://localhost:7213](https://localhost:7213) adresini açın. Uygulamayı durdurmak için terminalde `Ctrl+C` tuşlarına basın.
+
 ## Visual Studio veya komut satırından çalıştırma
 
 1. Visual Studio’da `CodexAgentPlatform.slnx` dosyasını açın. Başlangıç projesi `CodexAgentPlatform`, profil `https` olsun.
@@ -10,10 +20,6 @@
 4. İlk açılışta kurulum sayfasında yeni yönetici adınızı ve en az 14 karakterlik güçlü şifrenizi belirleyin. Geliştirmede doğrudan loopback bağlantısı ve `Platform__LocalBootstrap=true` varsa geçici şifre `admin` kabul edilir. Diğer ortamlarda kurulum kodunu veri dizinindeki `credentials/bootstrap-code` dosyasından okuyun. Kurulum tamamlandığında geçici erişim geçersiz olur.
 5. **Codex ayarları** ekranında bağlantıyı test edin ve **Cihaz koduyla giriş yap** düğmesini kullanın. Cihaz kodu seçeneği hesabınızın veya çalışma alanınızın güvenlik ayarlarında etkin olmalıdır. Oturum bu uygulamanın `data/codex` dizininde tutulur.
 6. **Ajanlar** ekranında ajan rollerini, proje izinlerini, model ve reasoning effort ayarlarını düzenleyin. Sohbette ajan seçebilir veya `@Developer`, `@Architect`, `@QA`, `@DevOps` ile başlayabilirsiniz.
-
-```powershell
-dotnet run --project CodexAgentPlatform --launch-profile https
-```
 
 App Server, uygulama tarafından JSONL üzerinden `stdio` ile başlatılır. Uygulama tek yöneticiye ait yerel kullanım için tasarlanmıştır. App Server hesabıyla kimlik doğrulamanın kapsamı ve ayrı barındırılan servis akışı için [OpenAI’nin App Server belgelerine](https://learn.chatgpt.com/docs/app-server#auth-endpoints) bakın. [Headless cihaz kodu akışı](https://learn.chatgpt.com/docs/auth#login-on-headless-devices).
 
