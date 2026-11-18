@@ -59,6 +59,13 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
     }
 
     public async Task<string> SendAsync(string? chatId, string text, string? selectedAgent, string? projectId, CancellationToken ct,
+        bool autoApproveNewChat = false, long? voiceMessageId = null) =>
+        (await SubmitAsync(chatId, text, selectedAgent, projectId, ct, autoApproveNewChat, voiceMessageId)).ChatId;
+
+    internal async Task<string?> SubmitVoiceAsync(Message user, string? selectedAgent, CancellationToken ct) =>
+        (await SubmitAsync(user.ConversationId, user.Text, selectedAgent, user.VoiceProjectId, ct, voiceMessageId: user.Id)).Reply;
+
+    private async Task<(string ChatId, string? Reply)> SubmitAsync(string? chatId, string text, string? selectedAgent, string? projectId, CancellationToken ct,
         bool autoApproveNewChat = false, long? voiceMessageId = null)
     {
         text = text.Trim();
@@ -92,12 +99,18 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
             if (mentions.Length == 1) projectId = mentions[0].Id;
             else if (mentions.Length > 1)
                 return await SaveExchangeAsync(db, tx, chat, chatId, explicitAgent ?? normal, text,
-                    $"This request includes multiple projects. Which should we start with, {mentions[0].Name} or {mentions[1].Name}?", ct);
+                    $"This request includes multiple projects. Which should we start with, {mentions[0].Name} or {mentions[1].Name}?", voiceMessageId, ct);
             else projectId = last?.ProjectId;
         }
         var previousAgent = last is not null && last.ProjectId == projectId
             ? agents.Find(a => a.Id == last.AgentId && ToolAccess.AllowsProject(a, projectId)) : null;
-        var agent = explicitAgent ?? previousAgent ?? normal;
+        var agent = explicitAgent ?? previousAgent;
+        if (agent is null && voiceMessageId.HasValue && projectId is not null && !accessRequest)
+        {
+            var eligible = agents.Where(a => ToolAccess.AllowsProject(a, projectId)).Take(2).ToArray();
+            if (eligible.Length == 1) agent = eligible[0];
+        }
+        agent ??= normal;
         if ((agent.Id != PlatformChat.Id && !ToolAccess.AllowsProject(agent, projectId)) ||
             (projectId is not null && !await db.Projects.AnyAsync(x => x.Id == projectId, ct)))
             throw new UnauthorizedAccessException("The agent does not have access to the selected project.");
@@ -110,7 +123,7 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
             {
                 var choices = string.Join("\n", previous.Select(x => $"- {x.Title}"));
                 var reply = $"I found multiple work items in this period. Which would you like to open?\n\n{choices}";
-                return await SaveExchangeAsync(db, tx, chat, chatId, agent, text, reply, ct);
+                return await SaveExchangeAsync(db, tx, chat, chatId, agent, text, reply, voiceMessageId, ct);
             }
             candidate = previous.SingleOrDefault();
             projectId ??= candidate?.ProjectId;
@@ -138,7 +151,7 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
         updates.Publish(chat.Id);
-        return chat.Id;
+        return (chat.Id, null);
     }
 
     public async Task<List<Conversation>> RecentAsync(string? query, CancellationToken ct)
@@ -306,16 +319,16 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
         input.Trim().TrimEnd('.', '!').ToLowerInvariant() is
             "devam" or "devam et" or "kaldığımız yerden devam et" or "continue" or "resume";
 
-    private async Task<string> SaveExchangeAsync(PlatformDb db, Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction tx,
-        Conversation chat, string? chatId, Agent agent, string input, string answer, CancellationToken ct)
+    private async Task<(string ChatId, string? Reply)> SaveExchangeAsync(PlatformDb db, Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction tx,
+        Conversation chat, string? chatId, Agent agent, string input, string answer, long? voiceMessageId, CancellationToken ct)
     {
         if (chatId is null) db.Conversations.Add(chat);
         chat.UpdatedAtUtc = DateTime.UtcNow;
-        db.Messages.AddRange(new Message { ConversationId = chat.Id, Role = "user", Text = input },
-            new Message { ConversationId = chat.Id, Role = "assistant", AgentId = agent.Id, Text = answer });
+        if (voiceMessageId is null) db.Messages.Add(new Message { ConversationId = chat.Id, Role = "user", Text = input });
+        db.Messages.Add(new Message { ConversationId = chat.Id, Role = "assistant", AgentId = agent.Id, Text = answer });
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
         updates.Publish(chat.Id);
-        return chat.Id;
+        return (chat.Id, answer);
     }
 }

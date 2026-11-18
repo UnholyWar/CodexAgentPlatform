@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodexAgentPlatform.Application;
 using CodexAgentPlatform.Infrastructure;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
@@ -84,6 +85,57 @@ public sealed class LiveCodexTests
         }, ct);
         Assert.Equal("completed", await finished.Task.WaitAsync(ct));
         Assert.NotEmpty(output.ToString().Trim());
+    }
+
+    [CodexFact("CAP_TEST_CODEX_EXE", "CAP_TEST_AUTH_DATA", "CAP_TEST_GIT_EXE")]
+    public async Task TextChatHandsOffAndReadsTheSelectedRepository()
+    {
+        await using var storage = await TestStorage.CreateAsync();
+        await using var db = storage.CreateDbContext();
+        var project = new Project { Name = "Compass", DefaultBranch = "main" };
+        var repository = new Resource { ProjectId = project.Id, Name = "Compass repository",
+            Kind = ResourceKind.GitRepository, Address = "https://example.invalid/compass.git" };
+        var chat = new Conversation();
+        var work = new WorkItem { ConversationId = chat.Id, AgentId = "developer", ProjectId = project.Id,
+            Title = "Initial checkout", Workspace = Guid.NewGuid().ToString("N"), Status = WorkStatus.Completed };
+        (await db.Agents.SingleAsync(a => a.Id == "developer")).AllowedProjects = project.Id;
+        db.AddRange(project, repository, chat, work);
+        await db.SaveChangesAsync();
+        var clone = Path.Combine(storage.Paths.Workspaces, ".git-cache", "compass");
+        Directory.CreateDirectory(clone);
+        var marker = Guid.NewGuid().ToString("N");
+        await GitApprovalTests.GitAsync(clone, "init", "-b", "main");
+        await File.WriteAllTextAsync(Path.Combine(clone, "README.md"), $"Project verification code: {marker}");
+        await GitApprovalTests.GitAsync(clone, "add", "--", "README.md");
+        await GitApprovalTests.GitAsync(clone, "-c", "user.name=Test", "-c", "user.email=test@localhost", "commit", "-m", "Seed");
+        await GitApprovalTests.GitAsync(clone, "worktree", "add", "--detach", Path.Combine(storage.Paths.Workspace(work.Workspace), "project"), "HEAD");
+        await File.WriteAllTextAsync(Path.Combine(clone, ".git", "platform-resource"), repository.Id);
+
+        var updates = new ChatUpdates();
+        var chats = new ChatStore(storage, updates);
+        var vault = new Vault(storage.Paths, null);
+        var operations = new Operations(storage, storage.Paths, vault);
+        var tools = new AgentTools(storage, new MemoryStore(storage, storage.Paths), operations, storage.Paths);
+        var auth = new PlatformPaths(Environment.GetEnvironmentVariable("CAP_TEST_AUTH_DATA")!, storage.Paths.Workspaces);
+        await using var codex = Process(auth);
+        using var worker = new ChatWorker(storage, codex, tools, new ContextBudget(storage), storage.Paths,
+            operations, updates, NullLogger<ChatWorker>.Instance);
+        await worker.StartAsync(default);
+        try
+        {
+            using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+            var ct = deadline.Token;
+            await chats.SendAsync(chat.Id, "Seçili projenin README.md dosyasında yazan doğrulama kodunu oku.", null, project.Id, ct);
+            ChatSnapshot snapshot;
+            do
+            {
+                await Task.Delay(300, ct);
+                snapshot = await chats.ReadAsync(chat.Id, 12, ct);
+            } while (snapshot.Run is null || ChatStore.Active.Contains(snapshot.Run.Status));
+            Assert.Equal("developer", snapshot.Run.AgentId);
+            Assert.Contains(marker, snapshot.Messages.Single(m => m.Id == snapshot.Run.AssistantMessageId).Text);
+        }
+        finally { await worker.StopAsync(default); }
     }
 
     private static CodexProcess Process(PlatformPaths paths) =>

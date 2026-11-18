@@ -49,14 +49,15 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         ["restart-docker"] = "systemctl restart docker"
     };
 
-    public async Task<List<Resource>> VisibleResourcesAsync(Agent agent, string? query, CancellationToken ct)
+    public async Task<List<Resource>> VisibleResourcesAsync(Agent agent, string? query, CancellationToken ct, string? projectId = null)
     {
         if (!ToolAccess.Has(agent, "resources")) return [];
         await using var db = await dbs.CreateDbContextAsync(ct);
         var projects = ToolAccess.Split(agent.AllowedProjects);
         var resources = db.Resources.AsNoTracking().Where(x => x.ProjectId == null ? x.IsGlobal : Enumerable.Contains(projects, x.ProjectId));
+        if (projectId is not null) resources = resources.Where(r => r.ProjectId == projectId || r.ProjectId == null);
         if (!string.IsNullOrWhiteSpace(query)) resources = resources.Where(x => x.Name.Contains(query));
-        return await resources.OrderBy(x => x.Name).Take(25).ToListAsync(ct);
+        return await resources.OrderByDescending(x => projectId != null && x.ProjectId == projectId).ThenBy(x => x.Name).Take(25).ToListAsync(ct);
     }
 
     public async Task<object> InspectSshAsync(Agent agent, string resourceId, string command, CancellationToken ct,
@@ -73,15 +74,18 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
     public async Task<object> GitAsync(Agent agent, string resourceId, string workspaceId,
         string operation, string? argument, CancellationToken ct, string? conversationId = null, string? workId = null, int offset = 0)
     {
-        if (offset != 0 && operation is not ("status" or "diff"))
-            throw new ArgumentException("Pagination is only available for status and diff.");
+        if (offset != 0 && operation is not ("status" or "diff" or "list" or "read"))
+            throw new ArgumentException("This Git operation does not support pagination.");
         var resource = await ResolveAsync(agent, resourceId, ResourceKind.GitRepository, "git", ct);
         var root = paths.Workspace(workspaceId);
         var repo = Path.Combine(root, "project");
         if (operation == "prepare")
         {
             if (Directory.Exists(repo))
-                throw new InvalidOperationException("This workspace already contains a repository.");
+            {
+                await VerifyRepoAsync(resource, repo, ct);
+                return new { path = "project", branch = (await RunGitAsync(repo, ["branch", "--show-current"], null, ct)).Trim() };
+            }
             await using var db = await dbs.CreateDbContextAsync(ct);
             var branch = resource.IsGlobal ? null : await db.Projects.Where(x => x.Id == resource.ProjectId).Select(x => x.DefaultBranch).SingleAsync(ct);
             if (branch is not null) ValidateBranch(branch);
@@ -103,6 +107,8 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         await VerifyRepoAsync(resource, repo, ct);
         var output = operation switch
         {
+            "list" => await ListTreeAsync(repo, argument, ct),
+            "read" => await ReadBlobAsync(repo, argument, ct),
             "status" => await RunGitAsync(repo, ["status", "--short", "--branch"], null, ct),
             "diff" => await RunGitAsync(repo, ["diff", "--no-ext-diff", "--no-textconv", "HEAD", "--"], null, ct),
             "fetch" => await RunGitAsync(repo, ["fetch", "--no-recurse-submodules", GitAddress(resource)], resource, ct),
@@ -113,7 +119,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         };
         await AuditAsync(agent.Id, resource.ProjectId, conversationId, workId, operation == "commit" ? "GitCommitted" : "GitOperation",
             $"{resource.Name} · {operation}", ct);
-        if (operation is "diff" or "status") return ToolOutput.Page(output, offset, 16_000);
+        if (operation is "diff" or "status" or "list" or "read") return ToolOutput.Page(output, offset, 16_000);
         return new { output = TextLimits.Clip(output, 3000), truncated = output.Length > 3000 };
     }
 
@@ -460,6 +466,35 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         if (string.IsNullOrWhiteSpace(message) || message.Length > 500) throw new InvalidOperationException("A commit message is required.");
         await RunGitAsync(repo, ["add", "-A", "--", "."], null, ct);
         return await RunGitAsync(repo, ["commit", "--no-verify", "-m", message], null, ct);
+    }
+
+    private async Task<string> ListTreeAsync(string repo, string? directory, CancellationToken ct)
+    {
+        var tree = string.IsNullOrEmpty(directory) || directory == "." ? "HEAD" : "HEAD:" + RepositoryPath(directory);
+        var names = await RunGitAsync(repo, ["ls-tree", "-z", "--name-only", tree], null, ct);
+        return string.Join("\n", names.Split('\0', StringSplitOptions.RemoveEmptyEntries)
+            .Where(name => !name.Equals(".env", StringComparison.OrdinalIgnoreCase)));
+    }
+
+    private async Task<string> ReadBlobAsync(string repo, string? argument, CancellationToken ct)
+    {
+        var path = RepositoryPath(argument);
+        var entry = await RunGitAsync(repo, ["--literal-pathspecs", "ls-tree", "HEAD", "--", path], null, ct);
+        var header = entry.Split('\t')[0].Split(' ');
+        if (header.Length != 3 || header[0] is not ("100644" or "100755") || !CommitHash().IsMatch(header[2]))
+            throw new InvalidOperationException("The path must name a regular file in the current commit.");
+        var body = await RunGitAsync(repo, ["cat-file", "blob", header[2]], null, ct);
+        if (body.Contains('\0')) throw new InvalidOperationException("This repository file contains binary data.");
+        return body;
+    }
+
+    private static string RepositoryPath(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || path.Any(char.IsControl) || path.Contains('\\') || path.Contains(':') ||
+            path.Split('/').Any(p => p is "" or "." or ".." || p.Equals(".git", StringComparison.OrdinalIgnoreCase) ||
+                p.Equals(".env", StringComparison.OrdinalIgnoreCase)))
+            throw new ArgumentException("Use a permitted path relative to the repository.");
+        return path;
     }
 
     private async Task VerifyRepoAsync(Resource resource, string repo, CancellationToken ct)

@@ -372,7 +372,7 @@ public sealed class ChatWorker(IDbContextFactory<PlatformDb> dbs, ICodexConnecti
         PlatformDb db, ChatRun run, Agent agent, string workspace, bool workspaceReady, CancellationToken ct)
     {
         // The App Server accepts dynamic tools only at thread/start, not on resume.
-        var toolset = AgentTools.Describe(agent).ToArray();
+        var toolset = AgentTools.Describe(agent, run.ProjectId is not null).ToArray();
         var fingerprint = Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(toolset)));
         var workspaceKey = (workspaceReady ? run.Workspace : run.Workspace + ":chat") + ":" + fingerprint;
         var stored = await db.Threads.SingleOrDefaultAsync(x => x.ConversationId == run.ConversationId &&

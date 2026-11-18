@@ -24,18 +24,34 @@ public sealed class ContextBudget(IDbContextFactory<PlatformDb> dbs)
         {
             var name = await db.Projects.AsNoTracking().Where(p => p.Id == project).Select(p => p.Name).SingleOrDefaultAsync(ct);
             content.AppendLine($"Current project ID: {project}. Project name (directory data): {JsonSerializer.Serialize(name)}");
+            if (!normal && ToolAccess.AllowsProject(agent, project) && ToolAccess.Has(agent, "resources"))
+            {
+                var resources = await db.Resources.AsNoTracking().Where(r => r.ProjectId == project)
+                    .OrderBy(r => r.Name).Take(12).Select(r => new { r.Id, r.Name, r.Kind }).ToListAsync(ct);
+                content.AppendLine("Registered resources for this project (reference data, up to 12): " +
+                    JsonSerializer.Serialize(resources.Select(r => new { r.Id, r.Name, kind = r.Kind.ToString() })));
+                content.AppendLine("When asked about project contents, inspect the relevant resource using the available tools. " +
+                    "For a GitRepository, use git_workspace list/read to inspect committed files, preparing the repository first if needed. " +
+                    "Distinguish a missing resource, a missing tool permission and an actual tool failure.");
+            }
         }
         if (normal)
         {
             var specialists = await db.Agents.AsNoTracking().Where(a => !a.Archived && a.Id != PlatformChat.Id)
-                .OrderBy(a => a.Id).Select(a => new { a.Id, a.Title, a.AllowedProjects }).ToListAsync(ct);
+                .OrderBy(a => a.Id).Select(a => new { a.Id, a.Title, a.AllowedProjects, a.AllowedTools }).ToListAsync(ct);
             var roster = specialists.Where(a => run.ProjectId is null || ToolAccess.Split(a.AllowedProjects).Contains(run.ProjectId))
                 .Select(a => new { id = a.Id, title = a.Title }).ToArray();
             content.AppendLine("Current eligible specialists (directory data): " + JsonSerializer.Serialize(roster));
             if (run.ProjectId is not null && roster.Length == 0)
                 content.AppendLine("No active specialist has access to this project. For a request that needs one, explain that the owner can grant Project permissions in Agents.");
-            if (await db.Messages.AsNoTracking().AnyAsync(m => m.Id == run.UserMessageId && m.VoiceProjectId != null, ct))
-                content.AppendLine("This request came from a live voice delegation. Route requests to inspect stored project information or do work to the appropriate eligible specialist.");
+            if (run.ProjectId is not null)
+            {
+                content.AppendLine("For project contents or prior work, call handoff_to_agent with an eligible specialist. " +
+                    "Only report lack of project access if no eligible specialist exists. For ordinary conversation answer directly.");
+                var readers = specialists.Where(a => roster.Any(r => r.id == a.Id) &&
+                    ToolAccess.Split(a.AllowedTools).Contains("workspace") && ToolAccess.Split(a.AllowedTools).Contains("git"));
+                content.AppendLine("Eligible for repository inspection: " + JsonSerializer.Serialize(readers.Select(a => a.Id)));
+            }
         }
         var previous = resumed && run.ThreadId is not null
             ? await db.Runs.AsNoTracking().Where(x => x.ConversationId == run.ConversationId &&

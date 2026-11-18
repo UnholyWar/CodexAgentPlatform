@@ -60,7 +60,44 @@ public sealed class GitApprovalTests
         Assert.Equal("Pending", main.Status);
     }
 
-    private static async Task GitAsync(string directory, params string[] arguments)
+    [CodexFact("CAP_TEST_GIT_EXE")]
+    public async Task ProjectInspectionReadsOnlyCommittedFilesInTheRegisteredRepository()
+    {
+        await using var fixture = await TestStorage.CreateAsync();
+        await using var db = fixture.CreateDbContext();
+        var project = new Project { Name = "Inspection" };
+        var resource = new Resource { Name = "Source", ProjectId = project.Id, Kind = ResourceKind.GitRepository };
+        var developer = await db.Agents.SingleAsync(a => a.Id == "developer");
+        developer.AllowedProjects = project.Id;
+        db.AddRange(project, resource);
+        await db.SaveChangesAsync();
+        var workspace = Guid.NewGuid().ToString("N");
+        var checkout = Path.Combine(fixture.Paths.Workspace(workspace), "project");
+        var clone = Path.Combine(fixture.Paths.Workspaces, ".git-cache", "inspection");
+        Directory.CreateDirectory(Path.Combine(clone, "docs"));
+        await GitAsync(clone, "init", "-b", "main");
+        await File.WriteAllTextAsync(Path.Combine(clone, "docs", "notes.md"), "committed text");
+        await File.WriteAllTextAsync(Path.Combine(clone, ".env"), "excluded");
+        await GitAsync(clone, "add", "-f", "--", "docs/notes.md", ".env");
+        await GitAsync(clone, "-c", "user.name=Test", "-c", "user.email=test@localhost", "commit", "-m", "Seed");
+        await GitAsync(clone, "worktree", "add", "--detach", checkout, "HEAD");
+        await File.WriteAllTextAsync(Path.Combine(clone, ".git", "platform-resource"), resource.Id);
+        await File.WriteAllTextAsync(Path.Combine(checkout, "docs", "notes.md"), "working copy");
+
+        var ops = new Operations(fixture, fixture.Paths, new Vault(fixture.Paths, null));
+        Task<object> Inspect(string op, string? path) => ops.GitAsync(developer, resource.Id, workspace, op, path, default);
+        await Inspect("prepare", null);
+        string Output(object page) => System.Text.Json.JsonSerializer.SerializeToElement(page).GetProperty("output").GetString()!;
+        Assert.Equal("docs", Output(await Inspect("list", null)));
+        Assert.Equal("notes.md", Output(await Inspect("list", "docs")));
+        Assert.Equal("committed text", Output(await Inspect("read", "docs/notes.md")));
+        await Assert.ThrowsAsync<ArgumentException>(() => Inspect("read", ".env"));
+        await Assert.ThrowsAsync<ArgumentException>(() => Inspect("read", "../outside"));
+        await File.WriteAllTextAsync(Path.Combine(clone, ".git", "platform-resource"), "another-resource");
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Inspect("read", "docs/notes.md"));
+    }
+
+    internal static async Task GitAsync(string directory, params string[] arguments)
     {
         var options = new ProcessStartInfo(Environment.GetEnvironmentVariable("CAP_TEST_GIT_EXE")!)
         {

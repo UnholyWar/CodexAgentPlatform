@@ -36,13 +36,13 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
         new("resource_search", "resources", "Find approved project resources by name.", [], ["query"]),
         new("project_create", ToolAccess.CreateProjects, "Create a platform project and give the creating agent access to it. The default branch is main unless specified.", ["name"], ["defaultBranch"]),
         new("resource_get", "resources", "Read metadata of an authorized resource.", ["id"], []),
-        new("git_workspace", "git", "Operate on project/: prepare, status, diff, fetch, pull, branch, commit. For more live diff/status output pass nextOffset as offset.", ["id", "operation"], ["argument", "offset"]),
+        new("git_workspace", "git", "Use prepare to check out the registered repository. Use list or read for committed files at HEAD, passing a relative directory or file path as argument. Supports status, diff, fetch, pull, branch and commit. Pass nextOffset as offset for paged output.", ["id", "operation"], ["argument", "offset"]),
         new("git_request_push", "git", "Request explicit owner approval for a non-force push of the current commit.", ["id"], ["destinationBranch"]),
         new("ssh_inspect", "ssh", "Inspect test, health, docker-status, docker-services, linux-services, docker-logs or sftp-read. For more live command output pass nextOffset as offset.", ["id", "operation"], ["offset"]),
         new("ssh_request_operation", "ssh", "Request explicit approval for restart-docker on an SSH server, or deploy/rollback on a registered Swarm target. Deploy requires an image digest.", ["id", "operation"], ["image"])
     ];
 
-    public static IEnumerable<object> Describe(Agent agent)
+    public static IEnumerable<object> Describe(Agent agent, bool projectSelected = false)
     {
         var deferred = new List<object> { DescribeFunction(GrantRequest, true) };
         if (agent.Id == PlatformChat.Id)
@@ -55,6 +55,8 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
         {
             bool onDemand = tool.Permission is "git" or "ssh" or "resources" or "delegate" or ToolAccess.CreateProjects ||
                 tool.Name is "memory_archive" or "memory_consolidate" or "memory_update" or "memory_create";
+            if (projectSelected && tool.Name is ("resource_search" or "resource_get" or "git_workspace"))
+                onDemand = false;
             var spec = DescribeFunction(tool, onDemand);
             if (onDemand) deferred.Add(spec);
             else yield return spec;
@@ -145,13 +147,15 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
                     .Select(x => new { x.Role, Text = TextLimits.Clip(x.Text, 600), x.CreatedAtUtc }).ToArray();
             case "resource_search":
             case "resource_get":
-                var visible = await operations.VisibleResourcesAsync(agent, args.String("query"), ct);
+                List<Resource> visible;
                 if (id is not null)
                 {
                     var allowedProjects = ToolAccess.Split(agent.AllowedProjects);
                     visible = await db.Resources.AsNoTracking().Where(x => x.Id == id &&
-                        (x.ProjectId == null ? x.IsGlobal : Enumerable.Contains(allowedProjects, x.ProjectId))).ToListAsync(ct);
+                        (x.ProjectId == null ? x.IsGlobal : Enumerable.Contains(allowedProjects, x.ProjectId) &&
+                            (run.ProjectId == null || x.ProjectId == run.ProjectId))).ToListAsync(ct);
                 }
+                else visible = await operations.VisibleResourcesAsync(agent, args.String("query"), ct, run.ProjectId);
                 return visible.Select(x => new { x.Id, x.Name, Kind = x.Kind.ToString(), x.ProjectId, x.IsGlobal, x.Address, x.Production }).ToArray();
             case "git_workspace":
                 if (!ToolAccess.Has(agent, "workspace")) throw new UnauthorizedAccessException("Workspace permission is required.");

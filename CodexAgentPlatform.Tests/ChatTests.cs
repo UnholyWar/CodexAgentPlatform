@@ -471,6 +471,7 @@ public sealed class ChatTests(ITestOutputHelper output)
         db.Projects.Add(project);
         var qa = await db.Agents.SingleAsync(a => a.Id == "qa");
         qa.AllowedProjects = project.Id;
+        (await db.Agents.SingleAsync(a => a.Id == "architect")).AllowedProjects = project.Id;
         await db.SaveChangesAsync();
 
         var codex = new FakeCodex();
@@ -490,18 +491,71 @@ public sealed class ChatTests(ITestOutputHelper output)
             codex.Emit("thread/realtime/transcript/done", new { threadId = "t1", role = "user",
                 text = "Atlas Portal projesi hakkında konuşalım." });
             var conversation = await opened.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await WaitAsync(() => Task.FromResult(codex.SpokenResults.Count == 1));
             codex.NextToolCalls.Enqueue(("handoff_to_agent", new { agentId = "developer" }));
             codex.NextToolCalls.Enqueue(("handoff_to_agent", new { agentId = "qa" }));
             const string followUp = "Bu projede hangi testleri çalıştırdık?";
             codex.Emit("thread/realtime/itemAdded", new { threadId = "t1",
                 item = new { type = "handoff_request", item_id = "follow-up", input_transcript = followUp } });
 
-            await WaitAsync(() => Task.FromResult(codex.SpokenResults.Contains("Agent result: Test yanıtı")));
+            await WaitAsync(() => Task.FromResult(codex.SpokenResults.Count == 2));
             var snapshot = await chats.ReadAsync(conversation, 10, default);
             Assert.Equal("qa", snapshot.Run?.AgentId);
             Assert.Equal(project.Id, snapshot.Run?.ProjectId);
             Assert.All(snapshot.Messages.Where(m => m.Role == "user"), m => Assert.Equal(project.Id, m.VoiceProjectId));
             Assert.Collection(codex.ToolReplies, r => Assert.False(r.True("success")), r => Assert.True(r.True("success")));
+        }
+        finally { await worker.StopAsync(default); }
+    }
+
+    [Fact]
+    public async Task SelectedProjectVoiceTranscriptReadsItsResourceWithoutANativeHandoff()
+    {
+        await using var storage = await TestStorage.CreateAsync();
+        await using var db = storage.CreateDbContext();
+        var project = new Project { Name = "Compass" };
+        var other = new Project { Name = "Other" };
+        db.Projects.AddRange(project, other);
+        var repo = new Resource { ProjectId = project.Id, Name = "Compass services", Kind = ResourceKind.GitRepository };
+        db.Resources.AddRange(repo, new Resource { ProjectId = other.Id, Name = "Unrelated resource" });
+        (await db.Agents.SingleAsync(a => a.Id == "developer")).AllowedProjects = project.Id;
+        await db.SaveChangesAsync();
+
+        var codex = new FakeCodex();
+        var updates = new ChatUpdates();
+        var chats = new ChatStore(storage, updates);
+        using var worker = Worker(storage, codex, updates);
+        await worker.StartAsync(default);
+        try
+        {
+            await using var voice = new ChatVoiceCall(codex, chats, worker, NullLogger<ChatVoiceCall>.Instance,
+                conversationId: null, projectId: project.Id, selectedAgent: null, autoApprove: false);
+            var opened = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            voice.ConversationOpened += id => opened.SetResult(id);
+            await voice.StartAsync("v=0 fake offer");
+            codex.NextToolCalls.Enqueue(("resource_get", new { id = repo.Id }));
+            const string question = "Seçili projenin içinde hangi repo var?";
+            codex.Emit("thread/realtime/transcript/done", new { threadId = "t1", role = "user", text = question });
+            var conversation = await opened.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await WaitAsync(() => Task.FromResult(codex.SpokenResults.Count == 1));
+            var prompt = Assert.Single(codex.TurnRequests).Get("input")[0].String("text");
+            Assert.Contains(repo.Name, prompt);
+            Assert.DoesNotContain("Unrelated resource", prompt);
+            var lookup = Assert.Single(codex.ToolReplies);
+            Assert.True(lookup.True("success"));
+            Assert.Contains(repo.Name, lookup.Get("contentItems")[0].String("text"));
+
+            // A late native handoff must not submit the first request twice.
+            codex.Emit("thread/realtime/itemAdded", new { threadId = "t1",
+                item = new { type = "handoff_request", item_id = "late", input_transcript = question.TrimEnd('?') } });
+            (await db.Agents.SingleAsync(a => a.Id == "qa")).AllowedProjects = project.Id;
+            await db.SaveChangesAsync();
+            codex.Emit("thread/realtime/transcript/done", new { threadId = "t1", role = "user", text = "Peki varsayılan dalı nedir?" });
+            await WaitAsync(() => Task.FromResult(codex.SpokenResults.Count == 2));
+            var runs = await db.Runs.AsNoTracking().Where(r => r.ConversationId == conversation).ToListAsync();
+            Assert.Equal(2, runs.Count);
+            Assert.All(runs, r => { Assert.Equal("developer", r.AgentId); Assert.Equal(project.Id, r.ProjectId); });
+            Assert.Equal(2, await db.Messages.CountAsync(m => m.ConversationId == conversation && m.Role == "user"));
         }
         finally { await worker.StopAsync(default); }
     }

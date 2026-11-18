@@ -14,14 +14,15 @@ public sealed partial class ChatVoiceCall(
     private readonly Channel<CodexEvent> inbox = Channel.CreateBounded<CodexEvent>(64);
     private readonly TaskCompletionSource<string> answer = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly HashSet<string> handoffs = new(StringComparer.Ordinal);
+    private readonly SemaphoreSlim submission = new(1);
     private string? threadId;
     private string? currentProjectId = projectId;
     private Task<string>? startup;
     private Task? events;
     private Task? work;
-    private Message? lastUser;
-    private long handledUser;
-    private string? handoffTranscript;
+    // Realtime may deliver either or both representations of an utterance, in either order.
+    private readonly List<(Message User, bool FromHandoff, bool Routed)> unpaired = [];
+    private int workGeneration;
     private int disposed;
 
     public event Action<string>? ConversationOpened;
@@ -61,7 +62,12 @@ public sealed partial class ChatVoiceCall(
             voiceSessionId = Guid.NewGuid().ToString(), clientManagedHandoffs = true,
             transport = new { type = "webrtc", sdp = offer },
             prompt = $$"""
-                Speak naturally and briefly in the user's language. Answer conversational questions yourself.
+                Speak naturally and briefly in the user's language. In general chat answer conversational questions yourself.
+                With a current project or selected specialist, the application automatically sends the user's turns to
+                platform chat and returns the answer to this call. This also applies after the user names a project.
+                Let that answer supply the facts. Never claim that files, repositories or tools are inaccessible
+                based on what you personally see in the voice session. Wait for the application's verified result.
+                Selected specialist at call start: {{JsonSerializer.Serialize(selectedAgent == PlatformChat.Id ? null : selectedAgent)}}
                 Delegate requests for actual project information, including status, prior work, repositories, resources and tests,
                 as well as requests to do work. For example, delegate "What did we do on Atlas last time?" just as you would
                 "Run the tests for Atlas." Use the current project when the user says "this project" or asks a follow-up.
@@ -112,7 +118,10 @@ public sealed partial class ChatVoiceCall(
                 if (item.Method == "thread/realtime/itemAdded")
                 {
                     var payload = item.Parameters.Get("item");
-                    if (payload.String("type") == "handoff_request") await DelegateAsync(payload, ct);
+                    if (payload.String("type") == "handoff_request" &&
+                        (payload.String("item_id") ?? payload.String("handoff_id")) is { Length: > 0 } id &&
+                        handoffs.Add(id))
+                        await ReceiveUserAsync(Transcript(payload.String("input_transcript")), true, ct);
                     continue;
                 }
                 var role = item.Parameters.String("role");
@@ -123,20 +132,7 @@ public sealed partial class ChatVoiceCall(
                     await SaveAsync(role, text, ct);
                     continue;
                 }
-                if (handoffTranscript == text)
-                {
-                    handoffTranscript = null;
-                    continue;
-                }
-                handoffTranscript = null;
-                if (currentProjectId is null && !pinProject) await ResolveProjectAsync(text, ct);
-                lastUser = await SaveAsync(role, text, ct);
-                if (IsStopRequest(text) && work is { IsCompleted: false })
-                {
-                    handledUser = lastUser.Id;
-                    await worker.PauseAsync(lastUser.ConversationId, ct);
-                    await SpeakAsync("I requested that the current task stop.", ct);
-                }
+                await ReceiveUserAsync(text, false, ct);
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
@@ -158,52 +154,77 @@ public sealed partial class ChatVoiceCall(
         return message;
     }
 
-    private async Task<ProjectReference[]> ResolveProjectAsync(string text, CancellationToken ct)
+    private async Task ReceiveUserAsync(string text, bool fromHandoff, CancellationToken ct)
     {
-        var named = await chats.FindSpokenProjectsAsync(text, ct);
-        if (!pinProject && currentProjectId is null && named.Length == 1) currentProjectId = named[0].Id;
-        return named;
-    }
-
-    private async Task DelegateAsync(JsonElement payload, CancellationToken ct)
-    {
-        var handoffId = payload.String("item_id") ?? payload.String("handoff_id");
-        var text = Transcript(payload.String("input_transcript"));
-        if (string.IsNullOrWhiteSpace(handoffId) || text.Length == 0 || !handoffs.Add(handoffId)) return;
-        if (handoffTranscript == text) return;
-        var named = await ResolveProjectAsync(text, ct);
-        if (lastUser?.Text != text || lastUser.Id == handledUser || lastUser.VoiceProjectId != (currentProjectId ?? ""))
+        if (text.Length == 0) return;
+        var match = unpaired.FindIndex(turn => turn.FromHandoff != fromHandoff &&
+            string.Equals(turn.User.Text.TrimEnd('.', '!', '?'), text.TrimEnd('.', '!', '?'), StringComparison.OrdinalIgnoreCase));
+        Message? user = null;
+        if (match >= 0)
         {
-            lastUser = await SaveAsync("user", text, ct);
-            handoffTranscript = text;
+            var paired = unpaired[match];
+            unpaired.RemoveAt(match);
+            if (paired.Routed) return;
+            user = paired.User;
         }
-        var user = lastUser;
-        handledUser = user.Id;
+        var named = await chats.FindSpokenProjectsAsync(text, ct);
+        if (user is null)
+        {
+            if (currentProjectId is null && !pinProject && named.Length == 1) currentProjectId = named[0].Id;
+            user = await SaveAsync("user", text, ct);
+            var route = fromHandoff || currentProjectId is not null || named.Length > 0 ||
+                selectedAgent is not null && selectedAgent != PlatformChat.Id || IsStopRequest(text) && work is { IsCompleted: false };
+            if (unpaired.Count >= 16) unpaired.RemoveAt(0);
+            unpaired.Add((user, fromHandoff, route));
+            if (!route) return;
+        }
         if (named.Length > 1)
         {
             await SpeakAsync($"Ask the user which project to use: {named[0].Name} or {named[1].Name}.", ct);
             return;
         }
-        if (named.Length == 1 && named[0].Id != currentProjectId)
+        if (named.Length == 1 && named[0].Id != user.VoiceProjectId)
         {
             await SpeakAsync($"Choose {named[0].Name} in Chat settings and reopen the voice call before using that project.", ct);
             return;
         }
         if (IsStopRequest(text))
         {
-            await worker.PauseAsync(user.ConversationId, ct);
+            Interlocked.Increment(ref workGeneration);
+            await submission.WaitAsync(ct);
+            try { await worker.PauseAsync(user.ConversationId, ct); }
+            finally { submission.Release(); }
             await SpeakAsync("I requested that the current task stop.", ct);
             return;
         }
+        work = RunTurnAsync(work, user, workGeneration, ct);
+    }
+
+    private async Task RunTurnAsync(Task? previous, Message user, int generation, CancellationToken ct)
+    {
         try
         {
-            await chats.SendAsync(user.ConversationId, text, selectedAgent ?? PlatformChat.Id,
-                currentProjectId ?? "", ct, voiceMessageId: user.Id);
-            work = ReportResultAsync(user, ct);
+            if (previous is not null) await previous;
+            string? clarification;
+            await submission.WaitAsync(ct);
+            try
+            {
+                if (Volatile.Read(ref workGeneration) != generation) return;
+                clarification = await chats.SubmitVoiceAsync(user, selectedAgent, ct);
+            }
+            finally { submission.Release(); }
+            if (clarification is not null) await SpeakAsync(clarification, ct);
+            else await ReportResultAsync(user, ct);
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
         catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or UnauthorizedAccessException)
         {
             await SpeakAsync(ex.Message, ct);
+        }
+        catch (Exception ex)
+        {
+            log.LogWarning(ex, "Could not route a voice turn.");
+            Failed?.Invoke("The application could not route the voice request.");
         }
     }
 
@@ -212,6 +233,7 @@ public sealed partial class ChatVoiceCall(
         try
         {
             using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+            bool approvalAnnounced = false;
             while (await timer.WaitForNextTickAsync(ct))
             {
                 var result = await chats.VoiceWorkAsync(user.ConversationId, user.Id, ct);
@@ -220,14 +242,15 @@ public sealed partial class ChatVoiceCall(
                     await SpeakAsync("Open the chat to select the work item or project.", ct);
                     return;
                 }
-                if (ChatStore.Active.Contains(result.Value.Status)) continue;
-                if (result.Value.PendingApproval)
-                    await SpeakAsync("This task is waiting for your approval in the chat.", ct);
-                else
+                if (result.Value.PendingApproval && !approvalAnnounced)
                 {
-                    var summary = TextLimits.Clip(result.Value.Text, 900);
-                    await SpeakAsync(summary.Length > 0 ? $"Agent result: {summary}" : $"Task status: {result.Value.Status}.", ct);
+                    await SpeakAsync("This task is waiting for your approval in the chat.", ct);
+                    approvalAnnounced = true;
                 }
+                if (ChatStore.Active.Contains(result.Value.Status)) continue;
+                var summary = TextLimits.Clip(result.Value.Text, 900);
+                if (!result.Value.PendingApproval)
+                    await SpeakAsync(summary.Length > 0 ? $"Agent result: {summary}" : $"Task status: {result.Value.Status}.", ct);
                 return;
             }
         }
@@ -261,6 +284,7 @@ public sealed partial class ChatVoiceCall(
         codex.Received -= Receive;
         if (events is not null) await events;
         if (work is not null) await work;
+        submission.Dispose();
         if (threadId is not null && codex.Connected)
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
