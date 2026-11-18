@@ -1,7 +1,7 @@
 ﻿<Router AppAssembly="typeof(Program).Assembly" NotFoundPage="typeof(Pages.NotFound)">
     <Found Context="routeData">
         <AuthorizeRouteView RouteData="routeData" DefaultLayout="typeof(Layout.MainLayout)">
-            <NotAuthorized><p class="notice">Oturumunuz sona erdi. <a href="/login" data-enhance-nav="false">Giriş yapın</a>.</p></NotAuthorized>
+            <NotAuthorized><p class="notice">Your session has expired. <a href="/login" data-enhance-nav="false">Sign in</a>.</p></NotAuthorized>
         </AuthorizeRouteView>
         <FocusOnNavigate RouteData="routeData" Selector="h1" />
     </Found>

@@ -2,9 +2,9 @@
 @attribute [Authorize]
 @inject IDbContextFactory<PlatformDb> Dbs
 
-<PageTitle>Çalışmalar · Codex Agent Platform</PageTitle>
+<PageTitle>Work history · Codex Agent Platform</PageTitle>
 <section class="admin-page">
-    <header class="section-head"><h1>Çalışmalar</h1></header>
+    <header class="section-head"><h1>Work history</h1></header>
     <div class="list">
         @foreach (var work in rows)
         {
@@ -12,15 +12,15 @@
                 <summary><strong>@work.Title</strong> <span class="status">@work.Status</span> <small>@work.UpdatedAtUtc.ToString("dd.MM.yyyy HH:mm") UTC</small></summary>
                 <div class="details-body">
                     <p>@work.Description</p>
-                    @if (work.LastStep is not null) { <p><strong>Son adım</strong> @work.LastStep</p> }
-                    @if (work.NextStep is not null) { <p><strong>Sonraki adım</strong> @work.NextStep</p> }
+                    @if (work.LastStep is not null) { <p><strong>Last step</strong> @work.LastStep</p> }
+                    @if (work.NextStep is not null) { <p><strong>Next step</strong> @work.NextStep</p> }
                     @if (work.Branch is not null) { <p><strong>Branch</strong> <code>@work.Branch</code></p> }
                     @if (work.Commit is not null) { <p><strong>Commit</strong> <code>@work.Commit</code></p> }
-                    <a href="/chat/@work.ConversationId">İlgili sohbeti aç</a>
+                    <a href="/chat/@work.ConversationId">Open conversation</a>
                 </div>
             </details>
         }
-        @if (rows.Count == 0) { <p class="empty">Çalışma kaydı bulunamadı.</p> }
+        @if (rows.Count == 0) { <p class="empty">No work items found.</p> }
     </div>
 </section>
 

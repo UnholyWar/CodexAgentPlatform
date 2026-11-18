@@ -10,7 +10,7 @@ public sealed class Vault(PlatformPaths paths, string? keyFile)
     public async Task<string> StoreAsync(string secret, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(secret) || secret.Length > 65_536)
-            throw new ArgumentException("Boş veya çok uzun bir erişim bilgisi.");
+            throw new ArgumentException("The credential is empty or too long.");
         var id = Guid.NewGuid().ToString("N");
         var key = await ReadKeyAsync(ct);
         var clear = Encoding.UTF8.GetBytes(secret);
@@ -36,7 +36,7 @@ public sealed class Vault(PlatformPaths paths, string? keyFile)
         var key = await ReadKeyAsync(ct);
         var bytes = await File.ReadAllBytesAsync(Location(id), ct);
         if (bytes.Length < 28 || bytes.Length > 262_172)
-            throw new CryptographicException("Geçersiz Vault kaydı.");
+            throw new CryptographicException("Invalid vault entry.");
         var plain = new byte[bytes.Length - 28];
         try
         {
@@ -54,16 +54,16 @@ public sealed class Vault(PlatformPaths paths, string? keyFile)
     private async Task<byte[]> ReadKeyAsync(CancellationToken ct)
     {
         if (!Configured)
-            throw new InvalidOperationException("Vault anahtar dosyası yapılandırılmadı.");
+            throw new InvalidOperationException("The vault key file is not configured.");
         var key = Convert.FromBase64String((await File.ReadAllTextAsync(keyFile!, ct)).Trim());
         if (key.Length == 32) return key;
         CryptographicOperations.ZeroMemory(key);
-        throw new CryptographicException("Vault anahtarı 32 bayt olmalı.");
+        throw new CryptographicException("The vault key must contain 32 bytes.");
     }
 
     private string Location(string id)
     {
-        if (!Guid.TryParseExact(id, "N", out _)) throw new ArgumentException("Geçersiz Vault kimliği.");
+        if (!Guid.TryParseExact(id, "N", out _)) throw new ArgumentException("Invalid vault ID.");
         return Path.Combine(paths.Data, "credentials", $"{id}.vault");
     }
 }

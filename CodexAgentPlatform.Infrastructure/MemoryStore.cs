@@ -44,7 +44,7 @@ public sealed partial class MemoryStore(IDbContextFactory<PlatformDb> dbs, Platf
     {
         await using var db = await dbs.CreateDbContextAsync(ct);
         var note = await db.Notes.SingleOrDefaultAsync(x => x.Id == id, ct)
-            ?? throw new InvalidOperationException("Hafıza kaydı bulunamadı.");
+            ?? throw new InvalidOperationException("Memory note not found.");
         var requestedVersion = version ?? note.Version;
         var revision = await db.Revisions.SingleAsync(x => x.NoteId == id && x.Version == requestedVersion, ct);
         var fullPath = RevisionPath(revision.Path);
@@ -58,7 +58,7 @@ public sealed partial class MemoryStore(IDbContextFactory<PlatformDb> dbs, Platf
         var heading = Array.FindIndex(lines, line => line.StartsWith('#') &&
             line.TrimStart('#').Trim().Equals(section.Trim(), StringComparison.OrdinalIgnoreCase));
         if (heading < 0)
-            throw new InvalidOperationException("İstenen Markdown bölümü bulunamadı.");
+            throw new InvalidOperationException("The requested Markdown section was not found.");
         var level = lines[heading].TakeWhile(c => c == '#').Count();
         return string.Join('\n', lines.Skip(heading).TakeWhile((line, i) =>
             i == 0 || !line.StartsWith('#') || line.TakeWhile(c => c == '#').Count() > level));
@@ -69,25 +69,25 @@ public sealed partial class MemoryStore(IDbContextFactory<PlatformDb> dbs, Platf
         int? expectedVersion = null)
     {
         if (string.IsNullOrWhiteSpace(draft.Title) || string.IsNullOrWhiteSpace(draft.Markdown))
-            throw new InvalidOperationException("Başlık ve Markdown içeriği gerekli.");
+            throw new InvalidOperationException("A title and Markdown content are required.");
         if (draft.Title.Length > 160 || draft.Summary.Length > 600 || draft.Tags.Length > 300 ||
             draft.Markdown.Length > 32_000 || draft.SourceReferences?.Length > 2000)
-            throw new InvalidOperationException("Hafıza kaydı boyut sınırını aşıyor.");
+            throw new InvalidOperationException("The memory note exceeds the size limit.");
         if (SecretShape().IsMatch(string.Join('\n', draft.Title, draft.Summary, draft.Tags, draft.Markdown, draft.SourceReferences)))
-            throw new InvalidOperationException("Erişim bilgileri hafızaya kaydedilemez.");
+            throw new InvalidOperationException("Credentials cannot be stored in memory.");
         if (draft.Verification is not ("verified" or "inference" or "hypothesis"))
-            throw new InvalidOperationException("Geçersiz doğrulama durumu.");
+            throw new InvalidOperationException("Invalid verification status.");
 
         await using var db = await dbs.CreateDbContextAsync(ct);
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         var note = id is null ? null : await db.Notes.SingleOrDefaultAsync(x => x.Id == id, ct);
         if (id is not null && (note is null || (!admin && (note.AgentId != agentId || note.ProjectId != projectId))))
-            throw new InvalidOperationException("Hafıza kaydını düzenleme yetkisi yok.");
+            throw new InvalidOperationException("You do not have permission to edit this memory note.");
         var normalizedTitle = draft.Title.Trim();
         var similar = await db.Notes.AsNoTracking().AnyAsync(x => x.Id != id && x.Id != mergeId &&
             !x.Archived && x.ProjectId == projectId && x.AgentId == agentId && EF.Functions.Collate(x.Title, "NOCASE") == normalizedTitle, ct);
         if (similar)
-            throw new InvalidOperationException("Aynı başlıkta bir not var. Arayıp mevcut notu güncelleyin.");
+            throw new InvalidOperationException("A note with this title already exists. Find and update the existing note.");
 
         var kind = note is null ? "MemoryCreated" : "MemoryUpdated";
         if (note is null)
@@ -98,7 +98,7 @@ public sealed partial class MemoryStore(IDbContextFactory<PlatformDb> dbs, Platf
         else
         {
             if (expectedVersion.HasValue && note.Version != expectedVersion)
-                throw new InvalidOperationException("Not başka bir işlemde güncellendi.");
+                throw new InvalidOperationException("The note was updated by another operation.");
             note.Version++;
         }
         note.Title = normalizedTitle;
@@ -117,7 +117,7 @@ public sealed partial class MemoryStore(IDbContextFactory<PlatformDb> dbs, Platf
             var old = await db.Notes.SingleOrDefaultAsync(x => x.Id == mergeId, ct);
             if (old is null || old.Id == note.Id || old.Archived ||
                 (!admin && (old.AgentId != agentId || old.ProjectId != projectId)))
-                throw new InvalidOperationException("Birleştirilecek not erişilebilir değil.");
+                throw new InvalidOperationException("The note to merge is not accessible.");
             old.Archived = true;
             old.UpdatedAtUtc = DateTime.UtcNow;
             db.Events.Add(Event(old, "MemoryArchived", agentId, workId, conversationId));
@@ -139,7 +139,7 @@ public sealed partial class MemoryStore(IDbContextFactory<PlatformDb> dbs, Platf
         await using var db = await dbs.CreateDbContextAsync(ct);
         var note = await db.Notes.SingleOrDefaultAsync(x => x.Id == id, ct);
         if (note is null || (!admin && note.AgentId != agentId))
-            throw new InvalidOperationException("Hafıza kaydını arşivleme yetkisi yok.");
+            throw new InvalidOperationException("You do not have permission to archive this memory note.");
         note.Archived = true;
         note.UpdatedAtUtc = DateTime.UtcNow;
         db.Events.Add(Event(note, "MemoryArchived", agentId, workId, conversationId));

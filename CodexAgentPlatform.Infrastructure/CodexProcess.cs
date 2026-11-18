@@ -35,12 +35,12 @@ public sealed class CodexProcess(PlatformPaths paths, string? executable, ILogge
             await proc.WaitForExitAsync(timeout.Token);
             await stderr;
             if (proc.ExitCode != 0)
-                throw new CodexRpcException("Codex CLI sürümü okunamadı.");
+                throw new CodexRpcException("Could not read the Codex CLI version.");
             return (await output).Trim();
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            throw new TimeoutException("Codex CLI sürüm sorgusuna zamanında yanıt vermedi.");
+            throw new TimeoutException("The Codex CLI version check timed out.");
         }
         finally { Kill(proc); }
     }
@@ -52,11 +52,11 @@ public sealed class CodexProcess(PlatformPaths paths, string? executable, ILogge
     }
 
     public Task ReplyAsync(JsonElement id, object result, CancellationToken ct) =>
-        WriteAsync(Volatile.Read(ref ready) ?? throw new IOException("Codex bağlantısı kapalı."),
+        WriteAsync(Volatile.Read(ref ready) ?? throw new IOException("The Codex connection is closed."),
             new { id, result }, ct);
 
     public Task RejectAsync(JsonElement id, string reason, CancellationToken ct) =>
-        WriteAsync(Volatile.Read(ref ready) ?? throw new IOException("Codex bağlantısı kapalı."),
+        WriteAsync(Volatile.Read(ref ready) ?? throw new IOException("The Codex connection is closed."),
             new { id, error = new { code = -32601, message = reason } }, ct);
 
     public async Task ReconnectAsync(CancellationToken ct)
@@ -144,10 +144,10 @@ public sealed class CodexProcess(PlatformPaths paths, string? executable, ILogge
             log.LogWarning("Codex CLI could not start. Native error code: {ErrorCode}", ex.NativeErrorCode);
             var message = ex.NativeErrorCode switch
             {
-                2 or 3 => "Codex CLI bulunamadı. Platform__CodexExecutable ayarına codex yürütülebilir dosyasının tam yolunu verin.",
-                5 => "Windows, Codex CLI’yi çalıştırma izni vermedi. Dosyanın erişim izinlerini kontrol edin.",
-                193 => "Seçilen Codex dosyası geçerli bir Windows yürütülebilir dosyası değil. codex.exe dosyasının tam yolunu kullanın.",
-                _ => $"Codex CLI başlatılamadı (işletim sistemi hata kodu: {ex.NativeErrorCode})."
+                2 or 3 => "Codex CLI was not found. Set Platform__CodexExecutable to the full path of the Codex executable.",
+                5 => "Windows denied permission to run Codex CLI. Check the executable's access permissions.",
+                193 => "The selected Codex file is not a valid Windows executable. Use the full path to codex.exe.",
+                _ => $"Could not start Codex CLI (operating system error code: {ex.NativeErrorCode})."
             };
             throw new CodexRpcException(message);
         }
@@ -190,7 +190,7 @@ public sealed class CodexProcess(PlatformPaths paths, string? executable, ILogge
         foreach (var key in info.Environment.Keys.ToArray())
             if (!allowed.Contains(key)) info.Environment.Remove(key);
         info.Environment["CODEX_HOME"] = paths.CodexHome;
-        return Process.Start(info) ?? throw new IOException("Codex CLI başlatılamadı.");
+        return Process.Start(info) ?? throw new IOException("Could not start Codex CLI.");
     }
 
     private async Task WriteConfigAsync(CancellationToken ct)
@@ -255,7 +255,7 @@ public sealed class CodexProcess(PlatformPaths paths, string? executable, ILogge
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            throw new TimeoutException($"Codex {method} yanıtı zaman aşımına uğradı.");
+            throw new TimeoutException($"The Codex {method} request timed out.");
         }
         finally { session.Pending.TryRemove(id, out _); }
     }
@@ -266,7 +266,7 @@ public sealed class CodexProcess(PlatformPaths paths, string? executable, ILogge
         await session.Writer.WaitAsync(ct);
         try
         {
-            if (session.Closed) throw new IOException("Codex bağlantısı kapandı.");
+            if (session.Closed) throw new IOException("The Codex connection closed.");
             await session.Process.StandardInput.WriteLineAsync(line.AsMemory(), ct);
             await session.Process.StandardInput.FlushAsync(ct);
         }
@@ -279,7 +279,7 @@ public sealed class CodexProcess(PlatformPaths paths, string? executable, ILogge
         {
             while (await session.Process.StandardOutput.ReadLineAsync() is { } line)
             {
-                if (line.Length > 16_000_000) throw new IOException("Codex yanıtı çok büyük.");
+                if (line.Length > 16_000_000) throw new IOException("The Codex response is too large.");
                 using var document = JsonDocument.Parse(line);
                 var root = document.RootElement;
                 var id = root.Get("id");
@@ -307,7 +307,7 @@ public sealed class CodexProcess(PlatformPaths paths, string? executable, ILogge
         {
             session.Closed = true;
             foreach (var promise in session.Pending.Values)
-                promise.TrySetException(new IOException("Codex App Server bağlantısı kapandı."));
+                promise.TrySetException(new IOException("The Codex App Server connection closed."));
             if (ReferenceEquals(Volatile.Read(ref ready), session))
                 Publish(new CodexEvent("transport/closed", default));
         }

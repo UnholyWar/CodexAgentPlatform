@@ -4,10 +4,11 @@ using CodexAgentPlatform.Infrastructure;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace CodexAgentPlatform.Tests;
 
-public sealed class ChatTests
+public sealed class ChatTests(ITestOutputHelper output)
 {
     [Fact]
     public async Task ProjectChatReusesWorkspaceAndOnlyResumesCompletedWorkOnReference()
@@ -68,7 +69,8 @@ public sealed class ChatTests
         await Complete("qa", "Doğrulama sonucu");
         await chats.SendAsync(chat, "Özel rapor", qa.Id, restricted.Id, default);
         await Complete("restricted", "Gizli sonuç");
-        await chats.SendAsync(chat, "Sonucu değerlendir", architect.Id, null, default);
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => chats.SendAsync(chat, "@Architect bu raporu değerlendir", null, null, default));
+        await chats.SendAsync(chat, "Sonucu değerlendir", architect.Id, "", default);
         var next = await db.Runs.AsNoTracking().SingleAsync(x => x.Status == WorkStatus.Pending);
         next.ThreadId = "design";
         var references = await new ContextBudget(storage).BuildAsync(next, architect, true, default);
@@ -133,7 +135,7 @@ public sealed class ChatTests
         await worker.StartAsync(default);
         try
         {
-            var chat = await chats.SendAsync(null, "Merhaba", null, null, default);
+            var chat = await chats.SendAsync(null, "Merhaba", "developer", null, default);
             await WaitAsync(async () => (await chats.ReadAsync(chat, 10, default)).Run?.Status == WorkStatus.Completed);
             var first = await chats.ReadAsync(chat, 10, default);
             Assert.Collection(first.Messages, x => Assert.Equal("Merhaba", x.Text), x => Assert.Equal("Test yanıtı", x.Text));
@@ -151,6 +153,147 @@ public sealed class ChatTests
             Assert.Equal(32, await check.Usage.SumAsync(x => x.Total));
         }
         finally { await worker.StopAsync(default); worker.Dispose(); }
+    }
+
+    [Fact]
+    public async Task NormalChatOnlyReceivesEligibleTitlesAndRejectsOtherToolsAndAgents()
+    {
+        await using var storage = await TestStorage.CreateAsync();
+        await using var db = storage.CreateDbContext();
+        var project = new Project { Name = "Shared dashboard" };
+        db.Projects.Add(project);
+        var developer = await db.Agents.SingleAsync(a => a.Id == "developer");
+        developer.AllowedProjects = project.Id;
+        developer.Title = "Dashboard developer";
+        developer.Instructions = "Private dashboard maintenance instructions";
+        var architect = await db.Agents.SingleAsync(a => a.Id == "architect");
+        architect.AllowedProjects = project.Id;
+        architect.Archived = true;
+        var devops = await db.Agents.SingleAsync(a => a.Id == "devops");
+        await db.SaveChangesAsync();
+
+        var codex = new FakeCodex();
+        codex.NextToolCalls.Enqueue(("task_begin", new { title = "Unexpected", description = "Test" }));
+        codex.NextToolCalls.Enqueue(("handoff_to_agent", new { agentId = devops.Id }));
+        codex.NextToolCalls.Enqueue(("handoff_to_agent", new { agentId = architect.Id }));
+        var updates = new ChatUpdates();
+        var chats = new ChatStore(storage, updates);
+        using var worker = Worker(storage, codex, updates);
+        await worker.StartAsync(default);
+        try
+        {
+            var id = await chats.SendAsync(null, "Could you explain this?", null, project.Id, default);
+            await WaitAsync(async () => (await chats.ReadAsync(id, 10, default)).Run?.Status == WorkStatus.Completed);
+            var thread = Assert.Single(codex.ThreadRequests);
+            AssertChatOnly(thread);
+            Assert.Equal("handoff_to_agent", Assert.Single(thread.Items("dynamicTools")).String("name"));
+            var input = Assert.Single(codex.TurnRequests).Items("input").Single().String("text");
+            Assert.Contains(developer.Title, input);
+            Assert.DoesNotContain(architect.Title, input);
+            Assert.DoesNotContain(devops.Title, input);
+            Assert.DoesNotContain(developer.Instructions, input + thread.String("developerInstructions"));
+            Assert.DoesNotContain("memory_search", thread.GetRawText());
+            Assert.Equal(3, codex.ToolReplies.Count);
+            Assert.All(codex.ToolReplies, r => Assert.False(r.True("success")));
+            Assert.Equal(PlatformChat.Id, (await db.Runs.SingleAsync()).AgentId);
+            Assert.False(await db.Work.AnyAsync());
+            Assert.False(await db.Events.AnyAsync(e => e.Kind == "AgentHandoff"));
+        }
+        finally { await worker.StopAsync(default); }
+    }
+
+    [Fact]
+    public async Task NormalChatHandsTheOriginalRequestToOneSpecialistAndKeepsTheFollowUp()
+    {
+        await using var storage = await TestStorage.CreateAsync();
+        await using var db = storage.CreateDbContext();
+        var codex = new FakeCodex();
+        var updates = new ChatUpdates();
+        var chats = new ChatStore(storage, updates);
+        using var worker = Worker(storage, codex, updates);
+        await worker.StartAsync(default);
+        try
+        {
+            const string background = "We deployed the staging dashboard yesterday.";
+            var id = await chats.SendAsync(null, background, null, null, default);
+            await WaitAsync(async () => (await chats.ReadAsync(id, 10, default)).Run?.Status == WorkStatus.Completed);
+            Assert.Equal(PlatformChat.Id, (await db.Runs.SingleAsync()).AgentId);
+
+            const string request = "Can you inspect that release's logs?";
+            codex.NextToolCalls.Enqueue(("handoff_to_agent", new { agentId = "devops" }));
+            codex.NextToolCalls.Enqueue(("handoff_to_agent", new { agentId = "qa" }));
+            await chats.SendAsync(id, request, null, null, default);
+            await WaitAsync(() => db.Runs.AnyAsync(r => r.AgentId == "devops" && r.Status == WorkStatus.Completed));
+            Assert.Equal(3, await db.Runs.CountAsync());
+            Assert.Equal(1, await db.Messages.CountAsync(m => m.Role == "user" && m.Text == request));
+            Assert.Single(await db.Events.Where(e => e.Kind == "AgentHandoff" && e.ConversationId == id).ToListAsync());
+            Assert.Collection(codex.ToolReplies, r => Assert.True(r.True("success")), r => Assert.False(r.True("success")));
+            var specialistInput = codex.TurnRequests[^1].Items("input").Single().String("text");
+            Assert.Contains(request, specialistInput);
+            Assert.Contains(background, specialistInput);
+            Assert.Equal(2, await db.Usage.CountAsync(u => u.AgentId == PlatformChat.Id));
+            Assert.Equal(1, await db.Usage.CountAsync(u => u.AgentId == "devops"));
+
+            await chats.SendAsync(id, "Why did that happen?", null, null, default);
+            await WaitAsync(async () => await db.Runs.CountAsync(r => r.AgentId == "devops" && r.Status == WorkStatus.Completed) == 2);
+            Assert.Equal(codex.TurnRequests[^2].String("threadId"), codex.TurnRequests[^1].String("threadId"));
+
+            await chats.SendAsync(id, "Let's chat.", PlatformChat.Id, null, default);
+            await WaitAsync(async () => await db.Runs.CountAsync(r => r.AgentId == PlatformChat.Id && r.Status == WorkStatus.Completed) == 3);
+            Assert.Equal(codex.TurnRequests[0].String("threadId"), codex.TurnRequests[^1].String("threadId"));
+        }
+        finally { await worker.StopAsync(default); }
+    }
+
+    [Fact]
+    public async Task AnExplicitMultiwordMentionOverridesTheSelectedAgent()
+    {
+        await using var storage = await TestStorage.CreateAsync();
+        await using var db = storage.CreateDbContext();
+        var chats = new ChatStore(storage, new ChatUpdates());
+        var specialist = new Agent { Name = "Release Engineer", Title = "Release operations" };
+        db.Agents.Add(specialist);
+        await db.SaveChangesAsync();
+
+        var id = await chats.SendAsync(null, "@Release Engineer inspect this build", "developer", null, default);
+
+        var run = Assert.Single(await db.Runs.Where(r => r.ConversationId == id).ToListAsync());
+        Assert.Equal(specialist.Id, run.AgentId);
+    }
+
+    [Fact]
+    public async Task NormalChatSendsLessPlatformContextThanTheDeveloperForTheSameGreeting()
+    {
+        await using var storage = await TestStorage.CreateAsync();
+        var codex = new FakeCodex();
+        var updates = new ChatUpdates();
+        var chats = new ChatStore(storage, updates);
+        using var worker = Worker(storage, codex, updates);
+        await worker.StartAsync(default);
+        try
+        {
+            foreach (var selection in new[] { PlatformChat.Id, "developer" })
+            {
+                var id = await chats.SendAsync(null, "Merhaba", selection, null, default);
+                await WaitAsync(async () => (await chats.ReadAsync(id, 10, default)).Run?.Status == WorkStatus.Completed);
+            }
+
+            var sizes = new List<int>();
+            for (var i = 0; i < 2; i++)
+            {
+                var thread = codex.ThreadRequests[i];
+                var tools = thread.Items("dynamicTools").ToArray();
+                var functions = tools.Sum(t => t.String("type") == "namespace" ? t.Items("tools").Count() : 1);
+                var instructionChars = (thread.String("developerInstructions") ?? "").Length + (thread.String("baseInstructions") ?? "").Length;
+                var schemaChars = thread.Get("dynamicTools").GetRawText().Length;
+                var inputChars = codex.TurnRequests[i].Items("input").Sum(item => item.String("text")?.Length ?? 0);
+                sizes.Add(instructionChars + schemaChars + inputChars);
+                output.WriteLine($"{(i == 0 ? "Normal chat" : "Developer")}: {functions} functions, {instructionChars} instruction characters, " +
+                    $"{schemaChars} serialized tool characters, {inputChars} turn-input characters.");
+            }
+            Assert.True(sizes[0] < sizes[1]);
+        }
+        finally { await worker.StopAsync(default); }
     }
 
     [Fact]
@@ -264,18 +407,23 @@ public sealed class ChatTests
         public List<string> Methods { get; } = [];
         public List<JsonElement> ThreadRequests { get; } = [];
         public List<JsonElement> TurnRequests { get; } = [];
+        public Queue<(string Name, object Arguments)> NextToolCalls { get; } = [];
+        public List<JsonElement> ToolReplies { get; } = [];
         public string? TurnModel { get; private set; }
         private int count;
         public event Action<CodexEvent>? Received;
         public Task<string> VersionAsync(CancellationToken ct) => Task.FromResult("fake-codex");
         public Task ReconnectAsync(CancellationToken ct) { Connected = true; return Task.CompletedTask; }
-        public Task ReplyAsync(JsonElement id, object result, CancellationToken ct) => Task.CompletedTask;
+        public Task ReplyAsync(JsonElement id, object result, CancellationToken ct)
+        {
+            ToolReplies.Add(Args(result));
+            return Task.CompletedTask;
+        }
         public Task RejectAsync(JsonElement id, string reason, CancellationToken ct) => Task.CompletedTask;
         public Task<JsonElement> CallAsync(string method, object? parameters, CancellationToken ct)
         {
             Connected = true;
             Methods.Add(method);
-            const string threadId = "t1";
             if (method == "windowsSandbox/readiness" && DenyWorkspaceNamespace)
                 return Task.FromResult(Args(new { status = "ready" }));
             if (method is "thread/start" or "thread/resume")
@@ -286,11 +434,12 @@ public sealed class ChatTests
                     return Task.FromException<JsonElement>(new CodexRpcException(
                         "error creating thread: failed to load AGENTS.md instructions for environment `local`: " +
                         "fs sandbox helper failed with status exit status: 1: bwrap: No permissions to create new namespace"));
-                return Task.FromResult(Args(new { thread = new { id = threadId } }));
+                return Task.FromResult(Args(new { thread = new { id = request.String("threadId") ?? $"t{ThreadRequests.Count}" } }));
             }
             if (method == "turn/start")
             {
                 var request = Args(parameters!);
+                var threadId = request.String("threadId")!;
                 TurnRequests.Add(request);
                 TurnModel = request.String("model");
                 var turnId = $"turn-{++count}";
@@ -302,6 +451,11 @@ public sealed class ChatTests
                 }
                 else
                 {
+                    while (NextToolCalls.TryDequeue(out var tool))
+                    {
+                        var arguments = Args(new { threadId, turnId, tool = tool.Name, arguments = tool.Arguments });
+                        Received?.Invoke(new CodexEvent("item/tool/call", arguments, Args(NextToolCalls.Count + 1)));
+                    }
                     Received?.Invoke(new CodexEvent("item/agentMessage/delta", Args(new { threadId, turnId, itemId = "msg", delta = "Test " })));
                     Received?.Invoke(new CodexEvent("item/agentMessage/delta", Args(new { threadId, turnId, itemId = "msg", delta = "yanıtı" })));
                     var total = new { inputTokens = count * 10, cachedInputTokens = count * 2, outputTokens = count * 6, totalTokens = count * 16 };

@@ -2,12 +2,12 @@
 @attribute [Authorize]
 @inject ChatStore Chats
 
-<PageTitle>Sohbet geçmişi · Codex Agent Platform</PageTitle>
+<PageTitle>Conversations · Codex Agent Platform</PageTitle>
 <section class="admin-page">
-    <header class="section-head"><h1>Sohbet geçmişi</h1><a class="primary" href="/"><Icon Name="plus" /> Yeni sohbet</a></header>
+    <header class="section-head"><h1>Conversations</h1><a class="primary" href="/"><Icon Name="plus" /> New chat</a></header>
     <form class="filter" @onsubmit="SearchAsync" @onsubmit:preventDefault>
-        <input placeholder="Başlıklarda ve mesajlarda ara" aria-label="Sohbet ara" @bind="query" maxlength="120" />
-        <button class="button"><Icon Name="search" /> Ara</button>
+        <input placeholder="Search titles and messages" aria-label="Search conversations" @bind="query" maxlength="120" />
+        <button class="button"><Icon Name="search" /> Search</button>
     </form>
     <div class="list">
         @foreach (var chat in rows)
@@ -16,7 +16,7 @@
                 <strong>@chat.Title</strong><small>@chat.UpdatedAtUtc.ToString("dd.MM.yyyy HH:mm") UTC</small>
             </a>
         }
-        @if (rows.Count == 0) { <p class="empty">Sohbet bulunamadı.</p> }
+        @if (rows.Count == 0) { <p class="empty">No conversations found.</p> }
     </div>
 </section>
 

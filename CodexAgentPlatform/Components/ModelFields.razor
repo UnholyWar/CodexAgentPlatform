@@ -1,13 +1,13 @@
 <label>Model
     <select value="@(Model ?? "")" @onchange="ChangeModel">
-        <option value="">Otomatik / varsayılan</option>
+        <option value="">Automatic / default</option>
         @if (Model is not null && !Models.Any(m => m.Id == Model)) { <option value="@Model">@Model</option> }
         @foreach (var model in Models) { <option value="@model.Id">@model.Name</option> }
     </select>
 </label>
 <label>Reasoning effort
     <select value="@(Effort ?? "")" @onchange="ChangeEffort">
-        <option value="">Modelin varsayılanı</option>
+        <option value="">Model default</option>
         @if (Effort is not null && !Efforts.Contains(Effort)) { <option value="@Effort">@Effort</option> }
         @foreach (var effort in Efforts) { <option value="@effort">@effort</option> }
     </select>

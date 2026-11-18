@@ -32,7 +32,7 @@ public sealed class StorageStartup(IDbContextFactory<PlatformDb> dbs, PlatformPa
         {
             run.Status = WorkStatus.Interrupted;
             run.UpdatedAtUtc = now;
-            run.Error = "Uygulama yeniden başlatıldı. Sohbetten güvenli biçimde devam edebilirsiniz.";
+            run.Error = "The application restarted. Resume safely from the chat.";
             db.Events.Add(new Activity
             {
                 ConversationId = run.ConversationId, AgentId = run.AgentId, WorkId = run.WorkId,

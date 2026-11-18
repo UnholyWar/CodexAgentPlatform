@@ -5,17 +5,17 @@
 @inject UserManager<PlatformUser> Users
 @inject NavigationManager Navigation
 
-<PageTitle>Giriş · Codex Agent Platform</PageTitle>
-<h1>Yönetici girişi</h1>
+<PageTitle>Sign in · Codex Agent Platform</PageTitle>
+<h1>Administrator sign-in</h1>
 @if (Error is not null)
 {
-    <p class="notice error" role="alert">Kullanıcı adı veya şifre geçersiz.</p>
+    <p class="notice error" role="alert">Invalid username or password.</p>
 }
 <form method="post" action="/session/login" class="fields">
     <AntiforgeryToken />
-    <label>Kullanıcı adı <input name="username" autocomplete="username" maxlength="64" required /></label>
-    <label>Şifre <input name="password" type="password" autocomplete="current-password" maxlength="128" required /></label>
-    <button class="primary" type="submit">Giriş yap</button>
+    <label>Username <input name="username" autocomplete="username" maxlength="64" required /></label>
+    <label>Password <input name="password" type="password" autocomplete="current-password" maxlength="128" required /></label>
+    <button class="primary" type="submit">Sign in</button>
 </form>
 
 @code {

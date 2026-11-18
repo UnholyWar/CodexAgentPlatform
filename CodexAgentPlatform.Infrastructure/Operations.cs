@@ -24,7 +24,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         var count = await db.Conversations.Where(x => x.Id == conversation)
             .ExecuteUpdateAsync(s => s.SetProperty(x => x.AutoApprove, enabled), ct);
-        if (count == 0) throw new InvalidOperationException("Sohbet bulunamadı.");
+        if (count == 0) throw new InvalidOperationException("Conversation not found.");
         var now = DateTime.UtcNow;
         var requests = db.Approvals.Where(x => x.ConversationId == conversation && x.AutoEligible && x.ExpiresAtUtc > now);
         if (enabled)
@@ -63,7 +63,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
     {
         var resource = await ResolveAsync(agent, resourceId, ResourceKind.SshServer, "ssh", ct);
         if (command is "restart-docker" || (command is not ("test" or "sftp-read") && !SshCommands.ContainsKey(command)))
-            throw new InvalidOperationException("Bu SSH işlemi doğrudan çalıştırılamaz.");
+            throw new InvalidOperationException("This SSH operation requires approval.");
         var result = await SshAsync(resource, command, ct, offset: offset);
         await AuditAsync(agent.Id, resource.ProjectId, conversationId, workId, "SSHExecuted", $"{resource.Name} · {command}", ct);
         return result;
@@ -73,14 +73,14 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         string operation, string? argument, CancellationToken ct, string? conversationId = null, string? workId = null, int offset = 0)
     {
         if (offset != 0 && operation is not ("status" or "diff"))
-            throw new ArgumentException("Sayfalama yalnızca status ve diff için kullanılabilir.");
+            throw new ArgumentException("Pagination is only available for status and diff.");
         var resource = await ResolveAsync(agent, resourceId, ResourceKind.GitRepository, "git", ct);
         var root = paths.Workspace(workspaceId);
         var repo = Path.Combine(root, "project");
         if (operation == "prepare")
         {
             if (Directory.Exists(repo))
-                throw new InvalidOperationException("Bu çalışma alanında zaten bir repository var.");
+                throw new InvalidOperationException("This workspace already contains a repository.");
             await using var db = await dbs.CreateDbContextAsync(ct);
             var branch = resource.IsGlobal ? null : await db.Projects.Where(x => x.Id == resource.ProjectId).Select(x => x.DefaultBranch).SingleAsync(ct);
             if (branch is not null) ValidateBranch(branch);
@@ -108,7 +108,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
             "pull" => await RunGitAsync(repo, ["pull", "--ff-only", "--no-rebase", "--no-recurse-submodules", GitAddress(resource), SafeBranch(argument)], resource, ct),
             "branch" => await RunGitAsync(repo, ["switch", "-c", SafeBranch(argument)], null, ct),
             "commit" => await CommitAsync(repo, argument, ct),
-            _ => throw new InvalidOperationException("Bilinmeyen Git işlemi.")
+            _ => throw new InvalidOperationException("Unknown Git operation.")
         };
         await AuditAsync(agent.Id, resource.ProjectId, conversationId, workId, operation == "commit" ? "GitCommitted" : "GitOperation",
             $"{resource.Name} · {operation}", ct);
@@ -147,7 +147,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         {
             resource = await ResolveAsync(agent, resourceId, ResourceKind.SshServer, "ssh", ct);
             if (kind != "SshChange" || operation != "restart-docker")
-                throw new InvalidOperationException("Bu değişiklik işlemi kayıtlı değil.");
+                throw new InvalidOperationException("This change operation is not registered.");
             target = new(resourceId, operation, ResourceBinding: Binding(resource));
             scope = $"{resource.Name} · {resource.Address}:{resource.Port} · {SshCommands[operation]}";
         }
@@ -160,7 +160,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
             x.ConversationId == conversationId && x.Payload == payload && x.ExpiresAtUtc > now, ct);
         if (existing is not null) return existing;
         var approval = new Approval { AgentId = agent.Id, ConversationId = conversationId, Kind = kind,
-            Scope = resource.Production ? $"ÜRETİM · {scope}" : scope, Payload = payload };
+            Scope = resource.Production ? $"PRODUCTION · {scope}" : scope, Payload = payload };
         if (!resource.Production && !resource.IsGlobal && !globalServer)
         {
             if (kind == "GitPush")
@@ -196,7 +196,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         var count = await db.Approvals.Where(x => x.Id == id && x.Status == "Pending" && x.ExpiresAtUtc > now)
             .ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, allow ? "Approved" : "Declined")
                 .SetProperty(x => x.DecidedBy, ownerId), ct);
-        if (count != 1) throw new InvalidOperationException("Onay süresi doldu veya karar zaten verildi.");
+        if (count != 1) throw new InvalidOperationException("The approval has expired or a decision has already been made.");
     }
 
     public async Task<bool> ExecuteNextAsync(CancellationToken ct)
@@ -215,21 +215,21 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         try
         {
             var target = JsonSerializer.Deserialize<OperationTarget>(approval.Payload)
-                ?? throw new InvalidOperationException("Geçersiz onay kapsamı.");
+                ?? throw new InvalidOperationException("Invalid approval scope.");
             var agent = await db.Agents.AsNoTracking().SingleAsync(x => x.Id == approval.AgentId, ct);
             if (approval.Kind == "GitPush")
             {
                 var resource = await ResolveAsync(agent, target.ResourceId, ResourceKind.GitRepository, "git", ct);
                 if (approval.DecidedBy == AutomaticDecision && await db.Projects.AnyAsync(p =>
                     p.Id == resource.ProjectId && p.DefaultBranch == target.Branch, ct))
-                    throw new InvalidOperationException("Varsayılan branch için yönetici onayı gerekli.");
-                if (Binding(resource) != target.ResourceBinding) throw new InvalidOperationException("Kaynak onaydan sonra değişti.");
+                    throw new InvalidOperationException("The default branch requires administrator approval.");
+                if (Binding(resource) != target.ResourceBinding) throw new InvalidOperationException("The resource changed after approval.");
                 var repo = Path.Combine(paths.Workspace(target.WorkspaceId!), "project");
                 await VerifyRepoAsync(resource, repo, ct);
                 var head = (await RunGitAsync(repo, ["rev-parse", "--verify", "HEAD^{commit}"], null, ct)).Trim();
                 var local = (await RunGitAsync(repo, ["branch", "--show-current"], null, ct)).Trim();
                 if (head != target.Commit || local != target.Operation || !CommitHash().IsMatch(head))
-                    throw new InvalidOperationException("Commit veya branch onaydan sonra değişti.");
+                    throw new InvalidOperationException("The commit or branch changed after approval.");
                 approval.Result = TextLimits.Clip(await RunGitAsync(repo,
                     ["push", "--porcelain", "--no-verify", "--", GitAddress(resource), $"{head}:refs/heads/{SafeBranch(target.Branch)}"], resource, ct), 2000);
                 db.Events.Add(new Activity { AgentId = agent.Id, ConversationId = approval.ConversationId,
@@ -238,7 +238,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
             else if (approval.Kind == "SshRelease")
             {
                 var deployment = await ReleaseAsync(agent, target.ResourceId, target.Operation, target.Image, ct);
-                if (deployment.Binding != target.ResourceBinding) throw new InvalidOperationException("Dağıtım kaynağı onaydan sonra değişti.");
+                if (deployment.Binding != target.ResourceBinding) throw new InvalidOperationException("The deployment resource changed after approval.");
                 approval.Result = JsonSerializer.Serialize(await SshAsync(deployment.Server, target.Operation, ct, deployment.Command));
                 db.Events.Add(new Activity { AgentId = agent.Id, ConversationId = approval.ConversationId,
                     ProjectId = deployment.Target.ProjectId, WorkId = target.WorkId, Kind = target.Operation == "deploy" ? "DeploymentExecuted" : "RollbackExecuted",
@@ -247,19 +247,19 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
             else if (approval.Kind == "SshChange" && target.Operation == "restart-docker")
             {
                 var resource = await ResolveAsync(agent, target.ResourceId, ResourceKind.SshServer, "ssh", ct);
-                if (Binding(resource) != target.ResourceBinding) throw new InvalidOperationException("Kaynak onaydan sonra değişti.");
+                if (Binding(resource) != target.ResourceBinding) throw new InvalidOperationException("The resource changed after approval.");
                 approval.Result = JsonSerializer.Serialize(await SshAsync(resource, target.Operation, ct));
                 db.Events.Add(new Activity { AgentId = agent.Id, ConversationId = approval.ConversationId,
                     ProjectId = resource.ProjectId, WorkId = target.WorkId, Kind = "SSHExecuted", Detail = approval.Scope });
             }
-            else throw new InvalidOperationException("Onay türü desteklenmiyor.");
+            else throw new InvalidOperationException("This approval type is not supported.");
             approval.Status = "Completed";
         }
         catch (OperationCanceledException) { approval.Status = "Interrupted"; }
         catch (Exception ex)
         {
             approval.Status = "Failed";
-            approval.Result = ex is InvalidOperationException ? TextLimits.Clip(ex.Message, 500) : "İşlem başarısız.";
+            approval.Result = ex is InvalidOperationException ? TextLimits.Clip(ex.Message, 500) : "The operation failed.";
         }
         db.Entry(approval).Property(x => x.Status).IsModified = true;
         db.Events.Add(new Activity { AgentId = approval.AgentId, ConversationId = approval.ConversationId,
@@ -275,7 +275,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         var resource = await db.Resources.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id && x.Kind == kind, ct);
         if (current is null || !ToolAccess.Has(current, tool) || resource is null || (resource.ProjectId is null && !resource.IsGlobal) ||
             !ToolAccess.AllowsProject(current, resource.ProjectId))
-            throw new UnauthorizedAccessException("Ajan bu kaynak veya araç için yetkili değil.");
+            throw new UnauthorizedAccessException("The agent is not authorized to use this resource or tool.");
         return resource;
     }
 
@@ -284,15 +284,15 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
     {
         var target = await ResolveAsync(agent, resourceId, ResourceKind.DeploymentTarget, "ssh", ct);
         if (!ServiceName().IsMatch(target.Address) || target.SshServerId is null)
-            throw new InvalidOperationException("Geçerli bir Docker Swarm servisi ve SSH kaynağı gerekli.");
+            throw new InvalidOperationException("A valid Docker Swarm service and SSH resource are required.");
         var server = await ResolveAsync(agent, target.SshServerId, ResourceKind.SshServer, "ssh", ct);
         if (!server.IsGlobal && server.ProjectId != target.ProjectId)
-            throw new UnauthorizedAccessException("Dağıtım ve SSH kaynağı aynı projeye ait olmalı.");
+            throw new UnauthorizedAccessException("The deployment target and SSH resource must belong to the same project.");
         var command = operation switch
         {
             "deploy" when image is not null && ImageDigest().IsMatch(image) => $"docker service update --detach=false --image {image} {target.Address}",
             "rollback" => $"docker service rollback --detach=false {target.Address}",
-            _ => throw new InvalidOperationException("Dağıtım için SHA256 digest’ine sabitlenmiş image veya rollback işlemi gerekli.")
+            _ => throw new InvalidOperationException("Deployment requires an image pinned to a SHA256 digest or a rollback operation.")
         };
         return (target, server, Binding(target) + Binding(server), command);
     }
@@ -300,7 +300,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
     private async Task<object> SshAsync(Resource resource, string operation, CancellationToken ct, string? approvedCommand = null, int offset = 0)
     {
         if (resource is not { Username.Length: > 0, HostFingerprint.Length: > 0, VaultId.Length: > 0, Port: > 0 and <= 65535 })
-            throw new InvalidOperationException("SSH kullanıcı adı, host key ve Vault kaydı gerekli.");
+            throw new InvalidOperationException("An SSH username, host key, and vault entry are required.");
         var secret = await vault.ReadAsync(resource.VaultId, ct);
         var bytes = Encoding.UTF8.GetBytes(secret);
         try
@@ -319,7 +319,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
             command.CommandTimeout = approvedCommand is null ? TimeSpan.FromSeconds(20) : TimeSpan.FromMinutes(2);
             await command.ExecuteAsync(timeout.Token);
             if (command.ExitStatus != 0)
-                throw new InvalidOperationException($"SSH komutu {command.ExitStatus} koduyla sonlandı.");
+                throw new InvalidOperationException($"The SSH command exited with code {command.ExitStatus}.");
             var output = command.Result.Replace(secret, "[credential]", StringComparison.Ordinal);
             if (SshCommands.ContainsKey(operation) && operation != "restart-docker")
                 return ToolOutput.Page(output, offset, 8000);
@@ -339,7 +339,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         catch (Exception ex) when (ex is Renci.SshNet.Common.SshException or CryptographicException or
             ArgumentException or FormatException or NotSupportedException or InvalidOperationException)
         {
-            throw new ArgumentException("Geçerli, parolasız bir SSH özel anahtarı girin.");
+            throw new ArgumentException("Enter a valid SSH private key without a passphrase.");
         }
         finally { CryptographicOperations.ZeroMemory(bytes); }
     }
@@ -348,7 +348,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
     {
         var path = resource.SftpFile;
         if (path is null || !SftpPath().IsMatch(path) || path.Split('/').Any(s => s is "." or ".."))
-            throw new InvalidOperationException("Bu SSH kaynağı için geçerli bir SFTP dosyası tanımlanmamış.");
+            throw new InvalidOperationException("No valid SFTP file is configured for this SSH resource.");
         using var client = new SftpClient(resource.Address, resource.Port, resource.Username!, key);
         PinHost(client, resource);
         client.OperationTimeout = TimeSpan.FromSeconds(12);
@@ -400,7 +400,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         if (authentication?.VaultId is { } vaultId)
         {
             secret = await vault.ReadAsync(vaultId, ct);
-            if (secret.Contains('\r') || secret.Contains('\n')) throw new InvalidOperationException("Geçersiz Git erişim bilgisi.");
+            if (secret.Contains('\r') || secret.Contains('\n')) throw new InvalidOperationException("Invalid Git credential.");
             var username = string.IsNullOrWhiteSpace(authentication.Username) ? "x-access-token" : authentication.Username.Trim();
             var base64 = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{username}:{secret}"));
             options[$"http.{GitAddress(authentication)}.extraHeader"] = "Authorization: Basic " + base64;
@@ -415,7 +415,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         foreach (var arg in args) start.ArgumentList.Add(arg);
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(TimeSpan.FromSeconds(90));
-        using var process = Process.Start(start) ?? throw new IOException("Git başlatılamadı.");
+        using var process = Process.Start(start) ?? throw new IOException("Could not start Git.");
         try
         {
             var stdout = DrainAsync(process.StandardOutput, timeout.Token);
@@ -424,7 +424,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
             var output = await stdout;
             var error = await stderr;
             if (process.ExitCode != 0)
-                throw new InvalidOperationException($"Git işlemi ({args[0]}) {process.ExitCode} koduyla sonlandı.");
+                throw new InvalidOperationException($"The Git operation ({args[0]}) exited with code {process.ExitCode}.");
             if (string.IsNullOrWhiteSpace(output)) output = error;
             return secret is null ? output : output.Replace(secret, "[credential]", StringComparison.Ordinal);
         }
@@ -446,21 +446,21 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
 
     private async Task<string> CommitAsync(string repo, string? message, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(message) || message.Length > 500) throw new InvalidOperationException("Commit mesajı gerekli.");
+        if (string.IsNullOrWhiteSpace(message) || message.Length > 500) throw new InvalidOperationException("A commit message is required.");
         await RunGitAsync(repo, ["add", "-A", "--", "."], null, ct);
         return await RunGitAsync(repo, ["commit", "--no-verify", "-m", message], null, ct);
     }
 
     private async Task VerifyRepoAsync(Resource resource, string repo, CancellationToken ct)
     {
-        if (!Directory.Exists(repo)) throw new InvalidOperationException("Önce Git çalışma alanını hazırlayın.");
+        if (!Directory.Exists(repo)) throw new InvalidOperationException("Prepare the Git workspace first.");
         PlatformPaths.CheckLinks(repo);
         var common = (await RunGitAsync(repo, ["rev-parse", "--path-format=absolute", "--git-common-dir"], null, ct)).Trim();
         var baseDir = Path.GetFullPath(Path.Combine(paths.Workspaces, ".git-cache")) + Path.DirectorySeparatorChar;
         var marker = Path.Combine(common, "platform-resource");
         if (!Path.GetFullPath(common).StartsWith(baseDir, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal) ||
             !File.Exists(marker) || await File.ReadAllTextAsync(marker, ct) != resource.Id)
-            throw new InvalidOperationException("Çalışma alanı bu Git kaynağına bağlı değil.");
+            throw new InvalidOperationException("The workspace is not linked to this Git resource.");
     }
 
     private async Task AuditAsync(string agentId, string? project, string? conversation, string? workId, string kind, string detail, CancellationToken ct)
@@ -474,7 +474,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
     {
         if (!Uri.TryCreate(resource.Address, UriKind.Absolute, out var uri) || uri.Scheme != "https" ||
             !string.IsNullOrEmpty(uri.UserInfo + uri.Query + uri.Fragment))
-            throw new InvalidOperationException("Git repository için credentials içermeyen bir HTTPS URL gerekli.");
+            throw new InvalidOperationException("The Git repository requires an HTTPS URL without credentials.");
         return uri.AbsoluteUri;
     }
 
@@ -483,7 +483,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
 
     private static string SafeBranch(string? branch)
     {
-        if (branch is null) throw new InvalidOperationException("Branch gerekli.");
+        if (branch is null) throw new InvalidOperationException("A branch is required.");
         ValidateBranch(branch);
         return branch;
     }
@@ -492,7 +492,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
     {
         if (!BranchShape().IsMatch(branch) || branch.Contains("..", StringComparison.Ordinal) ||
             branch.Split('/').Any(x => x.Length == 0 || x.StartsWith('.') || x.EndsWith('.') || x.EndsWith(".lock", StringComparison.Ordinal)))
-            throw new InvalidOperationException("Geçersiz branch adı.");
+            throw new InvalidOperationException("Invalid branch name.");
     }
 
     [GeneratedRegex("^[A-Za-z0-9][A-Za-z0-9._/-]{0,150}$")]

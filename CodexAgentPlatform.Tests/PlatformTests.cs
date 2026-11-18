@@ -190,6 +190,16 @@ public sealed class PlatformTests
     }
 
     [Fact]
+    public void ProductionApprovalsKeepTheirWarningWithEitherStoredLanguage()
+    {
+        Assert.True(ApprovalDisplay.IsProduction("ÜRETİM · repository"));
+        Assert.True(ApprovalDisplay.IsProduction("PRODUCTION · repository"));
+        Assert.False(ApprovalDisplay.IsProduction("repository"));
+        Assert.Equal("PRODUCTION · repository", ApprovalDisplay.Scope("ÜRETİM · repository"));
+        Assert.Equal("PRODUCTION · repository", ApprovalDisplay.Scope("PRODUCTION · repository"));
+    }
+
+    [Fact]
     public void MarkdownAlwaysEncodesUntrustedHtmlAndRejectsUnsafeLinks()
     {
         var html = SafeMarkdown.Render("<img src=x onerror=alert(1)>\n[link](javascript:alert)\n[docs](https://example.org/docs)");

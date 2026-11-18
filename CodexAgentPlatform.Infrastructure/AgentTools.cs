@@ -69,13 +69,13 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
         var tool = Registry.FirstOrDefault(x => x.Name == name);
         if (agent.Archived || tool is null || (tool.Permission.Length > 0 && !ToolAccess.Has(agent, tool.Permission))
             || !ToolAccess.AllowsProject(agent, run.ProjectId))
-            throw new UnauthorizedAccessException("Araç yetkisi yok.");
+            throw new UnauthorizedAccessException("This tool is not permitted.");
         if (args.ValueKind != JsonValueKind.Object || tool.Required.Any(x => string.IsNullOrWhiteSpace(args.String(x))))
-            throw new ArgumentException("Araç için gerekli argümanlar eksik.");
+            throw new ArgumentException("Required tool arguments are missing.");
 
         var id = args.String("id");
         var project = args.String("projectId") ?? run.ProjectId;
-        if (!ToolAccess.AllowsProject(agent, project)) throw new UnauthorizedAccessException("Proje yetkisi yok.");
+        if (!ToolAccess.AllowsProject(agent, project)) throw new UnauthorizedAccessException("Access to this project is not permitted.");
         switch (name)
         {
             case "memory_search":
@@ -130,7 +130,7 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
                 }
                 return visible.Select(x => new { x.Id, x.Name, Kind = x.Kind.ToString(), x.ProjectId, x.IsGlobal, x.Address, x.Production }).ToArray();
             case "git_workspace":
-                if (!ToolAccess.Has(agent, "workspace")) throw new UnauthorizedAccessException("Çalışma alanı izni gerekli.");
+                if (!ToolAccess.Has(agent, "workspace")) throw new UnauthorizedAccessException("Workspace permission is required.");
                 await RequireResourceProjectAsync(db, id!, run, ct);
                 return await operations.GitAsync(agent, id!, run.Workspace!, args.String("operation")!, args.String("argument"), ct,
                     run.ConversationId, run.WorkId, OutputOffset(args));
@@ -148,10 +148,10 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
                 var agents = await db.Agents.AsNoTracking().Where(x => !x.Archived && x.Id != agent.Id).ToListAsync(ct);
                 return agents.Where(a => ToolAccess.AllowsProject(a, run.ProjectId)).Select(a => new { a.Id, a.Name, a.Title }).ToArray();
             case "task_delegate":
-                if (run.DelegationDepth != 0) throw new InvalidOperationException("Bu iş devri son seviye.");
+                if (run.DelegationDepth != 0) throw new InvalidOperationException("Further delegation is not permitted for this work.");
                 var target = await db.Agents.AsNoTracking().SingleOrDefaultAsync(x => x.Id == args.String("agentId"), ct);
                 if (target is null || target.Id == agent.Id || !ToolAccess.AllowsProject(target, run.ProjectId))
-                    throw new UnauthorizedAccessException("Hedef ajan erişilebilir değil.");
+                    throw new UnauthorizedAccessException("The target agent is not available.");
                 return new Delegation(target.Id, TextLimits.Clip(args.String("brief"), 2000));
             default:
                 return await WorkAsync(db, name, args, run, ct);
@@ -163,7 +163,7 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
         var value = args.Get("offset");
         if (value.ValueKind == JsonValueKind.Undefined) return 0;
         if (value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var offset) && offset >= 0) return offset;
-        throw new ArgumentException("Geçerli bir çıktı konumu gerekli.");
+        throw new ArgumentException("A valid output offset is required.");
     }
 
     private async Task<object?> WorkAsync(PlatformDb db, string operation, JsonElement args, ChatRun run, CancellationToken ct)
@@ -205,7 +205,7 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
         else
         {
             if (work is null || work.Status != WorkStatus.Running)
-                throw new InvalidOperationException("Önce task_begin çağırın.");
+                throw new InvalidOperationException("Call task_begin first.");
             work.LastStep = TextLimits.Clip(args.String("step"), 1000);
             work.NextStep = TextLimits.Clip(args.String("next"), 800);
             work.Branch = args.String("branch") is { } branch ? TextLimits.Clip(branch, 151) : work.Branch;
@@ -216,7 +216,7 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
                 {
                     "completed" => WorkStatus.Completed, "paused" => WorkStatus.Paused,
                     "waiting" => WorkStatus.WaitingForUser, "failed" => WorkStatus.Failed,
-                    "cancelled" => WorkStatus.Cancelled, _ => throw new ArgumentException("Geçersiz iş durumu.")
+                    "cancelled" => WorkStatus.Cancelled, _ => throw new ArgumentException("Invalid work status.")
                 };
                 if (work.Status == WorkStatus.Completed) work.CompletedAtUtc = DateTime.UtcNow;
                 kind = $"Work{work.Status}";
@@ -241,10 +241,10 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
         var zone = TimeZoneInfo.FindSystemTimeZoneById(zoneId);
         if (args.String("when") is { } when)
             return TemporalQuery.Parse(when, DateTime.UtcNow, zone) ??
-                throw new ArgumentException("Tarih ifadesi tanınmadı. from ve until tarihleri kullanın.");
+                throw new ArgumentException("Date expression not recognized. Specify from and until dates.");
         if (!DateOnly.TryParseExact(args.String("from"), "yyyy-MM-dd", null, System.Globalization.DateTimeStyles.None, out var from) ||
             !DateOnly.TryParseExact(args.String("until"), "yyyy-MM-dd", null, System.Globalization.DateTimeStyles.None, out var until) || until <= from)
-            throw new ArgumentException("Geçerli bir başlangıç ve bitiş tarihi gerekli.");
+            throw new ArgumentException("Valid start and end dates are required.");
         return new(TimeZoneInfo.ConvertTimeToUtc(from.ToDateTime(TimeOnly.MinValue), zone),
             TimeZoneInfo.ConvertTimeToUtc(until.ToDateTime(TimeOnly.MinValue), zone));
     }
@@ -255,12 +255,12 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
     private static async Task RequireNoteAsync(PlatformDb db, Agent agent, string id, CancellationToken ct)
     {
         var note = await db.Notes.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, ct);
-        if (note is null || !CanRead(agent, note)) throw new UnauthorizedAccessException("Hafıza kaydı erişilebilir değil.");
+        if (note is null || !CanRead(agent, note)) throw new UnauthorizedAccessException("The memory note is not accessible.");
     }
 
     private static async Task RequireResourceProjectAsync(PlatformDb db, string id, ChatRun run, CancellationToken ct)
     {
         if (!await db.Resources.AnyAsync(x => x.Id == id && (x.ProjectId == null ? x.IsGlobal : x.ProjectId == run.ProjectId), ct))
-            throw new UnauthorizedAccessException("Bu kaynağın projesini sohbet kutusundan seçin.");
+            throw new UnauthorizedAccessException("Select this resource's project in the chat settings.");
     }
 }

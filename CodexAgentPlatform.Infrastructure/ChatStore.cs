@@ -60,40 +60,56 @@ public sealed class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpdates upd
         bool autoApproveNewChat = false)
     {
         text = text.Trim();
+        var inheritProject = projectId is null;
         if (string.IsNullOrWhiteSpace(projectId)) projectId = null;
-        if (text.Length is 0 or > 16_000) throw new ArgumentException("Mesaj 1–16.000 karakter olmalı.");
+        if (text.Length is 0 or > 16_000) throw new ArgumentException("Messages must contain between 1 and 16,000 characters.");
         await using var db = await dbs.CreateDbContextAsync(ct);
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         var chat = chatId is null ? new Conversation { Title = TextLimits.Clip(text.Replace('\n', ' '), 65), AutoApprove = autoApproveNewChat }
             : await db.Conversations.SingleAsync(x => x.Id == chatId, ct);
         if (await db.Runs.AnyAsync(x => x.ConversationId == chat.Id && Enumerable.Contains(Active, x.Status), ct))
-            throw new InvalidOperationException("Bu sohbette bir yanıt hazırlanıyor.");
-        var agents = await db.Agents.Where(x => !x.Archived).ToListAsync(ct);
-        if (agents.Count == 0) throw new InvalidOperationException("Etkin ajan bulunamadı.");
+            throw new InvalidOperationException("A response is already being prepared in this chat.");
+        var agents = await db.Agents.AsNoTracking().Where(x => !x.Archived)
+            .Select(a => new Agent { Id = a.Id, Name = a.Name, AllowedProjects = a.AllowedProjects, Model = a.Model, Effort = a.Effort })
+            .ToListAsync(ct);
         var settings = await db.Preferences.SingleAsync(ct);
-        var explicitAgent = Mention(agents, text) ?? agents.Find(a => a.Id == selectedAgent);
-        if (projectId is null)
+        var normal = PlatformChat.CreateAgent();
+        var explicitAgent = Mention(agents, text);
+        if (explicitAgent is null && !string.IsNullOrWhiteSpace(selectedAgent))
+            explicitAgent = selectedAgent == PlatformChat.Id ? normal : agents.Find(a => a.Id == selectedAgent)
+                ?? throw new InvalidOperationException("The selected agent is no longer available.");
+        var last = chatId is null ? null : await db.Runs.AsNoTracking().Where(x => x.ConversationId == chat.Id)
+            .OrderByDescending(x => x.AssistantMessageId).Select(x => new { x.AgentId, x.ProjectId }).FirstOrDefaultAsync(ct);
+        if (projectId is null && inheritProject)
         {
             var projects = await db.Projects.AsNoTracking().Select(x => new { x.Id, x.Name }).ToListAsync(ct);
             var mentions = projects.Where(x => x.Name.Length >= 3 && text.Contains(x.Name, StringComparison.OrdinalIgnoreCase))
                 .Take(2).ToArray();
             if (mentions.Length == 1) projectId = mentions[0].Id;
             else if (mentions.Length > 1)
-                return await SaveExchangeAsync(db, tx, chat, chatId, explicitAgent ?? DefaultAgent(agents, text), text,
-                    $"Bu istek birden fazla projeyi içeriyor. Önce {mentions[0].Name} veya {mentions[1].Name} adını seçebilir misiniz?", ct);
+                return await SaveExchangeAsync(db, tx, chat, chatId, explicitAgent ?? normal, text,
+                    $"This request includes multiple projects. Which should we start with, {mentions[0].Name} or {mentions[1].Name}?", ct);
+            else projectId = last?.ProjectId;
         }
-        var range = TemporalQuery.Parse(text, DateTime.UtcNow, TimeZoneInfo.FindSystemTimeZoneById(settings.TimeZone));
-        var previous = await FindWorkAsync(db, chat.Id, text, projectId, explicitAgent?.Id, range, ct);
-        var candidate = previous.Count == 1 ? previous[0] : null;
-        var agent = explicitAgent ?? agents.Find(a => a.Id == candidate?.AgentId) ?? DefaultAgent(agents, text);
-        projectId ??= candidate?.ProjectId;
-        if (!ToolAccess.AllowsProject(agent, projectId) || (projectId is not null && !await db.Projects.AnyAsync(x => x.Id == projectId, ct)))
-            throw new UnauthorizedAccessException("Ajanın seçilen projeye erişimi yok.");
-        if (previous.Count > 1)
+        var previousAgent = last is not null && last.ProjectId == projectId
+            ? agents.Find(a => a.Id == last.AgentId && ToolAccess.AllowsProject(a, projectId)) : null;
+        var agent = explicitAgent ?? previousAgent ?? normal;
+        if ((agent.Id != PlatformChat.Id && !ToolAccess.AllowsProject(agent, projectId)) ||
+            (projectId is not null && !await db.Projects.AnyAsync(x => x.Id == projectId, ct)))
+            throw new UnauthorizedAccessException("The agent does not have access to the selected project.");
+        WorkItem? candidate = null;
+        if (agent.Id != PlatformChat.Id)
         {
-            var choices = string.Join("\n", previous.Select(x => $"- {x.Title}"));
-            var reply = $"Bu zaman aralığında birden fazla çalışma buldum. Hangisini açalım?\n\n{choices}";
-            return await SaveExchangeAsync(db, tx, chat, chatId, agent, text, reply, ct);
+            var range = TemporalQuery.Parse(text, DateTime.UtcNow, TimeZoneInfo.FindSystemTimeZoneById(settings.TimeZone));
+            var previous = await FindWorkAsync(db, chat.Id, text, projectId, agent, range, !inheritProject, ct);
+            if (previous.Count > 1)
+            {
+                var choices = string.Join("\n", previous.Select(x => $"- {x.Title}"));
+                var reply = $"I found multiple work items in this period. Which would you like to open?\n\n{choices}";
+                return await SaveExchangeAsync(db, tx, chat, chatId, agent, text, reply, ct);
+            }
+            candidate = previous.SingleOrDefault();
+            projectId ??= candidate?.ProjectId;
         }
         if (chatId is null) db.Conversations.Add(chat);
         chat.UpdatedAtUtc = DateTime.UtcNow;
@@ -164,21 +180,13 @@ public sealed class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpdates upd
                 text.StartsWith("@" + name, StringComparison.OrdinalIgnoreCase) &&
                 (text.Length == name.Length + 1 || !char.IsLetterOrDigit(text[name.Length + 1]))));
 
-    private static Agent DefaultAgent(List<Agent> agents, string text)
-    {
-        var lower = text.ToLower(CultureInfo.GetCultureInfo("tr-TR"));
-        var id = lower.Contains("ssh") || lower.Contains("deploy") || lower.Contains("sunucu") ? "devops"
-            : lower.Contains("regresyon") || lower.Contains("qa ") ? "qa"
-            : lower.Contains("mimari") || lower.Contains("architecture") ? "architect" : "developer";
-        return agents.Find(x => x.Id == id) ?? agents[0];
-    }
-
     private static async Task<List<WorkItem>> FindWorkAsync(PlatformDb db, string conversation, string input,
-        string? project, string? agent, TimeRange? range, CancellationToken ct)
+        string? project, Agent agent, TimeRange? range, bool projectSelected, CancellationToken ct)
     {
-        var work = db.Work.AsNoTracking().Where(x => x.Status != WorkStatus.Cancelled);
-        if (project is not null) work = work.Where(x => x.ProjectId == project);
-        if (agent is not null) work = work.Where(x => x.AgentId == agent);
+        var allowedProjects = ToolAccess.Split(agent.AllowedProjects);
+        var work = db.Work.AsNoTracking().Where(x => x.Status != WorkStatus.Cancelled && x.AgentId == agent.Id &&
+            (x.ProjectId == null || Enumerable.Contains(allowedProjects, x.ProjectId)));
+        if (projectSelected || project is not null) work = work.Where(x => x.ProjectId == project);
         if (range is not null)
             work = work.Where(x => db.Events.Any(e => e.WorkId == x.Id &&
                 e.EventOccurredAtUtc >= range.FromUtc && e.EventOccurredAtUtc < range.UntilUtc));
@@ -194,7 +202,7 @@ public sealed class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpdates upd
         return title.Count == 1 ? title : matches;
     }
 
-    private static async Task<string?> RecentWorkspaceAsync(PlatformDb db, string conversation, string agent, string? project, CancellationToken ct)
+    internal static async Task<string?> RecentWorkspaceAsync(PlatformDb db, string conversation, string agent, string? project, CancellationToken ct)
     {
         var recent = await db.Runs.Where(x => x.ConversationId == conversation && x.AgentId == agent &&
                 x.ProjectId == project && x.Workspace != null)

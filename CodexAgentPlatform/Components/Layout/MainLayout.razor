@@ -10,11 +10,11 @@
             </aside>
             <header class="mobile-header">
                 @Brand
-                <a class="icon-button" href="/conversations" aria-label="Sohbet geçmişi"><Icon Name="history" /></a>
-                <button class="icon-button" type="button" popovertarget="mobile-menu" aria-label="Menüyü aç"><Icon Name="menu" /></button>
+                <a class="icon-button" href="/conversations" aria-label="Conversations"><Icon Name="history" /></a>
+                <button class="icon-button" type="button" popovertarget="mobile-menu" aria-label="Open menu"><Icon Name="menu" /></button>
             </header>
-            <div class="mobile-menu" id="mobile-menu" popover="auto" role="dialog" aria-label="Çalışma alanı menüsü">
-                <div class="menu-head">@Brand<button class="icon-button" type="button" popovertarget="mobile-menu" popovertargetaction="hide" aria-label="Menüyü kapat"><Icon Name="close" /></button></div>
+            <div class="mobile-menu" id="mobile-menu" popover="auto" role="dialog" aria-label="Workspace menu">
+                <div class="menu-head">@Brand<button class="icon-button" type="button" popovertarget="mobile-menu" popovertargetaction="hide" aria-label="Close menu"><Icon Name="close" /></button></div>
                 @NavigationLinks
                 @Account(session.User.Identity?.Name)
             </div>
@@ -26,37 +26,37 @@
     </NotAuthorized>
 </AuthorizeView>
 <div id="blazor-error-ui" data-nosnippet>
-    Bağlantıda bir hata oluştu. <a href="" class="reload">Yenile</a><button class="dismiss" aria-label="Kapat"><Icon Name="close" /></button>
+    A connection error occurred. <a href="" class="reload">Refresh</a><button class="dismiss" aria-label="Close"><Icon Name="close" /></button>
 </div>
 
 @code {
-    private RenderFragment Brand => @<a class="brand" href="/"><span class="brand-mark"><Icon Name="brand" /></span><span>Codex <small>Agent Platform</small></span></a>;
+    private RenderFragment Brand => @<a class="brand" href="/"><BrandMark /><span>Codex <small>Agent Platform</small></span></a>;
 
-    private RenderFragment NavigationLinks => @<nav aria-label="Çalışma alanı">
-        <div class="nav-label">Çalışma alanı</div>
-        @Link("/", "chat", "Sohbet")
-        @Link("/conversations", "history", "Sohbet geçmişi")
-        @Link("/agents", "agents", "Ajanlar")
-        @Link("/work", "work", "Çalışmalar")
-        @Link("/memory", "memory", "Hafıza")
-        @Link("/timeline", "timeline", "Zaman çizelgesi")
-        <div class="nav-label">Yönetim</div>
-        @Link("/projects", "folder", "Projeler")
-        @Link("/resources", "grid", "Kaynaklar")
-        @Link("/approvals", "approve", "Onaylar")
-        @Link("/codex", "terminal", "Codex ayarları")
-        @Link("/system", "settings", "Sistem")
+    private RenderFragment NavigationLinks => @<nav aria-label="Workspace">
+        <div class="nav-label">Workspace</div>
+        @Link("/", "chat", "Chat")
+        @Link("/conversations", "history", "Conversations")
+        @Link("/agents", "agents", "Agents")
+        @Link("/work", "work", "Work history")
+        @Link("/memory", "memory", "Memory")
+        @Link("/timeline", "timeline", "Activity timeline")
+        <div class="nav-label">Administration</div>
+        @Link("/projects", "folder", "Projects")
+        @Link("/resources", "grid", "Resources")
+        @Link("/approvals", "approve", "Approvals")
+        @Link("/codex", "terminal", "Codex settings")
+        @Link("/system", "settings", "System settings")
     </nav>;
 
     private RenderFragment Link(string href, string icon, string label) =>
         @<NavLink class="nav-item" href="@href" Match="NavLinkMatch.All"><Icon Name="@icon" />@label</NavLink>;
 
     private RenderFragment Account(string? name) => @<div class="rail-footer">
-        <span class="avatar avatar-small" aria-hidden="true">@(string.IsNullOrWhiteSpace(name) ? "Y" : name[..1].ToUpperInvariant())</span>
+        <span class="avatar avatar-small" aria-hidden="true">@(string.IsNullOrWhiteSpace(name) ? "A" : name[..1].ToUpperInvariant())</span>
         <span class="owner-name">@name</span>
         <form action="/session/logout" method="post">
             <AntiforgeryToken />
-            <button type="submit" class="icon-button" title="Çıkış yap" aria-label="Çıkış yap"><Icon Name="logout" /></button>
+            <button type="submit" class="icon-button" title="Sign out" aria-label="Sign out"><Icon Name="logout" /></button>
         </form>
     </div>;
 }

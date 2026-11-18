@@ -29,7 +29,7 @@ public static class OwnerEndpoints
     private static async Task<IResult> SetupAsync(HttpContext context, IAntiforgery csrf, UserManager<PlatformUser> users,
         SignInManager<PlatformUser> signIn, PlatformPaths paths, IWebHostEnvironment environment, IConfiguration config)
     {
-        if (!await ValidFormAsync(context, csrf)) return Results.BadRequest("Geçersiz form doğrulaması.");
+        if (!await ValidFormAsync(context, csrf)) return Results.BadRequest("Invalid form verification.");
         if (await users.FindByIdAsync(PlatformUser.OwnerId) is not null) return Results.Redirect("/login");
         var form = await context.Request.ReadFormAsync(context.RequestAborted);
         var supplied = form["bootstrap"].ToString().Trim();
@@ -60,7 +60,7 @@ public static class OwnerEndpoints
     private static async Task<IResult> LoginAsync(HttpContext context, IAntiforgery csrf, UserManager<PlatformUser> users,
         SignInManager<PlatformUser> signIn)
     {
-        if (!await ValidFormAsync(context, csrf)) return Results.BadRequest("Geçersiz form doğrulaması.");
+        if (!await ValidFormAsync(context, csrf)) return Results.BadRequest("Invalid form verification.");
         if (await users.FindByIdAsync(PlatformUser.OwnerId) is null) return Results.Redirect("/setup");
         var form = await context.Request.ReadFormAsync(context.RequestAborted);
         var userName = form["username"].ToString().Trim();
@@ -74,7 +74,7 @@ public static class OwnerEndpoints
     private static async Task<IResult> LogoutAsync(HttpContext context, IAntiforgery csrf,
         SignInManager<PlatformUser> signIn, UserManager<PlatformUser> users)
     {
-        if (!await ValidFormAsync(context, csrf)) return Results.BadRequest("Geçersiz form doğrulaması.");
+        if (!await ValidFormAsync(context, csrf)) return Results.BadRequest("Invalid form verification.");
         if (await users.GetUserAsync(context.User) is { } user)
             await users.UpdateSecurityStampAsync(user);
         await signIn.SignOutAsync();

@@ -6,29 +6,29 @@
 @inject ChatUpdates Updates
 @inject AuthenticationStateProvider Authentication
 
-<PageTitle>Onaylar · Codex Agent Platform</PageTitle>
+<PageTitle>Approvals · Codex Agent Platform</PageTitle>
 <section class="admin-page">
-    <header class="section-head"><h1>Onaylar</h1><button class="button" @onclick="LoadAsync">Yenile</button></header>
+    <header class="section-head"><h1>Approvals</h1><button class="button" @onclick="LoadAsync">Refresh</button></header>
     @if (error is not null) { <p class="notice error" role="alert">@error</p> }
     @foreach (var row in rows)
     {
         <article class="card fields">
             <div class="section-head"><h2>@row.Kind</h2><span class="status">@row.Status</span></div>
-            <p class="scope">@row.Scope</p>
-            @if (row.DecidedBy == CodexAgentPlatform.Infrastructure.Operations.AutomaticDecision) { <small>Bu sohbette otomatik onaylandı.</small> }
-            @if (row.Result is { Length: > 0 } result) { <details class="code-fold"><summary>İşlem çıktısı</summary><pre>@result</pre></details> }
+            <p class="scope">@ApprovalDisplay.Scope(row.Scope)</p>
+            @if (row.DecidedBy == CodexAgentPlatform.Infrastructure.Operations.AutomaticDecision) { <small>Automatically approved in this chat.</small> }
+            @if (row.Result is { Length: > 0 } result) { <details class="code-fold"><summary>Operation output</summary><pre>@result</pre></details> }
             @if (row.Status == "Pending" && row.ExpiresAtUtc > DateTime.UtcNow)
             {
-                <small class="muted">Son onay zamanı @row.ExpiresAtUtc.ToString("HH:mm:ss") UTC</small>
+                <small class="muted">Approval expires at @row.ExpiresAtUtc.ToString("HH:mm:ss") UTC</small>
                 <div class="actions">
-                    <button class="primary" @onclick="() => DecideAsync(row, true)">@(row.Scope.StartsWith("ÜRETİM") ? "Üretim işlemini onayla" : "Onayla")</button>
-                    <button class="button" @onclick="() => DecideAsync(row, false)">Reddet</button>
+                    <button class="primary" @onclick="() => DecideAsync(row, true)">@(ApprovalDisplay.IsProduction(row.Scope) ? "Approve production operation" : "Approve")</button>
+                    <button class="button" @onclick="() => DecideAsync(row, false)">Decline</button>
                 </div>
             }
-            @if (row.ConversationId is { } chat) { <a href="/chat/@chat">Sohbeti aç</a> }
+            @if (row.ConversationId is { } chat) { <a href="/chat/@chat">Open conversation</a> }
         </article>
     }
-    @if (rows.Count == 0) { <div class="card empty">Onay talebi yok.</div> }
+    @if (rows.Count == 0) { <div class="card empty">No approval requests.</div> }
 </section>
 
 @code {

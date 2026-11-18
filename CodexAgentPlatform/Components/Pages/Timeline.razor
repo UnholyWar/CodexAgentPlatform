@@ -3,12 +3,12 @@
 @inject MemoryStore Memory
 @inject IDbContextFactory<PlatformDb> Dbs
 
-<PageTitle>Zaman çizelgesi · Codex Agent Platform</PageTitle>
+<PageTitle>Activity timeline · Codex Agent Platform</PageTitle>
 <section class="admin-page">
-    <header class="section-head"><h1>Zaman çizelgesi</h1></header>
+    <header class="section-head"><h1>Activity timeline</h1></header>
     <form class="filter" @onsubmit="LoadAsync" @onsubmit:preventDefault>
-        <input placeholder="Örn. dün, geçen salı veya iki hafta önce" aria-label="Tarih ifadesi" @bind="query" maxlength="120" />
-        <button class="button">Filtrele</button>
+        <input placeholder="e.g. yesterday, last Tuesday, or two weeks ago" aria-label="Date expression" @bind="query" maxlength="120" />
+        <button class="button">Filter</button>
     </form>
     @if (error is not null) { <p class="notice error" role="alert">@error</p> }
     <div class="list">
@@ -16,10 +16,10 @@
         {
             <div class="list-row timeline-row"><time>@TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(entry.EventOccurredAtUtc, DateTimeKind.Utc), zone).ToString("dd.MM.yyyy HH:mm")</time>
                 <span><strong>@entry.Kind</strong><small>@TextLimits.Clip(entry.Detail, 180)</small></span>
-                @if (entry.ConversationId is { } chat) { <a href="/chat/@chat">Sohbeti aç</a> }
+                @if (entry.ConversationId is { } chat) { <a href="/chat/@chat">Open conversation</a> }
             </div>
         }
-        @if (rows.Count == 0) { <p class="empty">Bu aralıkta olay bulunamadı.</p> }
+        @if (rows.Count == 0) { <p class="empty">No events found in this period.</p> }
     </div>
 </section>
 
@@ -37,7 +37,7 @@
     {
         error = null;
         var range = string.IsNullOrWhiteSpace(query) ? null : TemporalQuery.Parse(query, DateTime.UtcNow, zone);
-        if (range is null && !string.IsNullOrWhiteSpace(query)) { error = "Tarih ifadesi tanınmadı."; return; }
+        if (range is null && !string.IsNullOrWhiteSpace(query)) { error = "Date expression not recognized."; return; }
         rows = await Memory.TimelineAsync(range, null, null, default);
     }
 }

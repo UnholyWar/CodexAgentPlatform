@@ -3,15 +3,15 @@
 @inject MemoryStore Store
 @inject IDbContextFactory<PlatformDb> Dbs
 
-<PageTitle>Hafıza · Codex Agent Platform</PageTitle>
+<PageTitle>Memory · Codex Agent Platform</PageTitle>
 <section class="admin-page">
     <header class="section-head">
-        <h1>Hafıza</h1><button class="primary" @ref="addButton" disabled="@busy" @onclick="NewNote"><Icon Name="plus" /> Not ekle</button>
+        <h1>Memory</h1><button class="primary" @ref="addButton" disabled="@busy" @onclick="NewNote"><Icon Name="plus" /> Add note</button>
     </header>
     <form class="filter" @onsubmit="SearchAsync" @onsubmit:preventDefault>
-        <input placeholder="Başlık, özet veya etiket…" aria-label="Hafıza ara" @bind="query" maxlength="150" />
-        <label class="check"><input type="checkbox" @bind="archived" /> Arşiv dahil</label>
-        <button class="button" type="submit" disabled="@busy"><Icon Name="search" /> Ara</button>
+        <input placeholder="Title, summary, or tag…" aria-label="Search memory" @bind="query" maxlength="150" />
+        <label class="check"><input type="checkbox" @bind="archived" /> Include archived</label>
+        <button class="button" type="submit" disabled="@busy"><Icon Name="search" /> Search</button>
     </form>
     @if (!editing && error is not null) { <p class="notice error" role="alert">@error</p> }
     @if (!editing && notice is not null) { <p class="notice" role="status">@notice</p> }
@@ -21,25 +21,25 @@
             {
                 <button class="list-row" disabled="@busy" @onclick="() => OpenAsync(note)">
                     <span><strong>@note.Title</strong><small>@note.Summary</small><small>@note.UpdatedAtUtc.ToString("dd.MM.yyyy HH:mm") UTC · @note.Verification</small></span>
-                    <small>@(note.Archived ? "Arşiv" : $"v{note.Version}")</small>
+                    <small>@(note.Archived ? "Archived" : $"v{note.Version}")</small>
                 </button>
             }
-            @if (rows.Count == 0) { <p class="empty">Hafıza kaydı bulunamadı.</p> }
+            @if (rows.Count == 0) { <p class="empty">No memory notes found.</p> }
         </div>
         @if (editing)
         {
             <form class="card fields" aria-busy="@busy" @onsubmit="SaveAsync" @onsubmit:preventDefault>
-                <button type="button" class="editor-back" disabled="@busy" @onclick="CancelEdit"><Icon Name="chevron" /> Not listesi</button>
-                <h2 @ref="editorHeading" tabindex="-1">@(selected is null ? "Yeni not" : selected.Title)</h2>
-                <label>Başlık <input @bind="title" maxlength="160" required /></label>
-                <label>Özet <input @bind="summary" maxlength="600" /></label>
-                <label>Etiketler <input @bind="tags" maxlength="300" /></label>
-                <label>Doğrulama
-                    <select @bind="verification"><option value="hypothesis">Hipotez</option><option value="inference">Çıkarım</option><option value="verified">Doğrulandı</option></select>
+                <button type="button" class="editor-back" disabled="@busy" @onclick="CancelEdit"><Icon Name="chevron" /> Note list</button>
+                <h2 @ref="editorHeading" tabindex="-1">@(selected is null ? "New note" : selected.Title)</h2>
+                <label>Title <input @bind="title" maxlength="160" required /></label>
+                <label>Summary <input @bind="summary" maxlength="600" /></label>
+                <label>Tags <input @bind="tags" maxlength="300" /></label>
+                <label>Verification
+                    <select @bind="verification"><option value="hypothesis">Hypothesis</option><option value="inference">Inference</option><option value="verified">Verified</option></select>
                 </label>
                 @if (selected is null)
                 {
-                    <label>Proje <select @bind="project"><option value="">Genel</option>
+                    <label>Project <select @bind="project"><option value="">General</option>
                         @foreach (var p in projects) { <option value="@p.Id">@p.Name</option> }
                     </select></label>
                 }
@@ -51,19 +51,19 @@
                 @if (error is not null) { <p class="notice error" role="alert">@error</p> }
                 @if (notice is not null) { <p class="notice" role="status">@notice</p> }
                 <div class="actions">
-                    <button class="primary" type="submit" disabled="@busy">Kaydet</button>
-                    <button type="button" class="button" disabled="@busy" @onclick="CancelEdit">İptal</button>
-                    @if (selected is { Archived: false }) { <button type="button" class="button" disabled="@busy" @onclick="ArchiveAsync">Arşivle</button> }
+                    <button class="primary" type="submit" disabled="@busy">Save</button>
+                    <button type="button" class="button" disabled="@busy" @onclick="CancelEdit">Cancel</button>
+                    @if (selected is { Archived: false }) { <button type="button" class="button" disabled="@busy" @onclick="ArchiveAsync">Archive</button> }
                 </div>
                 @if (selected is { Version: > 1 })
                 {
-                    <label>Önceki sürümü düzenleyiciye yükle
+                    <label>Load a previous version into the editor
                         <select value="@selected.Version" disabled="@busy" @onchange="ReadVersionAsync">
                             @foreach (var v in Enumerable.Range(1, selected.Version).Reverse()) { <option value="@v">v@v</option> }
                         </select>
                     </label>
                 }
-                <details><summary>Önizleme</summary><MarkdownBody Text="@body" /></details>
+                <details><summary>Preview</summary><MarkdownBody Text="@body" /></details>
             </form>
         }
     </div>
@@ -130,7 +130,7 @@
             admin: true, expectedVersion: selected?.Version);
         selected = saved;
         await LoadAsync();
-        notice = "Not kaydedildi.";
+        notice = "Note saved.";
     });
     private Task ArchiveAsync() => RunAsync(async () =>
     {
@@ -138,7 +138,7 @@
         await Store.ArchiveAsync(note.Id, null, null, null, true, default);
         editing = false; selected = null;
         await LoadAsync();
-        notice = "Not arşive alındı.";
+        notice = "Note archived.";
         focusAddOnRender = true;
     });
     private Task ReadVersionAsync(ChangeEventArgs e) => RunAsync(async () =>
@@ -153,8 +153,8 @@
         error = notice = null;
         try { await action(); }
         catch (Exception ex) when (ex is InvalidOperationException or IOException or DbUpdateException)
-        { error = ex is InvalidOperationException ? ex.Message : "Hafıza kaydı okunamadı veya yazılamadı."; }
+        { error = ex is InvalidOperationException ? ex.Message : "Could not read or save the memory note."; }
         finally { busy = false; }
     }
-    private string ProjectName(string? id) => projects.Find(p => p.Id == id)?.Name ?? "Genel";
+    private string ProjectName(string? id) => projects.Find(p => p.Id == id)?.Name ?? "General";
 }

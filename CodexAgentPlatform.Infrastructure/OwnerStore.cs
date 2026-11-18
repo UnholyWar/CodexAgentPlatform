@@ -17,7 +17,7 @@ public sealed class OwnerStore(IDbContextFactory<PlatformDb> dbs) :
         }
         catch (DbUpdateException)
         {
-            return Failed("OwnerAlreadyExists", "İlk kurulum zaten tamamlandı veya kullanıcı kaydedilemedi.");
+            return Failed("OwnerAlreadyExists", "Initial setup is already complete or the user could not be saved.");
         }
     }
 
@@ -34,12 +34,12 @@ public sealed class OwnerStore(IDbContextFactory<PlatformDb> dbs) :
         }
         catch (DbUpdateConcurrencyException)
         {
-            return Failed("ConcurrencyFailure", "Kullanıcı bilgileri değişti. İşlemi tekrar deneyin.");
+            return Failed("ConcurrencyFailure", "The user details have changed. Try again.");
         }
     }
 
     public Task<IdentityResult> DeleteAsync(PlatformUser user, CancellationToken ct) =>
-        Task.FromResult(Failed("OwnerRequired", "Yönetici hesabı silinemez."));
+        Task.FromResult(Failed("OwnerRequired", "The administrator account cannot be deleted."));
 
     public async Task<PlatformUser?> FindByIdAsync(string id, CancellationToken ct)
     {

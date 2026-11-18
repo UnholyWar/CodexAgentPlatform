@@ -18,8 +18,8 @@ public static partial class SafeMarkdown
             html.Append("</code></pre>");
             if (compactCode && (diff || lines > 6 || html.Length - codeStart!.Value > 650))
             {
-                var label = diff ? "Dosya farkı" : "Kod bloğu";
-                html.Insert(codeStart!.Value, $"<details class=\"code-fold\"><summary>{label}<small>{lines} satır</small></summary>");
+                var label = diff ? "File diff" : "Code block";
+                html.Insert(codeStart!.Value, $"<details class=\"code-fold\"><summary>{label}<small>{lines} lines</small></summary>");
                 html.Append("</details>");
             }
             codeStart = null;

@@ -2,17 +2,17 @@
 
 <button type="button" class="activity-launch" aria-haspopup="dialog" @onclick="OpenAsync">
     <span class="activity-symbol"><Icon Name="memory" /></span>
-    <span><strong>Çalışma özeti</strong><small>@Summary</small></span>
+    <span><strong>Work summary</strong><small>@Summary</small></span>
     <Icon Name="chevron" />
 </button>
 
 <dialog class="chat-sheet activity-sheet" @ref="sheet" aria-labelledby="activity-title">
-    <header class="sheet-head"><h2 id="activity-title">Çalışma özeti</h2>
-        <form method="dialog"><button class="icon-button" aria-label="Özeti kapat" autofocus><Icon Name="close" /></button></form>
+    <header class="sheet-head"><h2 id="activity-title">Work summary</h2>
+        <form method="dialog"><button class="icon-button" aria-label="Close summary" autofocus><Icon Name="close" /></button></form>
     </header>
     @if (loaded)
     {
-        <div class="sheet-filter" role="group" aria-label="Kayıt türü">
+        <div class="sheet-filter" role="group" aria-label="Record type">
             @foreach (var group in Groups)
             {
                 <button type="button" aria-pressed="@(group == category ? "true" : "false")" @onclick="() => Select(group)">@group</button>
@@ -24,10 +24,10 @@
                 @foreach (var row in Approvals.Take(limit))
                 {
                     <details class="activity-item" @key="row.Id"><summary><Icon Name="approve" /><span><strong>@ApprovalLabel(row.Status)</strong>
-                        <small>@When(row.CreatedAtUtc) @(row.DecidedBy == Operations.AutomaticDecision ? "· Otomatik" : "")</small></span></summary>
-                        <div class="activity-detail"><p>@row.Scope</p>
+                        <small>@When(row.CreatedAtUtc) @(row.DecidedBy == Operations.AutomaticDecision ? "· Automatic" : "")</small></span></summary>
+                        <div class="activity-detail"><p>@ApprovalDisplay.Scope(row.Scope)</p>
                             @if (!string.IsNullOrWhiteSpace(row.Result)) { <pre>@row.Result</pre> }
-                            <a href="/approvals">Onaylar sayfasını aç</a>
+                            <a href="/approvals">Open approvals</a>
                         </div>
                     </details>
                 }
@@ -50,18 +50,18 @@
                                 </div>
                                 @if (lines.Length > 6)
                                 {
-                                    <details class="code-fold"><summary>Kalan satırları göster</summary><pre>@string.Join('\n', lines.Skip(6))</pre></details>
+                                    <details class="code-fold"><summary>Show remaining lines</summary><pre>@string.Join('\n', lines.Skip(6))</pre></details>
                                 }
                             }
                             else if (entry.Detail.Length > 0) { <pre>@entry.Detail</pre> }
-                            @if (entry.Artifact is { } href && href.EndsWith(".txt")) { <a href="/artifacts/@href">Tam çıktıyı indir</a> }
-                            @if (entry.Detail.Length == 0 && entry.Artifact is null) { <p class="muted">Ek çıktı yok.</p> }
+                            @if (entry.Artifact is { } href && href.EndsWith(".txt")) { <a href="/artifacts/@href">Download full output</a> }
+                            @if (entry.Detail.Length == 0 && entry.Artifact is null) { <p class="muted">No additional output.</p> }
                         </div>
                     </details>
                 }
             }
             @if (limit < (category == ApprovalsLabel ? Approvals.Count : FilteredEvents.Count()))
-            { <button type="button" class="button more-events" @onclick="() => limit += 6">Daha fazla göster</button> }
+            { <button type="button" class="button more-events" @onclick="() => limit += 6">Show more</button> }
         </div>
     }
 </dialog>
@@ -70,8 +70,8 @@
     [Parameter, EditorRequired] public List<Activity> Events { get; set; } = [];
     [Parameter, EditorRequired] public List<Approval> Approvals { get; set; } = [];
     [Parameter, EditorRequired] public TimeZoneInfo Zone { get; set; } = TimeZoneInfo.Utc;
-    private const string Files = "Dosyalar", Actions = "İşlemler", ApprovalsLabel = "Onaylar";
-    private string Summary => Approvals.Count == 0 ? $"{Events.Count} olay" : $"{Events.Count} olay · {Approvals.Count} onay kaydı";
+    private const string Files = "Files", Actions = "Actions", ApprovalsLabel = "Approvals";
+    private string Summary => Approvals.Count == 0 ? $"{Events.Count} events" : $"{Events.Count} events · {Approvals.Count} approval records";
     private string category = Files;
     private ElementReference sheet;
     private int limit = 6;
@@ -109,7 +109,7 @@
                 if (files.Length > 0)
                 {
                     var file = files[0]!.Replace('\\', '/').Split('/').Last();
-                    return files.Length == 1 ? file : $"{file} · +{files.Length - 1} dosya";
+                    return files.Length == 1 ? file : $"{file} · +{files.Length - 1} files";
                 }
             }
         }
@@ -118,17 +118,17 @@
     }
     private static string Label(string kind) => kind switch
     {
-        "Diff" => "Değişiklik karşılaştırması", "fileChange" or "CodeModified" => "Dosya değişikliği",
-        "commandExecution" => "Komut çıktısı", "ToolCalled" => "Araç çağrısı", "webSearch" => "Web araması",
-        "TurnCompleted" => "Yanıt tamamlandı", "TurnInterrupted" => "Çalışma kesildi", "TurnFailed" => "İşlem başarısız",
-        "AutoApproved" => "Otomatik onay verildi", "AutoApprovalEnabled" => "Otomatik onay açıldı",
-        "AutoApprovalDisabled" => "Otomatik onay kapatıldı", "ApprovalRequested" => "Onay istendi",
-        "TestExecuted" => "Test çalıştırıldı", "ProjectSelected" => "Proje seçildi", "WorkProgress" => "Çalışma güncellendi",
-        "WorkspaceUnavailable" => "Çalışma alanına erişilemiyor", _ => kind
+        "Diff" => "Diff", "fileChange" or "CodeModified" => "File change",
+        "commandExecution" => "Command output", "ToolCalled" => "Tool call", "webSearch" => "Web search",
+        "TurnCompleted" => "Response completed", "TurnInterrupted" => "Work interrupted", "TurnFailed" => "Operation failed",
+        "AutoApproved" => "Automatically approved", "AutoApprovalEnabled" => "Auto-approval enabled",
+        "AutoApprovalDisabled" => "Auto-approval disabled", "ApprovalRequested" => "Approval requested",
+        "TestExecuted" => "Test executed", "ProjectSelected" => "Project selected", "WorkProgress" => "Work updated",
+        "WorkspaceUnavailable" => "Workspace unavailable", "AgentHandoff" => "Agent handoff", _ => kind
     };
     private static string ApprovalLabel(string status) => status switch
     {
-        "Pending" => "Onay bekliyor", "Approved" => "Onaylandı", "Declined" => "Reddedildi", "Expired" => "Süresi doldu",
-        "Executing" => "Yürütülüyor", "Completed" => "Tamamlandı", "Failed" => "Başarısız", "Interrupted" => "Kesildi", _ => status
+        "Pending" => "Awaiting approval", "Approved" => "Approved", "Declined" => "Declined", "Expired" => "Expired",
+        "Executing" => "Executing", "Completed" => "Completed", "Failed" => "Failed", "Interrupted" => "Interrupted", _ => status
     };
 }

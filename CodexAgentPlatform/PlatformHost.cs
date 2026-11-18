@@ -68,6 +68,10 @@ public static class PlatformHost
         builder.Services.AddAuthorization(options => options.DefaultPolicy = new Microsoft.AspNetCore.Authorization.AuthorizationPolicyBuilder()
             .RequireAuthenticatedUser().RequireClaim(System.Security.Claims.ClaimTypes.NameIdentifier, PlatformUser.OwnerId).Build());
         builder.Services.AddCascadingAuthenticationState();
+        builder.Services.Configure<RequestLocalizationOptions>(options => options
+            .SetDefaultCulture("en")
+            .AddSupportedCultures("en")
+            .AddSupportedUICultures("en"));
         builder.Services.AddScoped<AuthenticationStateProvider, OwnerAuthenticationState>();
         builder.Services.AddAntiforgery(options => options.Cookie.SecurePolicy = cookiePolicy);
         builder.Services.AddRateLimiter(options =>
@@ -81,6 +85,7 @@ public static class PlatformHost
             .AddHubOptions(options => options.MaximumReceiveMessageSize = 128 * 1024);
 
         var app = builder.Build();
+        app.UseRequestLocalization();
         if (!app.Environment.IsDevelopment())
         {
             app.UseExceptionHandler("/Error", createScopeForErrors: true);

@@ -4,23 +4,23 @@
 @inject StorageStartup Storage
 @inject Vault Vault
 
-<PageTitle>Sistem · Codex Agent Platform</PageTitle>
+<PageTitle>System settings · Codex Agent Platform</PageTitle>
 <section class="admin-page">
-    <header class="section-head"><h1>Sistem</h1></header>
+    <header class="section-head"><h1>System settings</h1></header>
     @if (notice is not null) { <p class="notice" role="status">@notice</p> }
     @if (prefs is not null)
     {
         <form class="card fields" @onsubmit="SaveAsync" @onsubmit:preventDefault>
-            <h2>Bağlam ve saat dilimi</h2>
-            <label>Saat dilimi <input @bind="prefs.TimeZone" placeholder="Europe/Istanbul" maxlength="80" required /></label>
-            <label>Ek bağlam sınırı (karakter) <input type="number" @bind="prefs.ContextCharacters" min="4000" max="24000" /></label>
-            <div><button class="primary">Kaydet</button></div>
+            <h2>Context and time zone</h2>
+            <label>Time zone <input @bind="prefs.TimeZone" placeholder="Europe/Istanbul" maxlength="80" required /></label>
+            <label>Additional context limit (characters) <input type="number" @bind="prefs.ContextCharacters" min="4000" max="24000" /></label>
+            <div><button class="primary">Save</button></div>
         </form>
     }
     <article class="card fields">
-        <h2>Depolama</h2>
-        <p>Credential Vault <strong>@(Vault.Configured ? "Yapılandırılmış" : "Anahtar dosyası bekleniyor")</strong></p>
-        <div><button class="button" disabled="@backingUp" @onclick="BackupAsync">SQLite yedeği al</button></div>
+        <h2>Storage</h2>
+        <p>Credential Vault <strong>@(Vault.Configured ? "Configured" : "Key file required")</strong></p>
+        <div><button class="button" disabled="@backingUp" @onclick="BackupAsync">Back up SQLite</button></div>
     </article>
 </section>
 
@@ -38,17 +38,17 @@
         if (prefs is null) return;
         var zone = prefs.TimeZone.Trim();
         if (!TimeZoneInfo.TryFindSystemTimeZoneById(zone, out _) || prefs.ContextCharacters is < 4000 or > 24000)
-        { notice = "Geçerli bir saat dilimi ve 4.000–24.000 karakter arası sınır girin."; return; }
+        { notice = "Enter a valid time zone and a limit between 4,000 and 24,000 characters."; return; }
         await using var db = await Dbs.CreateDbContextAsync();
         await db.Preferences.ExecuteUpdateAsync(s => s.SetProperty(x => x.TimeZone, zone)
             .SetProperty(x => x.ContextCharacters, prefs.ContextCharacters));
-        notice = "Sistem ayarları kaydedildi.";
+        notice = "System settings saved.";
     }
     private async Task BackupAsync()
     {
         backingUp = true;
-        try { notice = $"Yedek kaydedildi · {await Storage.BackupAsync(default)}"; }
-        catch (Exception ex) when (ex is IOException or Microsoft.Data.Sqlite.SqliteException) { notice = "Yedek kaydedilemedi."; }
+        try { notice = $"Backup saved · {await Storage.BackupAsync(default)}"; }
+        catch (Exception ex) when (ex is IOException or Microsoft.Data.Sqlite.SqliteException) { notice = "Could not save the backup."; }
         finally { backingUp = false; }
     }
 }

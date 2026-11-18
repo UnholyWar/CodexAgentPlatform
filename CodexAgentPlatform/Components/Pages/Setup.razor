@@ -7,22 +7,22 @@
 @inject IWebHostEnvironment HostEnvironment
 @inject IConfiguration Configuration
 
-<PageTitle>İlk kurulum · Codex Agent Platform</PageTitle>
-<h1>İlk kurulum</h1>
-<p class="muted">Platformu kullanmaya başlamak için yönetici hesabını oluşturun.</p>
+<PageTitle>Initial setup · Codex Agent Platform</PageTitle>
+<h1>Initial setup</h1>
+<p class="muted">Create an administrator account to start using the platform.</p>
 @if (Error is not null)
 {
-    <p class="notice error" role="alert">@(Error == "code" ? "Kurulum kodu geçersiz." : "Kullanıcı adı veya şifre kurallara uymuyor.")</p>
+    <p class="notice error" role="alert">@(Error == "code" ? "Invalid setup code." : "The username or password does not meet the requirements.")</p>
 }
 <form method="post" action="/session/setup" class="fields">
     <AntiforgeryToken />
-    <label>Kurulum kodu <input name="bootstrap" type="password" autocomplete="off" maxlength="64" required /></label>
-    <small class="muted">@(Local ? "Yerel geliştirme oturumunda geçici şifre admin kullanılabilir." : "Kod, sunucudaki data/credentials/bootstrap-code dosyasındadır.")</small>
-    <label>Yeni kullanıcı adı <input name="username" autocomplete="username" minlength="3" maxlength="64" required /></label>
-    <label>Yeni şifre <input name="password" type="password" autocomplete="new-password" minlength="14" maxlength="128" required /></label>
-    <label>Yeni şifreyi doğrula <input name="confirm" type="password" autocomplete="new-password" minlength="14" maxlength="128" required /></label>
-    <small class="muted">En az 14 karakter, küçük ve büyük harf, rakam ve özel karakter kullanın. Kullanıcı adınız admin olamaz.</small>
-    <button class="primary" type="submit">Yönetici hesabını oluştur</button>
+    <label>Setup code <input name="bootstrap" type="password" autocomplete="off" maxlength="64" required /></label>
+    <small class="muted">@(Local ? "Use admin as the temporary setup password for local development." : "Find the code in data/credentials/bootstrap-code on the server.")</small>
+    <label>New username <input name="username" autocomplete="username" minlength="3" maxlength="64" required /></label>
+    <label>New password <input name="password" type="password" autocomplete="new-password" minlength="14" maxlength="128" required /></label>
+    <label>Confirm new password <input name="confirm" type="password" autocomplete="new-password" minlength="14" maxlength="128" required /></label>
+    <small class="muted">Use at least 14 characters with uppercase and lowercase letters, a number, and a special character. Choose a username other than admin.</small>
+    <button class="primary" type="submit">Create administrator account</button>
 </form>
 
 @code {

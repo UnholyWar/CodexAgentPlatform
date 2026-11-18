@@ -36,7 +36,7 @@ public sealed class GitApprovalTests
         var approval = await operations.RequestAsync(agent, "test-chat", repository.Id, "GitPush",
             "push", workspaceId, "main", default);
         Assert.Equal("Pending", approval.Status);
-        Assert.StartsWith("ÜRETİM", approval.Scope);
+        Assert.StartsWith("PRODUCTION", approval.Scope);
         Assert.False(await operations.ExecuteNextAsync(default));
         await operations.DecideAsync(approval.Id, true, PlatformUser.OwnerId, default);
         await GitAsync(worktree, "-c", "user.name=Platform test", "-c", "user.email=testing@localhost",
@@ -45,7 +45,7 @@ public sealed class GitApprovalTests
         Assert.True(await operations.ExecuteNextAsync(default));
         var result = await db.Approvals.AsNoTracking().SingleAsync(x => x.Id == approval.Id);
         Assert.Equal("Failed", result.Status);
-        Assert.Contains("onaydan sonra değişti", result.Result);
+        Assert.Contains("changed after approval", result.Result);
         Assert.False(await operations.ExecuteNextAsync(default));
 
         var chat = new Conversation { AutoApprove = true };

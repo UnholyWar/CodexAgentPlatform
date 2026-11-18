@@ -3,9 +3,9 @@
 @inject IDbContextFactory<PlatformDb> Dbs
 @inject Vault Vault
 
-<PageTitle>Kaynaklar · Codex Agent Platform</PageTitle>
+<PageTitle>Resources · Codex Agent Platform</PageTitle>
 <section class="admin-page">
-    <header class="section-head"><h1>Kaynaklar</h1><button @ref="addButton" class="primary" disabled="@busy" @onclick="NewResource"><Icon Name="plus" /> Kaynak ekle</button></header>
+    <header class="section-head"><h1>Resources</h1><button @ref="addButton" class="primary" disabled="@busy" @onclick="NewResource"><Icon Name="plus" /> Add resource</button></header>
     @if (notice is not null) { <p @ref="feedback" class="notice" role="status" tabindex="-1">@notice</p> }
     @if (selected is null && error is not null) { <p class="notice error" role="alert">@error</p> }
     <div class="split-panel">
@@ -17,69 +17,69 @@
                     @if (item.IsGlobal) { <span class="global-mark"><Icon Name="star" /> Global</span> }
                 </button>
             }
-            @if (rows.Count == 0) { <p class="empty">Henüz kaynak eklenmedi.</p> }
+            @if (rows.Count == 0) { <p class="empty">No resources yet.</p> }
         </div>
         @if (selected is not null)
         {
             <form class="card fields" aria-labelledby="resource-editor" @onsubmit="SaveAsync" @onsubmit:preventDefault>
-                <button type="button" class="editor-back" disabled="@busy" @onclick="CancelEditor"><Icon Name="chevron" /> Kaynak listesi</button>
-                <h2 id="resource-editor" @ref="editorHeading" tabindex="-1">@(savedName is null ? "Yeni kaynak" : "Kaynağı düzenle")</h2>
-                <label>Kaynak adı <input @bind="selected.Name" maxlength="100" required disabled="@busy" /></label>
-                <label>Tür <select @bind="selected.Kind" @bind:after="SourceTypeChanged" disabled="@busy">@foreach (var kind in Enum.GetValues<ResourceKind>()) { <option value="@kind">@KindLabel(kind)</option> }</select></label>
-                <fieldset class="scope-picker" disabled="@busy"><legend>Kapsam</legend>
-                    <label><input name="resource-scope" type="radio" checked="@(!selected.IsGlobal)" @onchange="() => SetScope(false)" /><Icon Name="folder" /> Projeye özel</label>
+                <button type="button" class="editor-back" disabled="@busy" @onclick="CancelEditor"><Icon Name="chevron" /> Resource list</button>
+                <h2 id="resource-editor" @ref="editorHeading" tabindex="-1">@(savedName is null ? "New resource" : "Edit resource")</h2>
+                <label>Resource name <input @bind="selected.Name" maxlength="100" required disabled="@busy" /></label>
+                <label>Type <select @bind="selected.Kind" @bind:after="SourceTypeChanged" disabled="@busy">@foreach (var kind in Enum.GetValues<ResourceKind>()) { <option value="@kind">@KindLabel(kind)</option> }</select></label>
+                <fieldset class="scope-picker" disabled="@busy"><legend>Scope</legend>
+                    <label><input name="resource-scope" type="radio" checked="@(!selected.IsGlobal)" @onchange="() => SetScope(false)" /><Icon Name="folder" /> Project-specific</label>
                     <label><input name="resource-scope" type="radio" checked="@selected.IsGlobal" @onchange="() => SetScope(true)" /><Icon Name="star" /> Global</label>
                 </fieldset>
                 @if (!selected.IsGlobal)
                 {
-                <label>Proje
+                <label>Project
                     <select @bind="selected.ProjectId" @bind:after="ClearInvalidSshSelection" required disabled="@busy">
-                        <option value="">Proje seçin</option>
+                        <option value="">Select a project</option>
                         @foreach (var project in projects) { <option value="@project.Id">@project.Name</option> }
                     </select>
                 </label>
                 }
-                <label>@(selected.Kind switch { ResourceKind.SshServer => "Hostname veya IP", ResourceKind.GitRepository => "HTTPS depo adresi", ResourceKind.DeploymentTarget => "Docker Swarm servis adı", _ => "Adres" })
+                <label>@(selected.Kind switch { ResourceKind.SshServer => "Hostname or IP", ResourceKind.GitRepository => "HTTPS repository URL", ResourceKind.DeploymentTarget => "Docker Swarm service name", _ => "Address" })
                     <input @bind="selected.Address" maxlength="1024" required disabled="@busy" /></label>
                 @if (selected.Kind == ResourceKind.GitRepository)
                 {
-                    <label class="check"><input type="checkbox" @bind="gitUsesToken" @bind:after="ClearCredential" disabled="@busy" /> Özel depo (HTTPS erişim belirteci kullan)</label>
+                    <label class="check"><input type="checkbox" @bind="gitUsesToken" @bind:after="ClearCredential" disabled="@busy" /> Private repository (use an HTTPS access token)</label>
                     @if (gitUsesToken)
                     {
-                        <label>Git kullanıcı adı (isteğe bağlı) <input @bind="selected.Username" maxlength="120" disabled="@busy" /></label>
-                        <label>Git erişim belirteci (PAT)
+                        <label>Git username (optional) <input @bind="selected.Username" maxlength="120" disabled="@busy" /></label>
+                        <label>Git access token (PAT)
                             <input type="password" @bind="credential" maxlength="65536" autocomplete="new-password" required="@(Vault.Configured && selected.VaultId is null)" disabled="@(busy || !Vault.Configured)" />
                         </label>
                     }
                 }
                 @if (selected.Kind == ResourceKind.SshServer)
                 {
-                    <label>SSH kullanıcı adı <input @bind="selected.Username" maxlength="120" required disabled="@busy" /></label>
-                    <label>SSH portu <input type="number" @bind="selected.Port" min="1" max="65535" required disabled="@busy" /></label>
-                    <label>Sunucu anahtarının parmak izi <input @bind="selected.HostFingerprint" placeholder="SHA256:…" maxlength="64" required disabled="@busy" /></label>
-                    <label>SSH özel anahtarı
+                    <label>SSH username <input @bind="selected.Username" maxlength="120" required disabled="@busy" /></label>
+                    <label>SSH port <input type="number" @bind="selected.Port" min="1" max="65535" required disabled="@busy" /></label>
+                    <label>Host key fingerprint <input @bind="selected.HostFingerprint" placeholder="SHA256:…" maxlength="64" required disabled="@busy" /></label>
+                    <label>SSH private key
                         <textarea @bind="credential" rows="4" spellcheck="false" autocomplete="off" maxlength="65536" required="@(Vault.Configured && selected.VaultId is null)" disabled="@(busy || !Vault.Configured)"></textarea>
                     </label>
-                    <small class="muted">Parolasız özel anahtarın tamamını girin. Açık anahtar (.pub) uzak sunucuda bu kullanıcının authorized_keys dosyasına eklenir.</small>
-                    <label>İsteğe bağlı SFTP metin dosyası <input @bind="selected.SftpFile" placeholder="/srv/reports/status.txt" maxlength="512" disabled="@busy" /></label>
+                    <small class="muted">Enter the complete private key without a passphrase. Add the public key (.pub) to this user's authorized_keys file on the remote server.</small>
+                    <label>SFTP text file (optional) <input @bind="selected.SftpFile" placeholder="/srv/reports/status.txt" maxlength="512" disabled="@busy" /></label>
                 }
                 @if (selected.Kind == ResourceKind.DeploymentTarget)
                 {
                     var hosts = SshServers(selected).ToArray();
-                    <label>SSH sunucusu
+                    <label>SSH server
                         <select @bind="selected.SshServerId" required disabled="@busy" aria-describedby="source-ssh-help">
-                            <option value="">Seçin</option>
+                            <option value="">Select</option>
                             @foreach (var host in hosts)
                             { <option value="@host.Id">@host.Name</option> }
                         </select>
                     </label>
                     <small id="source-ssh-help" class="muted">
-                        @(hosts.Length == 0 ? "Bu kapsam için önce bir SSH sunucusu ekleyin." : "Bu hedefte kullanılabilen SSH sunucuları gösteriliyor.")
+                        @(hosts.Length == 0 ? "Add an SSH server for this scope first." : "Showing SSH servers available to this target.")
                     </small>
                 }
                 @if (selected.Kind is not (ResourceKind.DeploymentTarget or ResourceKind.GitRepository or ResourceKind.SshServer) && Vault.Configured)
                 {
-                    <label>Yeni Vault değeri
+                    <label>New vault secret
                         <textarea @bind="credential" rows="3" autocomplete="off" maxlength="65536" disabled="@busy"></textarea>
                     </label>
                 }
@@ -87,33 +87,33 @@
                 {
                     @if (!Vault.Configured)
                     {
-                        <small class="muted">Gizli değer kaydetmek için sunucuda Platform__VaultKeyFile ayarını yapılandırın.</small>
+                        <small class="muted">Configure Platform__VaultKeyFile on the server to store secrets.</small>
                     }
                     else if (selected.VaultId is not null)
                     {
-                        <small class="muted">Bağlantı bilgileri aynı kaldığında boş alan kayıtlı kimlik bilgisini korur.</small>
+                        <small class="muted">Leave this field blank to keep the saved credential when the connection details are unchanged.</small>
                     }
                 }
-                <label class="check"><input type="checkbox" @bind="selected.Production" disabled="@busy" /> Üretim kaynağı</label>
+                <label class="check"><input type="checkbox" @bind="selected.Production" disabled="@busy" /> Production resource</label>
                 @if (error is not null) { <p class="notice error" role="alert">@error</p> }
                 @if (confirmDelete)
                 {
                     <div class="notice error fields" role="group" aria-labelledby="resource-delete-title">
-                        <strong id="resource-delete-title" @ref="confirmationHeading" tabindex="-1">“@savedName” kaynağını silmek istiyor musunuz?</strong>
+                        <strong id="resource-delete-title" @ref="confirmationHeading" tabindex="-1">Delete the resource “@savedName”?</strong>
                         <div class="actions">
-                            <button class="button" type="button" disabled="@busy" @onclick="CancelDelete">Vazgeç</button>
-                            <button class="button danger" type="button" disabled="@busy" @onclick="DeleteAsync">Kaynağı sil</button>
+                            <button class="button" type="button" disabled="@busy" @onclick="CancelDelete">Cancel</button>
+                            <button class="button danger" type="button" disabled="@busy" @onclick="DeleteAsync">Delete resource</button>
                         </div>
                     </div>
                 }
                 else
                 {
                     <div class="actions">
-                        <button class="primary" type="submit" disabled="@busy">Kaydet</button>
-                        <button class="button" type="button" disabled="@busy" @onclick="CancelEditor">İptal</button>
+                        <button class="primary" type="submit" disabled="@busy">Save</button>
+                        <button class="button" type="button" disabled="@busy" @onclick="CancelEditor">Cancel</button>
                         @if (savedName is not null)
                         {
-                            <button @ref="deleteButton" class="button danger" type="button" disabled="@busy" @onclick="ConfirmDelete">Sil</button>
+                            <button @ref="deleteButton" class="button danger" type="button" disabled="@busy" @onclick="ConfirmDelete">Delete</button>
                         }
                     </div>
                 }
@@ -125,9 +125,9 @@
 @code {
     private static string KindLabel(ResourceKind kind) => kind switch
     {
-        ResourceKind.GitRepository => "Git deposu", ResourceKind.SshServer => "SSH sunucusu",
-        ResourceKind.DeploymentTarget => "Dağıtım hedefi", ResourceKind.LocalWorkspace => "Yerel çalışma alanı",
-        ResourceKind.Environment => "Ortam", ResourceKind.ApiConnection => "API bağlantısı", _ => "Harici servis"
+        ResourceKind.GitRepository => "Git repository", ResourceKind.SshServer => "SSH server",
+        ResourceKind.DeploymentTarget => "Deployment target", ResourceKind.LocalWorkspace => "Local workspace",
+        ResourceKind.Environment => "Environment", ResourceKind.ApiConnection => "API connection", _ => "External service"
     };
 
     private static string ResourceIcon(ResourceKind kind) => kind switch
@@ -185,12 +185,12 @@
             savedName = selected?.Name;
             gitUsesToken = selected is { Kind: ResourceKind.GitRepository, VaultId: not null };
             credential = notice = null;
-            error = selected is null ? "Kaynak bulunamadı." : null;
+            error = selected is null ? "Resource not found." : null;
             confirmDelete = false;
             ClearInvalidSshSelection();
             focusOnRender = true;
         }
-        catch (System.Data.Common.DbException) { error = "Kaynak açılamadı."; }
+        catch (System.Data.Common.DbException) { error = "Could not open the resource."; }
         finally { busy = false; }
     }
 
@@ -264,11 +264,11 @@
             await using var db = await Dbs.CreateDbContextAsync();
             await using var tx = await db.Database.BeginTransactionAsync();
             var existing = await db.Resources.SingleOrDefaultAsync(x => x.Id == item.Id)
-                ?? throw new InvalidOperationException("Kaynak artık bulunamıyor.");
+                ?? throw new InvalidOperationException("This resource no longer exists.");
             if (existing.Name != savedName)
-                throw new InvalidOperationException("Kaynağın adı değişti. Silmeden önce kaynağı yeniden açın.");
+                throw new InvalidOperationException("The resource was renamed. Reopen it before deleting.");
             if (await HasDeploymentTargetsAsync(db, item.Id))
-                throw new InvalidOperationException("Bu SSH kaynağına bağlı dağıtım hedeflerini önce değiştirin veya silin.");
+                throw new InvalidOperationException("Update or delete the deployment targets linked to this SSH resource first.");
 
             var now = DateTime.UtcNow;
             var approvals = db.Approvals.FromSqlInterpolated($"""
@@ -277,17 +277,17 @@
                 """);
             if (await approvals.AnyAsync(x => x.Status == "Executing" ||
                 ((x.Status == "Pending" || x.Status == "Approved") && x.ExpiresAtUtc > now)))
-                throw new InvalidOperationException("Bu kaynakla ilgili bekleyen veya yürütülen bir onay var.");
+                throw new InvalidOperationException("This resource has a pending or executing approval.");
 
             db.Resources.Remove(existing);
             db.Events.Add(new Activity { ProjectId = existing.ProjectId, Kind = "ResourceDeleted", Detail = existing.Name });
             await db.SaveChangesAsync();
             await tx.CommitAsync();
-            await CompleteMutationAsync("Kaynak silindi.");
+            await CompleteMutationAsync("Resource deleted.");
         }
         catch (InvalidOperationException ex) { error = ex.Message; }
         catch (Exception ex) when (ex is DbUpdateException or System.Data.Common.DbException)
-        { error = "Kaynak silinemedi. Kaydı yenileyip yeniden deneyin."; }
+        { error = "Could not delete the resource. Refresh the record and try again."; }
         finally { busy = false; }
     }
 
@@ -301,37 +301,37 @@
             item.Name = item.Name.Trim();
             item.Address = item.Address.Trim();
             if (item.Name.Length is 0 or > 100 || item.Address.Length is 0 or > 1024)
-                throw new ArgumentException("Kaynak adı veya adres geçersiz.");
+                throw new ArgumentException("Invalid resource name or address.");
             await using var db = await Dbs.CreateDbContextAsync();
             await using var tx = await db.Database.BeginTransactionAsync();
             if (item.IsGlobal) item.ProjectId = null;
             else if (!await db.Projects.AnyAsync(x => x.Id == item.ProjectId))
-                throw new ArgumentException("Kaynağı var olan bir projeye bağlayın.");
+                throw new ArgumentException("Assign the resource to an existing project.");
             var existing = await db.Resources.SingleOrDefaultAsync(x => x.Id == item.Id);
             if (existing is null && savedName is not null)
-                throw new InvalidOperationException("Kaynak artık bulunamıyor.");
+                throw new InvalidOperationException("This resource no longer exists.");
             if (existing is { Kind: ResourceKind.SshServer } && (existing.Kind != item.Kind || existing.ProjectId != item.ProjectId || existing.IsGlobal != item.IsGlobal) &&
                 await HasDeploymentTargetsAsync(db, item.Id))
-                throw new InvalidOperationException("Kaynağın türünü veya projesini değiştirmeden önce bağlı dağıtım hedeflerini düzenleyin.");
+                throw new InvalidOperationException("Update linked deployment targets before changing the resource type or project.");
             if (item.Kind == ResourceKind.GitRepository) _ = Operations.GitAddress(item);
             if (item.Kind == ResourceKind.DeploymentTarget &&
                 (!System.Text.RegularExpressions.Regex.IsMatch(item.Address, @"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,100}\z") ||
                  !await db.Resources.AnyAsync(x => x.Id == item.SshServerId && x.Id != item.Id && x.Kind == ResourceKind.SshServer &&
                     (x.IsGlobal || (item.ProjectId != null && x.ProjectId == item.ProjectId)))))
-                throw new ArgumentException("Geçerli bir Swarm servis adı ve bu kapsamda kullanılabilen bir SSH sunucusu gerekli.");
+                throw new ArgumentException("A valid Swarm service name and an SSH server available in this scope are required.");
             if (item.Kind == ResourceKind.SshServer)
             {
                 item.Username = item.Username?.Trim();
                 item.HostFingerprint = item.HostFingerprint?.Trim();
                 if (Uri.CheckHostName(item.Address) == UriHostNameType.Unknown || item.Port is < 1 or > 65535 ||
                     string.IsNullOrWhiteSpace(item.Username) || !System.Text.RegularExpressions.Regex.IsMatch(item.HostFingerprint ?? "", @"^SHA256:[a-zA-Z0-9+/]{43}=?$"))
-                    throw new ArgumentException("SSH için geçerli bir sunucu adresi, port, kullanıcı adı ve SHA256 parmak izi gerekli.");
+                    throw new ArgumentException("SSH requires a valid hostname, port, username, and SHA256 fingerprint.");
                 item.SftpFile = string.IsNullOrWhiteSpace(item.SftpFile) ? null : item.SftpFile.Trim();
             }
             else item.SftpFile = null;
             if (item.Kind != ResourceKind.DeploymentTarget) item.SshServerId = null;
             if (Uri.TryCreate(item.Address, UriKind.Absolute, out var address) && address.UserInfo.Length > 0)
-                throw new ArgumentException("Adreste erişim bilgisi kullanmayın.");
+                throw new ArgumentException("Keep credentials out of the address.");
             var vaultId = existing is not null && existing.Address == item.Address && existing.Kind == item.Kind &&
                 existing.IsGlobal == item.IsGlobal && existing.ProjectId == item.ProjectId && existing.Username == item.Username && existing.Port == item.Port &&
                 existing.HostFingerprint == item.HostFingerprint ? existing.VaultId : null;
@@ -341,25 +341,25 @@
             {
                 var secret = item.Kind == ResourceKind.GitRepository ? credential.Trim() : credential;
                 if (item.Kind == ResourceKind.GitRepository && secret.AsSpan().ContainsAny('\r', '\n'))
-                    throw new ArgumentException("Git erişim belirteci tek satır olmalı.");
+                    throw new ArgumentException("The Git access token must be a single line.");
                 if (item.Kind == ResourceKind.SshServer)
                     Operations.ValidateSshPrivateKey(secret);
                 vaultId = await Vault.StoreAsync(secret, default);
             }
             else if (vaultId is null && (item.Kind == ResourceKind.SshServer || (item.Kind == ResourceKind.GitRepository && gitUsesToken)))
                 throw new ArgumentException(item.Kind == ResourceKind.SshServer
-                    ? "Bağlantıyı kaydetmek için SSH özel anahtarını girin."
-                    : "Özel depo için Git erişim belirtecini girin.");
+                    ? "Enter the SSH private key to save the connection."
+                    : "Enter a Git access token for the private repository.");
             item.VaultId = vaultId;
             if (existing is null) db.Resources.Add(item); else db.Entry(existing).CurrentValues.SetValues(item);
             db.Events.Add(new Activity { ProjectId = item.ProjectId, Kind = "ResourceSaved", Detail = item.Name });
             await db.SaveChangesAsync();
             await tx.CommitAsync();
-            await CompleteMutationAsync(existing is null ? "Kaynak eklendi." : "Kaynak güncellendi.");
+            await CompleteMutationAsync(existing is null ? "Resource added." : "Resource updated.");
         }
         catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or IOException or FormatException or UnauthorizedAccessException or
             DbUpdateException or System.Data.Common.DbException or System.Security.Cryptography.CryptographicException)
-        { error = ex is ArgumentException or InvalidOperationException ? ex.Message : "Kaynak veya Vault kaydı yazılamadı."; }
+        { error = ex is ArgumentException or InvalidOperationException ? ex.Message : "Could not save the resource or vault entry."; }
         finally { busy = false; }
     }
 
@@ -372,6 +372,6 @@
         notice = message;
         focusOnRender = true;
         try { await LoadAsync(); }
-        catch (System.Data.Common.DbException) { error = "Liste yenilenemedi. Sayfayı yenileyin."; }
+        catch (System.Data.Common.DbException) { error = "Could not refresh the list. Reload the page."; }
     }
 }

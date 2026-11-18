@@ -49,6 +49,11 @@ public sealed partial class AuthenticationTests
             UseProxy = false,
             ServerCertificateCustomValidationCallback = (_, serverCert, _, _) => cert.Thumbprint == serverCert?.Thumbprint
         }) { BaseAddress = new Uri(address) };
+        client.DefaultRequestHeaders.AcceptLanguage.ParseAdd("tr-TR");
+
+        var setupPage = await client.GetStringAsync("/setup", ct);
+        Assert.Contains("<html lang=\"en\">", setupPage);
+        Assert.Contains("Create administrator account", setupPage);
 
         using (var denied = await client.GetAsync("/", ct))
             Assert.Equal(HttpStatusCode.Redirect, denied.StatusCode);
@@ -64,6 +69,7 @@ public sealed partial class AuthenticationTests
         form["bootstrap"] = "admin";
         using (var invalid = await client.PostAsync("/session/setup", new FormUrlEncodedContent(form), ct))
             Assert.Equal("/setup?error=code", invalid.Headers.Location?.OriginalString);
+        Assert.Contains("Invalid setup code.", await client.GetStringAsync("/setup?error=code", ct));
         form["bootstrap"] = code;
         using (var valid = await client.PostAsync("/session/setup", new FormUrlEncodedContent(form), ct))
         {
@@ -90,14 +96,25 @@ public sealed partial class AuthenticationTests
         form["password"] = "admin";
         using (var oldLogin = await client.PostAsync("/session/login", new FormUrlEncodedContent(form), ct))
             Assert.Equal("/login?error=invalid", oldLogin.Headers.Location?.OriginalString);
+        Assert.Contains("Invalid username or password.", await client.GetStringAsync("/login?error=invalid", ct));
         form["username"] = "operator";
         form["password"] = password;
         using (var login = await client.PostAsync("/session/login", new FormUrlEncodedContent(form), ct))
             Assert.Equal("/", login.Headers.Location?.OriginalString);
-        foreach (var page in new[] { "/", "/conversations", "/agents", "/work", "/memory", "/timeline", "/projects", "/resources", "/approvals", "/codex", "/system" })
+        foreach (var (page, heading) in new[]
+        {
+            ("/", "Chat"), ("/conversations", "Conversations"), ("/agents", "Agents"),
+            ("/work", "Work history"), ("/memory", "Memory"), ("/timeline", "Activity timeline"),
+            ("/projects", "Projects"), ("/resources", "Resources"), ("/approvals", "Approvals"),
+            ("/codex", "Codex settings"), ("/system", "System settings")
+        })
         {
             using var response = await client.GetAsync(page, ct);
             Assert.True(response.IsSuccessStatusCode, $"{page} returned {response.StatusCode}");
+            var html = WebUtility.HtmlDecode(await response.Content.ReadAsStringAsync(ct));
+            Assert.Contains("<html lang=\"en\">", html);
+            Assert.Contains($"<h1>{heading}</h1>", html);
+            Assert.DoesNotMatch("[çÇğĞıİöÖşŞüÜ]", html);
         }
         await app.StopAsync(ct);
     }
