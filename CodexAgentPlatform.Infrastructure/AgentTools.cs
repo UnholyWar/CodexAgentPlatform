@@ -10,6 +10,12 @@ public sealed record ApprovalReply(string Id, string Scope, string Status, DateT
 public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore memory, Operations operations, PlatformPaths paths)
 {
     private sealed record Tool(string Name, string Permission, string Description, string[] Required, string[] Optional);
+    internal const string GrantToolName = "request_agent_permission";
+    private static readonly Tool GrantRequest = new(GrantToolName, "",
+        "On the owner's explicit request, propose one additional permission for an agent (exact name or ID). " +
+        "For kind 'project', permission is the exact project name or ID. For kind 'tool', use one of " +
+        string.Join(", ", ToolAccess.Permissions.Keys) + ". The owner reviews the proposal in chat.",
+        ["agent", "kind", "permission"], []);
     private static readonly Tool[] Registry =
     [
         new("memory_search", "memory", "Find Markdown notes by keyword, project and date.", [], ["query", "projectId", "when"]),
@@ -28,6 +34,7 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
         new("task_delegate", "delegate", "Ask another agent for one follow-up after this turn. List agents using agent_list.", ["agentId", "brief"], []),
         new("agent_list", "delegate", "List agents eligible for a follow-up on this project.", [], []),
         new("resource_search", "resources", "Find approved project resources by name.", [], ["query"]),
+        new("project_create", ToolAccess.CreateProjects, "Create a platform project and give the creating agent access to it. The default branch is main unless specified.", ["name"], ["defaultBranch"]),
         new("resource_get", "resources", "Read metadata of an authorized resource.", ["id"], []),
         new("git_workspace", "git", "Operate on project/: prepare, status, diff, fetch, pull, branch, commit. For more live diff/status output pass nextOffset as offset.", ["id", "operation"], ["argument", "offset"]),
         new("git_request_push", "git", "Request explicit owner approval for a non-force push of the current commit.", ["id"], ["destinationBranch"]),
@@ -37,18 +44,26 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
 
     public static IEnumerable<object> Describe(Agent agent)
     {
-        var deferred = new List<object>();
+        var deferred = new List<object> { DescribeFunction(GrantRequest, true) };
+        if (agent.Id == PlatformChat.Id)
+        {
+            yield return DescribeFunction(new Tool("handoff_to_agent", "", "Transfer the current user request to one listed specialist.", ["agentId"], []), false);
+            yield return ToolNamespace(deferred);
+            yield break;
+        }
         foreach (var tool in Registry.Where(tool => tool.Permission.Length == 0 || ToolAccess.Has(agent, tool.Permission)))
         {
-            bool onDemand = tool.Permission is "git" or "ssh" or "resources" or "delegate" ||
+            bool onDemand = tool.Permission is "git" or "ssh" or "resources" or "delegate" or ToolAccess.CreateProjects ||
                 tool.Name is "memory_archive" or "memory_consolidate" or "memory_update" or "memory_create";
             var spec = DescribeFunction(tool, onDemand);
             if (onDemand) deferred.Add(spec);
             else yield return spec;
         }
-        if (deferred.Count > 0)
-            yield return new { type = "namespace", name = "platform", description = "Platform tools for managing notes, project resources, Git, SSH, and delegation.", tools = deferred };
+        yield return ToolNamespace(deferred);
     }
+
+    private static object ToolNamespace(List<object> tools) =>
+        new { type = "namespace", name = "platform", description = "Platform actions and owner approval requests.", tools };
 
     private static object DescribeFunction(Tool tool, bool deferLoading) => new
     {
@@ -65,19 +80,28 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
     public async Task<object?> RunAsync(string name, JsonElement args, ChatRun run, CancellationToken ct)
     {
         await using var db = await dbs.CreateDbContextAsync(ct);
-        var agent = await db.Agents.AsNoTracking().SingleAsync(x => x.Id == run.AgentId, ct);
-        var tool = Registry.FirstOrDefault(x => x.Name == name);
+        var normal = run.AgentId == PlatformChat.Id;
+        var agent = normal ? PlatformChat.CreateAgent() : await db.Agents.AsNoTracking().SingleAsync(x => x.Id == run.AgentId, ct);
+        if (normal && name != GrantToolName)
+            throw new UnauthorizedAccessException("This tool is not available in normal chat.");
+        var tool = name == GrantToolName ? GrantRequest : Registry.FirstOrDefault(x => x.Name == name);
         if (agent.Archived || tool is null || (tool.Permission.Length > 0 && !ToolAccess.Has(agent, tool.Permission))
-            || !ToolAccess.AllowsProject(agent, run.ProjectId))
+            || (!normal && !ToolAccess.AllowsProject(agent, run.ProjectId)))
             throw new UnauthorizedAccessException("This tool is not permitted.");
         if (args.ValueKind != JsonValueKind.Object || tool.Required.Any(x => string.IsNullOrWhiteSpace(args.String(x))))
             throw new ArgumentException("Required tool arguments are missing.");
+
+        if (name == GrantToolName)
+            return await AgentPermissionGrants.ProposeAsync(db, run, args.String("agent")!, args.String("kind")!, args.String("permission")!, ct);
 
         var id = args.String("id");
         var project = args.String("projectId") ?? run.ProjectId;
         if (!ToolAccess.AllowsProject(agent, project)) throw new UnauthorizedAccessException("Access to this project is not permitted.");
         switch (name)
         {
+            case "project_create":
+                var created = await ProjectStore.CreateAsync(db, args.String("name")!, args.String("defaultBranch"), run, ct);
+                return new { created.Id, created.Name, created.DefaultBranch };
             case "memory_search":
             case "memory_list":
                 var notes = await memory.SearchAsync(args.String("query"), project, await RangeAsync(db, args, ct), false, ct);

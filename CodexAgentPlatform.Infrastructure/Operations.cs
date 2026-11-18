@@ -26,7 +26,8 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
             .ExecuteUpdateAsync(s => s.SetProperty(x => x.AutoApprove, enabled), ct);
         if (count == 0) throw new InvalidOperationException("Conversation not found.");
         var now = DateTime.UtcNow;
-        var requests = db.Approvals.Where(x => x.ConversationId == conversation && x.AutoEligible && x.ExpiresAtUtc > now);
+        var requests = db.Approvals.Where(x => x.ConversationId == conversation && x.Kind != AgentPermissionGrants.ApprovalKind &&
+            x.AutoEligible && x.ExpiresAtUtc > now);
         if (enabled)
             await requests.Where(x => x.Status == "Pending").ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, "Approved")
                 .SetProperty(x => x.DecidedBy, AutomaticDecision), ct);
@@ -192,11 +193,21 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
     {
         if (ownerId != PlatformUser.OwnerId) throw new UnauthorizedAccessException();
         await using var db = await dbs.CreateDbContextAsync(ct);
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
         var now = DateTime.UtcNow;
-        var count = await db.Approvals.Where(x => x.Id == id && x.Status == "Pending" && x.ExpiresAtUtc > now)
-            .ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, allow ? "Approved" : "Declined")
-                .SetProperty(x => x.DecidedBy, ownerId), ct);
-        if (count != 1) throw new InvalidOperationException("The approval has expired or a decision has already been made.");
+        var approval = await db.Approvals.SingleOrDefaultAsync(x => x.Id == id && x.Status == "Pending" && x.ExpiresAtUtc > now, ct)
+            ?? throw new InvalidOperationException("The approval has expired or a decision has already been made.");
+        if (approval.Kind == AgentPermissionGrants.ApprovalKind)
+            await AgentPermissionGrants.DecideAsync(db, approval, allow, ownerId, ct);
+        else
+        {
+            approval.Status = allow ? "Approved" : "Declined";
+            approval.DecidedBy = ownerId;
+            await db.SaveChangesAsync(ct);
+        }
+        await tx.CommitAsync(ct);
+        if (approval.Status == "Failed")
+            throw new InvalidOperationException(approval.Result);
     }
 
     public async Task<bool> ExecuteNextAsync(CancellationToken ct)
@@ -205,7 +216,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         var now = DateTime.UtcNow;
         await db.Approvals.Where(x => (x.Status == "Pending" || x.Status == "Approved") && x.ExpiresAtUtc <= now)
             .ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, "Expired"), ct);
-        var approval = await db.Approvals.AsNoTracking().Where(x => x.Status == "Approved")
+        var approval = await db.Approvals.AsNoTracking().Where(x => x.Status == "Approved" && x.Kind != AgentPermissionGrants.ApprovalKind)
             .OrderBy(x => x.CreatedAtUtc).FirstOrDefaultAsync(ct);
         if (approval is null) return false;
         var claimed = await db.Approvals.Where(x => x.Id == approval.Id && x.Status == "Approved" && x.ExpiresAtUtc > now)

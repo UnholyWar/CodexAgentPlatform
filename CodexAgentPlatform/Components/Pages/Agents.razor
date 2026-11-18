@@ -35,7 +35,7 @@
                 @if (modelError is not null) { <p class="notice error" role="alert">@modelError</p> }
                 <fieldset>
                     <legend>Tool permissions</legend>
-                    @foreach (var tool in tools)
+                    @foreach (var tool in ToolAccess.Permissions)
                     {
                         <label class="check"><input type="checkbox" checked="@allowedTools.Contains(tool.Key)"
                             @onchange="e => Toggle(allowedTools, tool.Key, e)" /> @tool.Value</label>
@@ -73,11 +73,6 @@
     private string? error, modelError, notice;
     private ElementReference editorHeading, addButton;
     private HashSet<string> allowedTools = [], allowedProjects = [];
-    private static readonly Dictionary<string, string> tools = new()
-    {
-        ["memory"] = "Memory", ["resources"] = "Project resources", ["workspace"] = "Workspace and terminal",
-        ["git"] = "Git", ["ssh"] = "SSH", ["delegate"] = "Delegation"
-    };
 
     protected override Task OnInitializedAsync() => ReloadAsync();
     protected override async Task OnAfterRenderAsync(bool firstRender)
@@ -136,6 +131,7 @@
                 await ReloadAsync();
                 return;
             }
+            projects = await db.Projects.AsNoTracking().OrderBy(x => x.Name).ToListAsync();
             edit = agent;
             isNew = false;
             allowedTools = ToolAccess.Split(agent.AllowedTools).ToHashSet();
@@ -161,6 +157,7 @@
         try
         {
             await using var db = await Dbs.CreateDbContextAsync();
+            await using var transaction = await db.Database.BeginTransactionAsync();
             var row = isNew ? new Agent { Id = draft.Id } : await db.Agents.SingleAsync(x => x.Id == draft.Id);
             row.Name = draft.Name.Trim();
             row.Title = draft.Title.Trim();
@@ -170,10 +167,14 @@
             row.Model = draft.Model;
             row.Effort = draft.Effort;
             row.Archived = draft.Archived;
-            row.AllowedTools = string.Join(',', allowedTools);
-            row.AllowedProjects = string.Join(',', allowedProjects);
+            var addedProjects = allowedProjects.Except(ToolAccess.Split(draft.AllowedProjects)).ToArray();
+            if (addedProjects.Length > 0 && await db.Projects.CountAsync(p => addedProjects.Contains(p.Id)) != addedProjects.Length)
+                throw new ArgumentException("A selected project was deleted. Reopen this agent to refresh its project permissions.");
+            row.AllowedTools = ToolAccess.ApplySelectionChanges(row.AllowedTools, draft.AllowedTools, allowedTools);
+            row.AllowedProjects = ToolAccess.ApplySelectionChanges(row.AllowedProjects, draft.AllowedProjects, allowedProjects);
             if (isNew) db.Agents.Add(row);
             await db.SaveChangesAsync();
+            await transaction.CommitAsync();
             isNew = false;
             await WorkspaceMemory.WriteAgentAsync(Paths, row, default);
             await ReloadAsync();

@@ -82,7 +82,8 @@
                 {
                     <p class="notice" role="status">@workspaceNotice</p>
                 }
-                @if (snapshot.Approvals.Count(a => a.Status == "Pending" && a.ExpiresAtUtc > DateTime.UtcNow) is > 0 and var pending)
+                <ChatPermissionGrants Approvals="snapshot.Approvals" />
+                @if (snapshot.Approvals.Count(a => a.Kind != AgentPermissionGrants.ApprovalKind && a.Status == "Pending" && a.ExpiresAtUtc > DateTime.UtcNow) is > 0 and var pending)
                 {
                     <a class="approval-callout" href="/approvals"><Icon Name="approve" /><strong>@pending operations awaiting approval</strong><Icon Name="chevron" /></a>
                 }
@@ -186,7 +187,11 @@
         await composerInput.FocusAsync(preventScroll: true);
     }
 
-    private async Task OpenSettingsAsync() => await JS.InvokeVoidAsync("platformChat.openDialog", settingsSheet);
+    private async Task OpenSettingsAsync()
+    {
+        await JS.InvokeVoidAsync("platformChat.openDialog", settingsSheet);
+        await LoadChoicesAsync();
+    }
 
     private async Task ToggleApprovalAsync()
     {
@@ -227,12 +232,18 @@
     {
         Updates.Changed += OnChange;
         Updates.AnswerChanged += OnAnswer;
+        await LoadChoicesAsync();
+        await using var db = await Dbs.CreateDbContextAsync();
+        zone = TimeZoneInfo.FindSystemTimeZoneById(await db.Preferences.Select(x => x.TimeZone).SingleAsync());
+    }
+
+    private async Task LoadChoicesAsync()
+    {
         await using var db = await Dbs.CreateDbContextAsync();
         agents = await db.Agents.AsNoTracking().OrderBy(x => x.Name)
             .Select(a => new Agent { Id = a.Id, Name = a.Name, Title = a.Title, AllowedProjects = a.AllowedProjects, Archived = a.Archived })
             .ToListAsync();
-        projects = await db.Projects.OrderBy(x => x.Name).ToListAsync();
-        zone = TimeZoneInfo.FindSystemTimeZoneById(await db.Preferences.Select(x => x.TimeZone).SingleAsync());
+        projects = await db.Projects.AsNoTracking().OrderBy(x => x.Name).ToListAsync();
     }
 
     protected override async Task OnParametersSetAsync()
@@ -334,7 +345,18 @@
 
     private void OnChange(string id)
     {
-        if (disposed || Id is null || (id != Id && id != "") || Interlocked.Exchange(ref refreshQueued, 1) != 0) return;
+        if (disposed) return;
+        if (id == "")
+        {
+            _ = InvokeAsync(async () =>
+            {
+                await LoadChoicesAsync();
+                await RefreshAsync();
+                if (!disposed) StateHasChanged();
+            });
+            return;
+        }
+        if (Id is null || id != Id || Interlocked.Exchange(ref refreshQueued, 1) != 0) return;
         _ = InvokeAsync(async () =>
         {
             Interlocked.Exchange(ref refreshQueued, 0);

@@ -104,7 +104,8 @@ public sealed class ChatTests(ITestOutputHelper output)
         Assert.Equal(9, specs.Count(t => t.String("type") == "function"));
         Assert.Contains(specs, t => t.String("name") == "task_begin" && !t.True("deferLoading"));
         var deferred = Assert.Single(specs, t => t.String("type") == "namespace").Items("tools").ToArray();
-        Assert.Equal(8, deferred.Length);
+        Assert.Equal(9, deferred.Length);
+        Assert.Contains(deferred, t => t.String("name") == "request_agent_permission");
         Assert.All(deferred, t => Assert.True(t.True("deferLoading")));
         Assert.DoesNotContain(deferred, t => t.String("name") == "ssh_inspect");
     }
@@ -186,7 +187,9 @@ public sealed class ChatTests(ITestOutputHelper output)
             await WaitAsync(async () => (await chats.ReadAsync(id, 10, default)).Run?.Status == WorkStatus.Completed);
             var thread = Assert.Single(codex.ThreadRequests);
             AssertChatOnly(thread);
-            Assert.Equal("handoff_to_agent", Assert.Single(thread.Items("dynamicTools")).String("name"));
+            var offered = thread.Items("dynamicTools").ToArray();
+            Assert.Equal("handoff_to_agent", Assert.Single(offered, t => t.String("type") == "function").String("name"));
+            Assert.Equal("request_agent_permission", Assert.Single(Assert.Single(offered, t => t.String("type") == "namespace").Items("tools")).String("name"));
             var input = Assert.Single(codex.TurnRequests).Items("input").Single().String("text");
             Assert.Contains(developer.Title, input);
             Assert.DoesNotContain(architect.Title, input);
@@ -198,6 +201,51 @@ public sealed class ChatTests(ITestOutputHelper output)
             Assert.Equal(PlatformChat.Id, (await db.Runs.SingleAsync()).AgentId);
             Assert.False(await db.Work.AnyAsync());
             Assert.False(await db.Events.AnyAsync(e => e.Kind == "AgentHandoff"));
+        }
+        finally { await worker.StopAsync(default); }
+    }
+
+    [Fact]
+    public async Task ChatGrantEnablesProjectCreationInAnExistingSpecialistChat()
+    {
+        await using var storage = await TestStorage.CreateAsync();
+        await using var db = storage.CreateDbContext();
+        var codex = new FakeCodex();
+        var updates = new ChatUpdates();
+        var chats = new ChatStore(storage, updates);
+        using var worker = Worker(storage, codex, updates);
+        await worker.StartAsync(default);
+        try
+        {
+            var id = await chats.SendAsync(null, "Review this plan", "qa", null, default, autoApproveNewChat: true);
+            Task WaitForReplies(int count) => WaitAsync(async () =>
+                await db.Runs.CountAsync(r => r.ConversationId == id && r.Status == WorkStatus.Completed) == count);
+            await WaitForReplies(1);
+            Assert.DoesNotContain("project_create", codex.ThreadRequests[0].Get("dynamicTools").GetRawText());
+
+            codex.NextToolCalls.Enqueue(("request_agent_permission", new { agent = "QA Engineer", kind = "tool", permission = "projects.create" }));
+            await chats.SendAsync(id, "QA ajanına proje oluşturma yetkisi ver", PlatformChat.Id, null, default);
+            await WaitForReplies(2);
+            var grant = Assert.Single((await chats.ReadAsync(id, 10, default)).Approvals);
+            Assert.Equal("Pending", grant.Status);
+            Assert.DoesNotContain("projects.create", await db.Agents.Where(a => a.Id == "qa").Select(a => a.AllowedTools).SingleAsync());
+
+            var operations = new Operations(storage, storage.Paths, new Vault(storage.Paths, null));
+            await operations.DecideAsync(grant.Id, true, PlatformUser.OwnerId, default);
+            codex.NextToolCalls.Enqueue(("project_create", new { name = "Atlas" }));
+            await chats.SendAsync(id, "Atlas projesini oluştur", "qa", null, default);
+            await WaitForReplies(3);
+            Assert.Contains("project_create", codex.ThreadRequests[^1].Get("dynamicTools").GetRawText());
+            Assert.NotEqual(codex.TurnRequests[0].String("threadId"), codex.TurnRequests[^1].String("threadId"));
+            var atlas = await db.Projects.SingleAsync(p => p.Name == "Atlas");
+            Assert.True(ToolAccess.AllowsProject(await db.Agents.AsNoTracking().SingleAsync(a => a.Id == "qa"), atlas.Id));
+
+            codex.NextToolCalls.Enqueue(("request_agent_permission", new { agent = "Developer", kind = "project", permission = "Atlas" }));
+            await chats.SendAsync(id, "Developer'a Atlas projesi için erişim ver", null, null, default);
+            await WaitForReplies(4);
+            var pending = await db.Approvals.SingleAsync(a => a.ConversationId == id && a.Status == "Pending");
+            await operations.DecideAsync(pending.Id, true, PlatformUser.OwnerId, default);
+            Assert.True(ToolAccess.AllowsProject(await db.Agents.AsNoTracking().SingleAsync(a => a.Id == "developer"), atlas.Id));
         }
         finally { await worker.StopAsync(default); }
     }
@@ -345,7 +393,7 @@ public sealed class ChatTests(ITestOutputHelper output)
 
             await using var db = storage.CreateDbContext();
             var thread = Assert.Single(await db.Threads.Where(x => x.ConversationId == chat).ToListAsync());
-            Assert.Equal(result.Run!.Workspace + ":chat", thread.Workspace);
+            Assert.StartsWith(result.Run!.Workspace + ":chat:", thread.Workspace, StringComparison.Ordinal);
             Assert.Equal(workspaceDenied ? 1 : 0,
                 await db.Events.CountAsync(x => x.ConversationId == chat && x.Kind == "WorkspaceUnavailable"));
         }

@@ -13,7 +13,7 @@
     @foreach (var row in rows)
     {
         <article class="card fields">
-            <div class="section-head"><h2>@row.Kind</h2><span class="status">@row.Status</span></div>
+            <div class="section-head"><h2>@(row.Kind == AgentPermissionGrants.ApprovalKind ? "Agent permission request" : row.Kind)</h2><span class="status">@row.Status</span></div>
             <p class="scope">@ApprovalDisplay.Scope(row.Scope)</p>
             @if (row.DecidedBy == CodexAgentPlatform.Infrastructure.Operations.AutomaticDecision) { <small>Automatically approved in this chat.</small> }
             @if (row.Result is { Length: > 0 } result) { <details class="code-fold"><summary>Operation output</summary><pre>@result</pre></details> }
@@ -47,7 +47,7 @@
         {
             var user = (await Authentication.GetAuthenticationStateAsync()).User;
             await Operations.DecideAsync(approval.Id, allow, user.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? "", default);
-            Updates.Publish(approval.ConversationId ?? "");
+            Updates.Publish(approval.Kind == AgentPermissionGrants.ApprovalKind ? "" : approval.ConversationId ?? "");
             await LoadAsync();
         }
         catch (Exception ex) when (ex is InvalidOperationException or UnauthorizedAccessException) { error = ex.Message; }

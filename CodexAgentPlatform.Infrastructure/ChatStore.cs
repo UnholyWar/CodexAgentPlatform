@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Globalization;
+using System.Text.RegularExpressions;
 using CodexAgentPlatform.Application;
 using Microsoft.EntityFrameworkCore;
 
@@ -40,7 +41,7 @@ public sealed class ChatUpdates
 
 public sealed record ChatSnapshot(List<Message> Messages, List<Activity> Events, ChatRun? Run, List<Approval> Approvals, bool AutoApprove = false);
 
-public sealed class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpdates updates)
+public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpdates updates)
 {
     public static readonly WorkStatus[] Active = [WorkStatus.Pending, WorkStatus.Running, WorkStatus.WaitingForApproval, WorkStatus.WaitingForUser];
 
@@ -80,7 +81,11 @@ public sealed class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpdates upd
                 ?? throw new InvalidOperationException("The selected agent is no longer available.");
         var last = chatId is null ? null : await db.Runs.AsNoTracking().Where(x => x.ConversationId == chat.Id)
             .OrderByDescending(x => x.AssistantMessageId).Select(x => new { x.AgentId, x.ProjectId }).FirstOrDefaultAsync(ct);
-        if (projectId is null && inheritProject)
+        // A project named in an access request is the proposed grant target, not a workspace switch.
+        var accessRequest = GrantReference().IsMatch(text) && GrantVerb().IsMatch(text);
+        if (projectId is null && inheritProject && accessRequest)
+            projectId = last?.ProjectId;
+        else if (projectId is null && inheritProject)
         {
             var projects = await db.Projects.AsNoTracking().Select(x => new { x.Id, x.Name }).ToListAsync(ct);
             var mentions = projects.Where(x => x.Name.Length >= 3 && text.Contains(x.Name, StringComparison.OrdinalIgnoreCase))
@@ -98,7 +103,7 @@ public sealed class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpdates upd
             (projectId is not null && !await db.Projects.AnyAsync(x => x.Id == projectId, ct)))
             throw new UnauthorizedAccessException("The agent does not have access to the selected project.");
         WorkItem? candidate = null;
-        if (agent.Id != PlatformChat.Id)
+        if (agent.Id != PlatformChat.Id && !accessRequest)
         {
             var range = TemporalQuery.Parse(text, DateTime.UtcNow, TimeZoneInfo.FindSystemTimeZoneById(settings.TimeZone));
             var previous = await FindWorkAsync(db, chat.Id, text, projectId, agent, range, !inheritProject, ct);
@@ -160,8 +165,12 @@ public sealed class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpdates upd
         var events = await db.Events.AsNoTracking().Where(x => x.ConversationId == id)
             .OrderByDescending(x => x.Id).Take(45).ToListAsync(ct);
         var run = await db.Runs.AsNoTracking().Where(x => x.ConversationId == id).OrderByDescending(x => x.CreatedAtUtc).FirstOrDefaultAsync(ct);
-        var approvals = await db.Approvals.AsNoTracking().Where(x => x.ConversationId == id)
-            .OrderByDescending(x => x.CreatedAtUtc).Take(12).ToListAsync(ct);
+        var conversationApprovals = db.Approvals.AsNoTracking().Where(x => x.ConversationId == id);
+        var recentIds = conversationApprovals.OrderByDescending(x => x.CreatedAtUtc).Take(12).Select(x => x.Id);
+        var now = DateTime.UtcNow;
+        var approvals = await conversationApprovals.Where(x => recentIds.Contains(x.Id) ||
+                (x.Kind == AgentPermissionGrants.ApprovalKind && x.Status == "Pending" && x.ExpiresAtUtc > now))
+            .OrderByDescending(x => x.CreatedAtUtc).ToListAsync(ct);
         var autoApprove = await db.Conversations.Where(c => c.Id == id).Select(c => c.AutoApprove).FirstOrDefaultAsync(ct);
         return new(messages, events, run, approvals, autoApprove);
     }
@@ -179,6 +188,12 @@ public sealed class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpdates upd
                 text.StartsWith(name + ",", StringComparison.OrdinalIgnoreCase) ||
                 text.StartsWith("@" + name, StringComparison.OrdinalIgnoreCase) &&
                 (text.Length == name.Length + 1 || !char.IsLetterOrDigit(text[name.Length + 1]))));
+
+    [GeneratedRegex(@"\b(?:permissions?|access|grant|yetki\p{L}*|[iİ]z[iİ]n\p{L}*|[iİ]zn\p{L}*|erişim\p{L}*)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex GrantReference();
+
+    [GeneratedRegex(@"\b(?:give|grant|add|allow|enable|ver|verir|verebilir|ekle\p{L}*|tanı\p{L}*|yetkilendir\p{L}*)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex GrantVerb();
 
     private static async Task<List<WorkItem>> FindWorkAsync(PlatformDb db, string conversation, string input,
         string? project, Agent agent, TimeRange? range, bool projectSelected, CancellationToken ct)

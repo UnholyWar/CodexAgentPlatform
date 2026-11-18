@@ -1,0 +1,46 @@
+@inject Operations Operations
+@inject AuthenticationStateProvider Authentication
+@inject ChatUpdates Updates
+
+@foreach (var request in Approvals.Where(a => a.Kind == AgentPermissionGrants.ApprovalKind && a.Status == "Pending" && a.ExpiresAtUtc > DateTime.UtcNow))
+{
+    <section class="card fields" @key="request.Id" aria-label="Agent permission request">
+        <strong id="grant-scope-@request.Id">@request.Scope</strong>
+        <small>Expires at @request.ExpiresAtUtc.ToString("HH:mm") UTC</small>
+        <div class="actions">
+            <button type="button" class="primary" disabled="@busy" aria-describedby="grant-scope-@request.Id"
+                    @onclick="() => DecideAsync(request, true)">Approve</button>
+            <button type="button" class="button" disabled="@busy" aria-describedby="grant-scope-@request.Id"
+                    @onclick="() => DecideAsync(request, false)">Decline</button>
+        </div>
+    </section>
+}
+@if (error is not null) { <p role="alert" class="notice error">@error</p> }
+@if (notice is not null) { <p role="status" class="notice">@notice</p> }
+
+@code {
+    [Parameter, EditorRequired] public List<Approval> Approvals { get; set; } = [];
+    private bool busy;
+    private string? error, notice;
+
+    private async Task DecideAsync(Approval request, bool allow)
+    {
+        if (busy) return;
+        busy = true;
+        error = notice = null;
+        try
+        {
+            var owner = (await Authentication.GetAuthenticationStateAsync()).User;
+            await Operations.DecideAsync(request.Id, allow,
+                owner.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? "", default);
+            notice = allow ? "Permission granted." : "Permission request declined.";
+            Updates.Publish("");
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or UnauthorizedAccessException or DbUpdateException)
+        {
+            error = ex is DbUpdateException ? "Could not save the permission decision." : ex.Message;
+            Updates.Publish(request.ConversationId ?? "");
+        }
+        finally { busy = false; }
+    }
+}

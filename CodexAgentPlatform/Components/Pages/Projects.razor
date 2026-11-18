@@ -122,33 +122,27 @@
     {
         if (busy || confirmDelete || selected is not { } draft) return;
         error = null;
-        draft.Name = draft.Name.Trim();
-        draft.DefaultBranch = draft.DefaultBranch.Trim();
-        if (draft.Name.Length is 0 or > 80 || draft.DefaultBranch.Length is 0 or > 150)
-        {
-            error = "Project name and default branch are required.";
-            return;
-        }
-
         busy = true;
         try
         {
             await using var db = await Dbs.CreateDbContextAsync();
             if (isNew)
-                db.Projects.Add(draft);
+                await ProjectStore.CreateAsync(db, draft.Name, draft.DefaultBranch, null, default);
             else
             {
+                ProjectStore.Normalize(draft);
                 var row = await db.Projects.FindAsync(draft.Id);
                 if (row is null) { error = "This project no longer exists."; return; }
                 (row.Name, row.DefaultBranch) = (draft.Name, draft.DefaultBranch);
+                await db.SaveChangesAsync();
             }
-            await db.SaveChangesAsync();
             await LoadAsync();
             notice = "Project saved.";
             CloseEditor();
         }
         catch (DbUpdateException ex) when (ex.InnerException is Microsoft.Data.Sqlite.SqliteException { SqliteExtendedErrorCode: 2067 })
         { error = "This project name is already in use."; }
+        catch (ArgumentException ex) { error = ex.Message; }
         catch (DbUpdateException) { error = "Could not save the project."; }
         finally { busy = false; }
     }
