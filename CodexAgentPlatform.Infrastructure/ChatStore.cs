@@ -40,6 +40,7 @@ public sealed class ChatUpdates
 }
 
 public sealed record ChatSnapshot(List<Message> Messages, List<Activity> Events, ChatRun? Run, List<Approval> Approvals, bool AutoApprove = false);
+internal sealed record ProjectReference(string Id, string Name);
 
 public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpdates updates)
 {
@@ -82,14 +83,12 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
         var last = chatId is null ? null : await db.Runs.AsNoTracking().Where(x => x.ConversationId == chat.Id)
             .OrderByDescending(x => x.AssistantMessageId).Select(x => new { x.AgentId, x.ProjectId }).FirstOrDefaultAsync(ct);
         // A project named in an access request is the proposed grant target, not a workspace switch.
-        var accessRequest = GrantReference().IsMatch(text) && GrantVerb().IsMatch(text);
+        var accessRequest = IsAccessRequest(text);
         if (projectId is null && inheritProject && accessRequest)
             projectId = last?.ProjectId;
         else if (projectId is null && inheritProject)
         {
-            var projects = await db.Projects.AsNoTracking().Select(x => new { x.Id, x.Name }).ToListAsync(ct);
-            var mentions = projects.Where(x => x.Name.Length >= 3 && text.Contains(x.Name, StringComparison.OrdinalIgnoreCase))
-                .Take(2).ToArray();
+            var mentions = await FindNamedProjectsAsync(db, text, spoken: false, ct);
             if (mentions.Length == 1) projectId = mentions[0].Id;
             else if (mentions.Length > 1)
                 return await SaveExchangeAsync(db, tx, chat, chatId, explicitAgent ?? normal, text,
@@ -178,17 +177,42 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
         return message;
     }
 
-    internal async Task<object[]> VoiceHistoryAsync(string? conversationId, string? projectId, CancellationToken ct)
+    internal async Task<ProjectReference[]> FindSpokenProjectsAsync(string text, CancellationToken ct)
     {
-        if (conversationId is null) return [];
+        if (IsAccessRequest(text)) return [];
         await using var db = await dbs.CreateDbContextAsync(ct);
+        return await FindNamedProjectsAsync(db, text, spoken: true, ct);
+    }
+
+    private static async Task<ProjectReference[]> FindNamedProjectsAsync(PlatformDb db, string text, bool spoken, CancellationToken ct)
+    {
+        var projects = await db.Projects.AsNoTracking().Select(p => new ProjectReference(p.Id, p.Name)).ToListAsync(ct);
+        // Transcription can insert spaces inside names such as AtlasPortal.
+        var speech = spoken ? new string(text.Where(char.IsLetterOrDigit).ToArray()) : null;
+        return projects.Where(p =>
+        {
+            if (p.Name.Length >= 3 && text.Contains(p.Name, StringComparison.OrdinalIgnoreCase)) return true;
+            if (speech is null) return false;
+            var name = new string(p.Name.Where(char.IsLetterOrDigit).ToArray());
+            return name.Length >= 5 && speech.Contains(name, StringComparison.OrdinalIgnoreCase);
+        }).Take(2).ToArray();
+    }
+
+    internal async Task<(object[] History, string[] Projects, string? CurrentProject)> VoiceContextAsync(
+        string? conversationId, string? projectId, CancellationToken ct)
+    {
+        await using var db = await dbs.CreateDbContextAsync(ct);
+        var projects = await db.Projects.AsNoTracking().OrderBy(p => p.Name).Select(p => p.Name).Take(32).ToArrayAsync(ct);
+        var current = projectId is null ? null : await db.Projects.AsNoTracking().Where(p => p.Id == projectId)
+            .Select(p => p.Name).SingleOrDefaultAsync(ct);
+        if (conversationId is null) return ([], projects, current);
         var messages = await db.Messages.AsNoTracking().Where(m => m.ConversationId == conversationId && m.Text != "" &&
             (m.Role == "user" || m.Role == "assistant") &&
             (m.VoiceProjectId == (projectId ?? "") || db.Runs.Any(r => r.ConversationId == conversationId && r.ProjectId == projectId &&
                 (r.UserMessageId == m.Id || r.AssistantMessageId == m.Id))))
             .OrderByDescending(m => m.Id).Take(12).Select(m => new { role = m.Role, text = m.Text.Substring(0, 600) }).ToListAsync(ct);
         messages.Reverse();
-        return messages.ToArray();
+        return (messages.ToArray(), projects, current);
     }
 
     internal async Task<(WorkStatus Status, string Text, bool PendingApproval)?> VoiceWorkAsync(
@@ -243,6 +267,8 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
 
     [GeneratedRegex(@"\b(?:give|grant|add|allow|enable|ver|verir|verebilir|ekle\p{L}*|tanı\p{L}*|yetkilendir\p{L}*)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex GrantVerb();
+
+    private static bool IsAccessRequest(string text) => GrantReference().IsMatch(text) && GrantVerb().IsMatch(text);
 
     private static async Task<List<WorkItem>> FindWorkAsync(PlatformDb db, string conversation, string input,
         string? project, Agent agent, TimeRange? range, bool projectSelected, CancellationToken ct)

@@ -462,6 +462,50 @@ public sealed class ChatTests(ITestOutputHelper output)
         finally { await worker.StopAsync(default); }
     }
 
+    [Fact]
+    public async Task VoiceFollowUpUsesTheSpokenProjectAndOnlyAnEligibleAgent()
+    {
+        await using var storage = await TestStorage.CreateAsync();
+        await using var db = storage.CreateDbContext();
+        var project = new Project { Name = "AtlasPortal" };
+        db.Projects.Add(project);
+        var qa = await db.Agents.SingleAsync(a => a.Id == "qa");
+        qa.AllowedProjects = project.Id;
+        await db.SaveChangesAsync();
+
+        var codex = new FakeCodex();
+        var updates = new ChatUpdates();
+        var chats = new ChatStore(storage, updates);
+        using var worker = Worker(storage, codex, updates);
+        await worker.StartAsync(default);
+        try
+        {
+            await using var voice = new ChatVoiceCall(codex, chats, worker, NullLogger<ChatVoiceCall>.Instance,
+                conversationId: null, projectId: null, selectedAgent: null, autoApprove: false);
+            var opened = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            voice.ConversationOpened += id => opened.SetResult(id);
+            await voice.StartAsync("v=0 fake offer");
+            Assert.Contains(project.Name, codex.VoicePrompt);
+
+            codex.Emit("thread/realtime/transcript/done", new { threadId = "t1", role = "user",
+                text = "Atlas Portal projesi hakkında konuşalım." });
+            var conversation = await opened.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            codex.NextToolCalls.Enqueue(("handoff_to_agent", new { agentId = "developer" }));
+            codex.NextToolCalls.Enqueue(("handoff_to_agent", new { agentId = "qa" }));
+            const string followUp = "Bu projede hangi testleri çalıştırdık?";
+            codex.Emit("thread/realtime/itemAdded", new { threadId = "t1",
+                item = new { type = "handoff_request", item_id = "follow-up", input_transcript = followUp } });
+
+            await WaitAsync(() => Task.FromResult(codex.SpokenResults.Contains("Agent result: Test yanıtı")));
+            var snapshot = await chats.ReadAsync(conversation, 10, default);
+            Assert.Equal("qa", snapshot.Run?.AgentId);
+            Assert.Equal(project.Id, snapshot.Run?.ProjectId);
+            Assert.All(snapshot.Messages.Where(m => m.Role == "user"), m => Assert.Equal(project.Id, m.VoiceProjectId));
+            Assert.Collection(codex.ToolReplies, r => Assert.False(r.True("success")), r => Assert.True(r.True("success")));
+        }
+        finally { await worker.StopAsync(default); }
+    }
+
     private static ChatWorker Worker(TestStorage storage, FakeCodex codex, ChatUpdates updates)
     {
         var memory = new MemoryStore(storage, storage.Paths);
@@ -497,6 +541,7 @@ public sealed class ChatTests(ITestOutputHelper output)
         public List<JsonElement> ToolReplies { get; } = [];
         public System.Collections.Concurrent.ConcurrentQueue<string> SpokenResults { get; } = new();
         public string? TurnModel { get; private set; }
+        public string? VoicePrompt { get; private set; }
         private int count;
         public event Action<CodexEvent>? Received;
         public void Emit(string method, object parameters) => Received?.Invoke(new CodexEvent(method, Args(parameters)));
@@ -515,7 +560,11 @@ public sealed class ChatTests(ITestOutputHelper output)
             if (method == "account/read")
                 return Task.FromResult(Args(new { account = new { type = "chatgpt" } }));
             if (method == "thread/realtime/start")
-                Emit("thread/realtime/sdp", new { threadId = Args(parameters!).String("threadId"), sdp = "v=0 fake answer" });
+            {
+                var request = Args(parameters!);
+                VoicePrompt = request.String("prompt");
+                Emit("thread/realtime/sdp", new { threadId = request.String("threadId"), sdp = "v=0 fake answer" });
+            }
             if (method == "thread/realtime/appendSpeech")
                 SpokenResults.Enqueue(Args(parameters!).String("text")!);
             if (method == "windowsSandbox/readiness" && DenyWorkspaceNamespace)

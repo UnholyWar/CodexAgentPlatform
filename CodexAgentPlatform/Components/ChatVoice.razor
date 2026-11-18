@@ -43,6 +43,7 @@
 @code {
     [Parameter] public string? ConversationId { get; set; }
     [Parameter] public string? ProjectId { get; set; }
+    [Parameter] public bool PinProject { get; set; }
     [Parameter] public string? SelectedAgent { get; set; }
     [Parameter] public bool AutoApprove { get; set; }
     [Parameter] public EventCallback<string> ConversationOpened { get; set; }
@@ -68,7 +69,7 @@
             module ??= await JS.InvokeAsync<IJSObjectReference>("import", "./" + Assets["chat-voice.js"]);
             if (disposed) return;
             reference ??= DotNetObjectReference.Create(this);
-            var current = new ChatVoiceCall(Codex, Chats, Worker, Log, ConversationId, ProjectId, SelectedAgent, AutoApprove);
+            var current = new ChatVoiceCall(Codex, Chats, Worker, Log, ConversationId, ProjectId, SelectedAgent, AutoApprove, PinProject);
             call = current;
             callConversationId = ConversationId;
             current.ConversationOpened += id => _ = InvokeAsync(async () =>

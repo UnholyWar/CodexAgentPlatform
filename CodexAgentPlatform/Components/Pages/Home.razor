@@ -118,7 +118,7 @@
                     }
                 }
             </div>
-            <ChatVoice ConversationId="@Id" ProjectId="@EffectiveProject" SelectedAgent="@(mentionedAgent?.Id ?? selectedAgent)"
+            <ChatVoice ConversationId="@Id" ProjectId="@VoiceProject" PinProject="@(projectId == "")" SelectedAgent="@(mentionedAgent?.Id ?? selectedAgent)"
                        AutoApprove="@AutoApprove" ConversationOpened="OpenVoiceConversation" />
             @if (IsActive && !ChatStore.IsPauseRequest(draft))
             {
@@ -168,6 +168,16 @@
     private string? approvalError;
     private bool AutoApprove => Id is null ? draftAutoApprove : snapshot.AutoApprove;
     private string? EffectiveProject => projectId == "" ? null : projectId ?? snapshot.Run?.ProjectId;
+    private string? VoiceProject
+    {
+        get
+        {
+            if (projectId is not null) return EffectiveProject;
+            var speech = snapshot.Messages.FindLast(m => m.Role == "user" && m.VoiceProjectId is not null &&
+                m.Id > (snapshot.Run?.UserMessageId ?? 0));
+            return speech?.VoiceProjectId is { } voiceProject ? (voiceProject == "" ? null : voiceProject) : EffectiveProject;
+        }
+    }
     private string ProjectSelection
     {
         get => EffectiveProject ?? "";

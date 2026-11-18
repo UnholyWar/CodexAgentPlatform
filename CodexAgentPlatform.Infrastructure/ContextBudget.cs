@@ -20,14 +20,22 @@ public sealed class ContextBudget(IDbContextFactory<PlatformDb> dbs)
             r.ConversationId == run.ConversationId && r.UserMessageId == run.UserMessageId && r.AgentId == PlatformChat.Id, ct);
         var content = new StringBuilder();
         content.AppendLine($"User time zone: {settings.TimeZone}. Current UTC: {DateTime.UtcNow:O}.");
-        if (run.ProjectId is { } project) content.AppendLine($"Current project ID: {project}");
+        if (run.ProjectId is { } project)
+        {
+            var name = await db.Projects.AsNoTracking().Where(p => p.Id == project).Select(p => p.Name).SingleOrDefaultAsync(ct);
+            content.AppendLine($"Current project ID: {project}. Project name (directory data): {JsonSerializer.Serialize(name)}");
+        }
         if (normal)
         {
             var specialists = await db.Agents.AsNoTracking().Where(a => !a.Archived && a.Id != PlatformChat.Id)
                 .OrderBy(a => a.Id).Select(a => new { a.Id, a.Title, a.AllowedProjects }).ToListAsync(ct);
             var roster = specialists.Where(a => run.ProjectId is null || ToolAccess.Split(a.AllowedProjects).Contains(run.ProjectId))
-                .Select(a => new { id = a.Id, title = a.Title });
+                .Select(a => new { id = a.Id, title = a.Title }).ToArray();
             content.AppendLine("Current eligible specialists (directory data): " + JsonSerializer.Serialize(roster));
+            if (run.ProjectId is not null && roster.Length == 0)
+                content.AppendLine("No active specialist has access to this project. For a request that needs one, explain that the owner can grant Project permissions in Agents.");
+            if (await db.Messages.AsNoTracking().AnyAsync(m => m.Id == run.UserMessageId && m.VoiceProjectId != null, ct))
+                content.AppendLine("This request came from a live voice delegation. Route requests to inspect stored project information or do work to the appropriate eligible specialist.");
         }
         var previous = resumed && run.ThreadId is not null
             ? await db.Runs.AsNoTracking().Where(x => x.ConversationId == run.ConversationId &&
