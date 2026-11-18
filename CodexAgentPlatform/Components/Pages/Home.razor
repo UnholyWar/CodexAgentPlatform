@@ -59,7 +59,7 @@
                         <div class="avatar" aria-hidden="true"><Icon Name="@(message.Role == "user" ? "person" : "agent")" /></div>
                         <div class="message-main">
                             <div class="message-meta">
-                                <strong>@(message.Role == "user" ? "You" : AgentName(message.AgentId))</strong>
+                                <strong>@(message.Role == "user" ? "You" : message.VoiceProjectId is not null ? "Voice assistant" : AgentName(message.AgentId))</strong>
                                 <time datetime="@message.CreatedAtUtc.ToString("O")">@LocalTime(message.CreatedAtUtc)</time>
                             </div>
                             @if (message.Text.Length == 0)
@@ -118,6 +118,8 @@
                     }
                 }
             </div>
+            <ChatVoice ConversationId="@Id" ProjectId="@EffectiveProject" SelectedAgent="@(mentionedAgent?.Id ?? selectedAgent)"
+                       AutoApprove="@AutoApprove" ConversationOpened="OpenVoiceConversation" />
             @if (IsActive && !ChatStore.IsPauseRequest(draft))
             {
                 <button type="button" class="primary send" aria-label="Stop work" title="Stop work" @onclick="PauseAsync"><Icon Name="pause" /></button>
@@ -323,6 +325,11 @@
     private async Task PauseAsync()
     {
         if (Id is not null) await Worker.PauseAsync(Id, default);
+    }
+
+    private void OpenVoiceConversation(string id)
+    {
+        if (Id is null) Navigation.NavigateTo($"/chat/{id}", replace: true);
     }
 
     private async Task LoadOlderAsync()

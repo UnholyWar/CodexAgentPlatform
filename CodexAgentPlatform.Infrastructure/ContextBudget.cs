@@ -49,9 +49,10 @@ public sealed class ContextBudget(IDbContextFactory<PlatformDb> dbs)
         var excerptLength = handoff ? 450 : 850;
         var messages = await db.Messages.AsNoTracking().Where(x => x.ConversationId == run.ConversationId &&
                 x.Id > after && x.Id < run.UserMessageId && x.Text != "" &&
-                (!publicContext || x.Role == "user" || x.Role == "assistant") && db.Runs.Any(r =>
+                (!publicContext || x.Role == "user" || x.Role == "assistant") &&
+                (x.VoiceProjectId == (run.ProjectId ?? "") || db.Runs.Any(r =>
                     r.ConversationId == run.ConversationId && (r.UserMessageId == x.Id || r.AssistantMessageId == x.Id) &&
-                    (publicContext ? r.ProjectId == run.ProjectId : r.ProjectId == null || Enumerable.Contains(allowedProjects, r.ProjectId))))
+                    (publicContext ? r.ProjectId == run.ProjectId : r.ProjectId == null || Enumerable.Contains(allowedProjects, r.ProjectId)))))
                 .OrderByDescending(x => x.Id).Take(handoff ? 4 : 10)
                 .Select(x => new { x.Role, x.AgentId, Text = x.Text.Substring(0, excerptLength) }).ToListAsync(ct);
         if (messages.Count == 0) return (content.ToString(), 0);

@@ -43,6 +43,8 @@ public sealed class Message
     public string? AgentId { get; set; }
     public string Role { get; set; } = "";
     public string Text { get; set; } = "";
+    // Voice transcripts carry their project scope. An empty value means an unscoped call.
+    public string? VoiceProjectId { get; set; }
     public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
 }
 

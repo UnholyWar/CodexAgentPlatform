@@ -424,6 +424,44 @@ public sealed class ChatTests(ITestOutputHelper output)
             tools.RunAsync("ssh_inspect", Args(new { id = "server", operation = "test" }), run, default));
     }
 
+    [Fact]
+    public async Task VoiceHandoffUsesOneTranscriptAndSpeaksTheSelectedAgentsResult()
+    {
+        await using var storage = await TestStorage.CreateAsync();
+        var codex = new FakeCodex();
+        var updates = new ChatUpdates();
+        var chats = new ChatStore(storage, updates);
+        using var worker = Worker(storage, codex, updates);
+        await worker.StartAsync(default);
+        try
+        {
+            await using (var voice = new ChatVoiceCall(codex, chats, worker, NullLogger<ChatVoiceCall>.Instance,
+                conversationId: null, projectId: null, selectedAgent: "qa", autoApprove: false))
+            {
+                var opened = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+                voice.ConversationOpened += id => opened.SetResult(id);
+                Assert.Equal("v=0 fake answer", await voice.StartAsync("v=0 fake offer"));
+                const string text = "Please run the regression tests.";
+                var request = new { type = "handoff_request", item_id = "handoff-1", input_transcript = text };
+                codex.Emit("thread/realtime/itemAdded", new { threadId = "t1", item = request });
+                codex.Emit("thread/realtime/transcript/done", new { threadId = "t1", role = "user", text = " " + text });
+                codex.Emit("thread/realtime/itemAdded", new { threadId = "t1", item = request });
+
+                var id = await opened.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                await WaitAsync(() => Task.FromResult(codex.SpokenResults.Contains("Agent result: Test yanıtı")));
+                var snapshot = await chats.ReadAsync(id, 10, default);
+                var user = Assert.Single(snapshot.Messages, m => m.Role == "user");
+                Assert.Equal(text, user.Text);
+                Assert.Equal("", user.VoiceProjectId);
+                Assert.Equal(user.Id, snapshot.Run?.UserMessageId);
+                Assert.Equal("qa", snapshot.Run?.AgentId);
+                Assert.Equal(WorkStatus.Completed, snapshot.Run?.Status);
+            }
+            Assert.Contains("thread/realtime/stop", codex.Methods);
+        }
+        finally { await worker.StopAsync(default); }
+    }
+
     private static ChatWorker Worker(TestStorage storage, FakeCodex codex, ChatUpdates updates)
     {
         var memory = new MemoryStore(storage, storage.Paths);
@@ -457,9 +495,11 @@ public sealed class ChatTests(ITestOutputHelper output)
         public List<JsonElement> TurnRequests { get; } = [];
         public Queue<(string Name, object Arguments)> NextToolCalls { get; } = [];
         public List<JsonElement> ToolReplies { get; } = [];
+        public System.Collections.Concurrent.ConcurrentQueue<string> SpokenResults { get; } = new();
         public string? TurnModel { get; private set; }
         private int count;
         public event Action<CodexEvent>? Received;
+        public void Emit(string method, object parameters) => Received?.Invoke(new CodexEvent(method, Args(parameters)));
         public Task<string> VersionAsync(CancellationToken ct) => Task.FromResult("fake-codex");
         public Task ReconnectAsync(CancellationToken ct) { Connected = true; return Task.CompletedTask; }
         public Task ReplyAsync(JsonElement id, object result, CancellationToken ct)
@@ -472,6 +512,12 @@ public sealed class ChatTests(ITestOutputHelper output)
         {
             Connected = true;
             Methods.Add(method);
+            if (method == "account/read")
+                return Task.FromResult(Args(new { account = new { type = "chatgpt" } }));
+            if (method == "thread/realtime/start")
+                Emit("thread/realtime/sdp", new { threadId = Args(parameters!).String("threadId"), sdp = "v=0 fake answer" });
+            if (method == "thread/realtime/appendSpeech")
+                SpokenResults.Enqueue(Args(parameters!).String("text")!);
             if (method == "windowsSandbox/readiness" && DenyWorkspaceNamespace)
                 return Task.FromResult(Args(new { status = "ready" }));
             if (method is "thread/start" or "thread/resume")

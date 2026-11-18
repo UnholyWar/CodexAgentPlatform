@@ -58,7 +58,7 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
     }
 
     public async Task<string> SendAsync(string? chatId, string text, string? selectedAgent, string? projectId, CancellationToken ct,
-        bool autoApproveNewChat = false)
+        bool autoApproveNewChat = false, long? voiceMessageId = null)
     {
         text = text.Trim();
         var inheritProject = projectId is null;
@@ -118,9 +118,13 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
         }
         if (chatId is null) db.Conversations.Add(chat);
         chat.UpdatedAtUtc = DateTime.UtcNow;
-        var user = new Message { ConversationId = chat.Id, Role = "user", Text = text };
+        var user = voiceMessageId is { } messageId
+            ? await db.Messages.SingleAsync(m => m.ConversationId == chat.Id && m.Id == messageId &&
+                m.Role == "user" && m.VoiceProjectId == (projectId ?? "") && m.Text == text, ct)
+            : new Message { ConversationId = chat.Id, Role = "user", Text = text };
         var answer = new Message { ConversationId = chat.Id, AgentId = agent.Id, Role = "assistant" };
-        db.Messages.AddRange(user, answer);
+        if (voiceMessageId is null) db.Messages.Add(user);
+        db.Messages.Add(answer);
         await db.SaveChangesAsync(ct);
         db.Runs.Add(new ChatRun
         {
@@ -154,6 +158,51 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
                 """).AsNoTracking();
         }
         return await chats.OrderByDescending(x => x.UpdatedAtUtc).Take(70).ToListAsync(ct);
+    }
+
+    internal async Task<Message> SaveVoiceMessageAsync(string? conversationId, string? projectId, string role, string text,
+        bool autoApprove, CancellationToken ct)
+    {
+        await using var db = await dbs.CreateDbContextAsync(ct);
+        var chat = conversationId is null
+            ? new Conversation { Title = role == "user" ? TextLimits.Clip(text.Replace('\n', ' '), 65) : "Voice conversation",
+                AutoApprove = autoApprove }
+            : await db.Conversations.SingleAsync(c => c.Id == conversationId, ct);
+        if (conversationId is null) db.Conversations.Add(chat);
+        chat.UpdatedAtUtc = DateTime.UtcNow;
+        var message = new Message { ConversationId = chat.Id, Role = role, Text = text,
+            VoiceProjectId = projectId ?? "", AgentId = role == "assistant" ? PlatformChat.Id : null };
+        db.Messages.Add(message);
+        await db.SaveChangesAsync(ct);
+        updates.Publish(chat.Id);
+        return message;
+    }
+
+    internal async Task<object[]> VoiceHistoryAsync(string? conversationId, string? projectId, CancellationToken ct)
+    {
+        if (conversationId is null) return [];
+        await using var db = await dbs.CreateDbContextAsync(ct);
+        var messages = await db.Messages.AsNoTracking().Where(m => m.ConversationId == conversationId && m.Text != "" &&
+            (m.Role == "user" || m.Role == "assistant") &&
+            (m.VoiceProjectId == (projectId ?? "") || db.Runs.Any(r => r.ConversationId == conversationId && r.ProjectId == projectId &&
+                (r.UserMessageId == m.Id || r.AssistantMessageId == m.Id))))
+            .OrderByDescending(m => m.Id).Take(12).Select(m => new { role = m.Role, text = m.Text.Substring(0, 600) }).ToListAsync(ct);
+        messages.Reverse();
+        return messages.ToArray();
+    }
+
+    internal async Task<(WorkStatus Status, string Text, bool PendingApproval)?> VoiceWorkAsync(
+        string conversationId, long messageId, CancellationToken ct)
+    {
+        await using var db = await dbs.CreateDbContextAsync(ct);
+        var result = await db.Runs.AsNoTracking().Where(r => r.ConversationId == conversationId && r.UserMessageId == messageId)
+            .OrderByDescending(r => r.AssistantMessageId)
+            .Select(r => new { r.Status, r.Error, Text = db.Messages.Where(m => m.Id == r.AssistantMessageId).Select(m => m.Text).FirstOrDefault(),
+                PendingApproval = db.Approvals.Any(a => a.ConversationId == conversationId && a.AgentId == r.AgentId &&
+                    a.Status == "Pending" && a.ExpiresAtUtc > DateTime.UtcNow && a.CreatedAtUtc >= r.CreatedAtUtc) })
+            .FirstOrDefaultAsync(ct);
+        if (result is null) return null;
+        return (result.Status, result.Status == WorkStatus.Completed ? result.Text ?? "" : result.Error ?? "", result.PendingApproval);
     }
 
     public async Task<ChatSnapshot> ReadAsync(string id, int messageLimit, CancellationToken ct)

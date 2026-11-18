@@ -1,0 +1,182 @@
+@implements IAsyncDisposable
+@inject ICodexConnection Codex
+@inject ChatStore Chats
+@inject ChatWorker Worker
+@inject Microsoft.Extensions.Logging.ILogger<ChatVoiceCall> Log
+@inject IJSRuntime JS
+
+<button type="button" class="icon-button voice-trigger" aria-label="Start voice call" title="Start voice call"
+        aria-haspopup="dialog" disabled="@starting" @onclick="OpenAsync">
+    <Icon Name="voice" />
+</button>
+<dialog class="voice-dialog" aria-labelledby="voice-title" @ref="dialog" @onclose="EndAsync">
+    <header class="voice-header">
+        <h2 id="voice-title">Voice call</h2>
+        <button type="button" class="icon-button" aria-label="Close voice call" title="Close voice call" @onclick="CloseAsync">
+            <Icon Name="close" />
+        </button>
+    </header>
+    <div class="voice-center">
+        <div class="voice-orb" aria-hidden="true">
+            <div class="voice-sphere">
+                <div class="voice-grid"></div>
+            </div>
+            <span class="voice-orbit"></span>
+            <span class="voice-orbit"></span>
+        </div>
+        <p class="voice-status" role="status">@status</p>
+        @if (error is not null) { <p class="voice-error" role="alert">@error</p> }
+        <audio autoplay playsinline @ref="speaker"></audio>
+    </div>
+    <footer class="voice-controls">
+        <button type="button" class="button voice-play" hidden>Play audio</button>
+        <button type="button" class="icon-button" aria-label="Mute microphone" aria-pressed="@(muted ? "true" : "false")"
+                disabled="@(!connected)" @onclick="ToggleMuteAsync">
+            <Icon Name="microphone" /><span>@(muted ? "Unmute" : "Mute")</span>
+        </button>
+        <button type="button" class="button voice-end" @onclick="CloseAsync">
+            <Icon Name="phone" /> End call
+        </button>
+    </footer>
+</dialog>
+
+@code {
+    [Parameter] public string? ConversationId { get; set; }
+    [Parameter] public string? ProjectId { get; set; }
+    [Parameter] public string? SelectedAgent { get; set; }
+    [Parameter] public bool AutoApprove { get; set; }
+    [Parameter] public EventCallback<string> ConversationOpened { get; set; }
+
+    private ElementReference dialog, speaker;
+    private DotNetObjectReference<ChatVoice>? reference;
+    private IJSObjectReference? module;
+    private ChatVoiceCall? call;
+    private string? callConversationId, previousConversationId;
+    private bool starting, connected, muted, disposed;
+    private string status = "Connecting…";
+    private string? error;
+
+    private async Task OpenAsync()
+    {
+        if (starting || call is not null || disposed) return;
+        starting = true;
+        connected = muted = false;
+        error = null;
+        status = "Connecting…";
+        try
+        {
+            module ??= await JS.InvokeAsync<IJSObjectReference>("import", "./" + Assets["chat-voice.js"]);
+            if (disposed) return;
+            reference ??= DotNetObjectReference.Create(this);
+            var current = new ChatVoiceCall(Codex, Chats, Worker, Log, ConversationId, ProjectId, SelectedAgent, AutoApprove);
+            call = current;
+            callConversationId = ConversationId;
+            current.ConversationOpened += id => _ = InvokeAsync(async () =>
+            {
+                if (call != current || disposed) return;
+                callConversationId = id;
+                await ConversationOpened.InvokeAsync(id);
+            });
+            current.Failed += reason => _ = InvokeAsync(() => ShowErrorAsync(current, reason));
+            await module.InvokeVoidAsync("start", dialog, speaker, reference);
+        }
+        catch (JSDisconnectedException) { await ReleaseCallAsync(); }
+        catch (JSException)
+        {
+            error ??= "Could not open the voice call.";
+            status = "Connection unavailable";
+            await ReleaseCallAsync();
+        }
+        finally { starting = false; }
+    }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        var changed = ConversationId != previousConversationId;
+        previousConversationId = ConversationId;
+        if (changed && call is not null && ConversationId != callConversationId)
+            await CloseAsync();
+    }
+
+    [JSInvokable]
+    public async Task<string?> ConnectVoiceAsync(string offer)
+    {
+        var current = call;
+        if (current is null) return null;
+        try { return await current.StartAsync(offer); }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or CodexRpcException
+            or TimeoutException or OperationCanceledException or IOException)
+        {
+            var message = ex is TimeoutException or OperationCanceledException ? "The voice connection timed out." : ex.Message;
+            await ShowErrorAsync(current, message);
+            return null;
+        }
+    }
+
+    [JSInvokable]
+    public Task VoiceReadyAsync()
+    {
+        if (call is not null)
+        {
+            connected = true;
+            status = "Connected";
+            StateHasChanged();
+        }
+        return Task.CompletedTask;
+    }
+
+    [JSInvokable]
+    public Task VoiceFailedAsync(string reason) => call is { } current ? ShowErrorAsync(current, reason) : Task.CompletedTask;
+
+    private async Task ShowErrorAsync(ChatVoiceCall current, string reason)
+    {
+        if (call != current || disposed) return;
+        error = reason;
+        status = "Connection unavailable";
+        if (!disposed) StateHasChanged();
+        await EndAsync();
+        if (!disposed) StateHasChanged();
+    }
+
+    private async Task ToggleMuteAsync()
+    {
+        if (module is null || !connected) return;
+        muted = !muted;
+        await module.InvokeVoidAsync("mute", dialog, muted);
+        status = muted ? "Microphone muted" : "Connected";
+    }
+
+    private async Task CloseAsync()
+    {
+        try { if (module is not null) await module.InvokeVoidAsync("close", dialog); }
+        catch (JSDisconnectedException) { }
+        finally { await EndAsync(); }
+    }
+
+    private async Task EndAsync()
+    {
+        connected = false;
+        try { if (module is not null) await module.InvokeVoidAsync("stop", dialog); }
+        catch (JSDisconnectedException) { }
+        finally { await ReleaseCallAsync(); }
+    }
+
+    private async Task ReleaseCallAsync()
+    {
+        var previous = call;
+        call = null;
+        if (previous is not null) await previous.DisposeAsync();
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        disposed = true;
+        await EndAsync();
+        reference?.Dispose();
+        if (module is not null)
+        {
+            try { await module.DisposeAsync(); }
+            catch (JSDisconnectedException) { }
+        }
+    }
+}

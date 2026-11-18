@@ -322,6 +322,50 @@ button.list-row:hover, a.list-row:hover { background: var(--subtle); border-radi
     color: var(--accent); background: var(--accent-soft); border: 1px solid var(--accent); border-radius: 99px;
     box-shadow: 0 0 7px color-mix(in srgb, var(--accent) 22%, transparent); }
 .mention-chip .ui-icon { width: 14px; height: 14px; }
+.voice-trigger { align-self: flex-end; width: 44px; height: 44px; padding: 0; flex: none; border-radius: 50%; color: var(--accent); }
+.voice-dialog { width: min(32rem, calc(100% - 2rem)); max-height: calc(100dvh - 2rem); max-width: none;
+    overflow: auto; margin: auto; padding: 0; border: 1px solid #5c4a76; border-radius: 26px;
+    color: #f5edff; background: radial-gradient(ellipse at 50% 42%, #362445, #14162e 72%); box-shadow: 0 24px 80px #100d2f90; }
+.voice-dialog::backdrop { background: #111024bd; backdrop-filter: blur(6px); }
+.voice-header, .voice-controls { display: flex; align-items: center; gap: .75rem; padding: 1rem 1.25rem; }
+.voice-header { justify-content: space-between; }
+.voice-controls { justify-content: center; flex-wrap: wrap; padding-bottom: 1.35rem; }
+.voice-dialog .icon-button, .voice-play { min-height: 44px; min-width: 44px;
+    color: #f5edff; background: #282441; border-color: #5c4a76; }
+.voice-play[hidden] { display: none; }
+.voice-dialog .icon-button:hover:enabled, .voice-play:hover:enabled { color: white; background: #3d3159; border-color: #b8a5e4; }
+.voice-dialog .voice-end { min-height: 44px; color: white; background: #a03058; border-color: #e578a0; }
+.voice-dialog .voice-end:hover:enabled { background: #b53d65; border-color: #ffa4b8; }
+.voice-center { display: grid; justify-items: center; gap: 1rem; padding: .5rem 1rem; text-align: center; }
+.voice-status { color: #e1d6f0; }
+.voice-error { color: #ffb7c7; max-width: 34ch; }
+.voice-orb { position: relative; isolation: isolate; display: grid; place-items: center;
+    width: clamp(9rem, 49vw, 15.5rem); aspect-ratio: 1; margin: .5rem 0 .8rem; }
+.voice-sphere { position: relative; width: 80%; aspect-ratio: 1; overflow: hidden; border-radius: 50%;
+    background: radial-gradient(circle at 33% 24%, #ffd6dc 0, #ec7b9f 14%, #a44c9c 35%, #59408b 57%, #222b62 79%, #181834 100%);
+    box-shadow: inset -9px -11px 22px #101229ad, inset 1px 1px 8px #ffb2cbad, 0 0 28px #a469d675; }
+.voice-grid { position: absolute; inset: -14%; opacity: .42; border-radius: inherit;
+    background: repeating-radial-gradient(ellipse 34% 51% at 50% 50%, transparent 0 12px, #fa9fd660 13px 14px, transparent 15px 25px),
+                repeating-linear-gradient(0deg, transparent 0 24px, #ffd8ee38 25px 26px);
+    transform: rotate(-20deg); mix-blend-mode: screen; }
+.voice-orbit { position: absolute; width: 98%; height: 43%; border-radius: 50%; border: 1px solid #d799f3a0;
+    transform: rotate(-31deg); box-shadow: 0 0 11px #e28bec50; pointer-events: none; }
+.voice-orbit:last-child { transform: rotate(28deg); border-color: #fe7c9f8c; }
+.voice-dialog[data-speaking=true] .voice-sphere { box-shadow: inset -9px -11px 22px #101229ad, inset 1px 1px 9px #ffc2d8,
+    0 0 34px #d07affd1, 0 0 80px #eb5a966e; }
+.voice-dialog[data-speaking=true] .voice-orbit { opacity: 1; border-color: #ffc0e3; }
+@media (prefers-reduced-motion: no-preference) {
+    .voice-sphere, .voice-orbit { transition: box-shadow .3s ease, border-color .3s ease; }
+    .voice-dialog[data-speaking=true] .voice-grid { animation: voice-rotate 4.8s linear infinite; }
+    .voice-dialog[data-speaking=true] .voice-orbit { animation: voice-orbit 5.6s linear infinite; }
+    .voice-dialog[data-speaking=true] .voice-orbit:last-child { animation-direction: reverse; }
+    @keyframes voice-rotate { to { transform: rotate(340deg); } }
+    @keyframes voice-orbit { from { transform: rotate(-31deg); } to { transform: rotate(329deg); } }
+}
+@media (max-height: 480px) {
+    .voice-orb { width: min(30dvh, 10rem); margin-block: .2rem; }
+    .voice-header, .voice-controls { padding-block: .65rem; }
+}
 .chat-shell .composer textarea { flex: 1; display: block; min-height: 44px; max-height: min(9rem, 25dvh);
     field-sizing: content; resize: none; padding: .65rem .8rem; }
 .chat-shell .send { flex: none; width: 44px; height: 44px; padding: 0; border-radius: 50%; }
