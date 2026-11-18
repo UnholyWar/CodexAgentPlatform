@@ -12,6 +12,7 @@ const fragmentSource = `
     precision highp float;
     varying vec2 position;
     uniform float angle;
+    uniform float breath;
 
     float hash(vec3 cell) {
         return fract(sin(dot(cell, vec3(127.1, 311.7, 74.7))) * 43758.5453);
@@ -44,14 +45,14 @@ const fragmentSource = `
         float detail = noise(material * 9.0);
         float flow = 5.1 * material.y + 3.5 * material.x - 3.0 * material.z + 4.2 * mist;
         float veil = .5 + .5 * sin(flow);
-        float filament = pow(veil, 13.0) * smoothstep(.21, .74, mist + .22 * detail);
+        float filament = pow(veil, mix(16.0, 9.0, breath)) * smoothstep(.21, .74, mist + .22 * detail);
         float hue = smoothstep(.15, .72, .50 - .36 * normal.x + .26 * normal.y + .20 * material.x);
         vec3 light = mix(vec3(.55, .39, .98), vec3(1.0, .34, .48), hue);
         vec3 color = mix(vec3(.041, .048, .14), vec3(.25, .14, .47), mist);
         // A brighter patch travels with the veil and disappears around the back.
         vec3 brightPatch = normalize(vec3(-.74, .31, .58));
         float patch = pow(max(0.0, dot(material, brightPatch)), 19.0);
-        color += light * (.36 * pow(veil, 3.0) + filament * (.51 + .24 * detail) + .30 * patch);
+        color += light * ((.30 + .16 * breath) * pow(veil, 3.0) + filament * (.51 + .24 * detail) + .36 * patch);
 
         vec3 key = normalize(vec3(-.48, .66, .62));
         color *= .59 + .47 * max(0.0, dot(normal, key));
@@ -92,23 +93,26 @@ export function animateOrb(canvas, signal) {
     gl.enableVertexAttribArray(corner);
     gl.vertexAttribPointer(corner, 2, gl.FLOAT, false, 0, 0);
     const angle = gl.getUniformLocation(program, "angle");
+    const breath = gl.getUniformLocation(program, "breath");
     const motion = matchMedia("(prefers-reduced-motion: reduce)");
-    const period = 16000;
-    const start = performance.now();
+    const fullTurn = 2 * Math.PI;
     let frame;
-    let lastDraw = -Infinity;
+    let lastDraw = performance.now();
+    let rotation = 0;
+    let breathing = 0;
 
     function draw(time) {
-        const turn = motion.matches ? 0 : ((time - start) % period) / period;
-        gl.uniform1f(angle, turn * 2 * Math.PI);
+        const elapsed = Math.min(100, Math.max(0, time - lastDraw));
+        rotation = (rotation + elapsed / (motion.matches ? 19000 : 12200)) % 1;
+        breathing = (breathing + elapsed / 5200) % 1;
+        gl.uniform1f(angle, rotation * fullTurn);
+        gl.uniform1f(breath, .5 - .5 * Math.cos(breathing * fullTurn));
         gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        lastDraw = time;
     }
 
     function animate(time) {
-        if (time - lastDraw >= 30) {
-            draw(time);
-            lastDraw = time;
-        }
+        if (time - lastDraw >= (motion.matches ? 48 : 30)) draw(time);
         frame = requestAnimationFrame(animate);
     }
 
@@ -119,17 +123,10 @@ export function animateOrb(canvas, signal) {
         draw(performance.now());
     }
 
-    function updateMotion() {
-        cancelAnimationFrame(frame);
-        if (motion.matches) draw(performance.now());
-        else frame = requestAnimationFrame(animate);
-    }
-
     const observer = new ResizeObserver(resize);
     const stop = () => {
         cancelAnimationFrame(frame);
         observer.disconnect();
-        motion.removeEventListener("change", updateMotion);
         canvas.removeEventListener("webglcontextlost", stop);
         signal.removeEventListener("abort", stop);
         gl.deleteBuffer(vertices);
@@ -140,8 +137,7 @@ export function animateOrb(canvas, signal) {
     resize();
     canvas.setAttribute("data-rendering", "");
     observer.observe(canvas);
-    motion.addEventListener("change", updateMotion);
     canvas.addEventListener("webglcontextlost", stop);
     signal.addEventListener("abort", stop, { once: true });
-    updateMotion();
+    frame = requestAnimationFrame(animate);
 }
