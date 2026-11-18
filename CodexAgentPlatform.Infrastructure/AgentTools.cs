@@ -5,6 +5,7 @@ using Microsoft.EntityFrameworkCore;
 namespace CodexAgentPlatform.Infrastructure;
 
 public sealed record Delegation(string AgentId, string Brief);
+public sealed record ApprovalReply(string Id, string Scope, string Status, DateTime ExpiresAtUtc);
 
 public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore memory, Operations operations, PlatformPaths paths)
 {
@@ -28,25 +29,38 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
         new("agent_list", "delegate", "List agents eligible for a follow-up on this project.", [], []),
         new("resource_search", "resources", "Find approved project resources by name.", [], ["query"]),
         new("resource_get", "resources", "Read metadata of an authorized resource.", ["id"], []),
-        new("git_workspace", "git", "Prepare or operate on the registered repository. Operations: prepare, status, diff, fetch, pull, branch, commit. The resulting worktree is project/.", ["id", "operation"], ["argument"]),
+        new("git_workspace", "git", "Operate on project/: prepare, status, diff, fetch, pull, branch, commit. For more live diff/status output pass nextOffset as offset.", ["id", "operation"], ["argument", "offset"]),
         new("git_request_push", "git", "Request explicit owner approval for a non-force push of the current commit.", ["id"], ["destinationBranch"]),
-        new("ssh_inspect", "ssh", "Run one fixed SSH inspection: test, health, docker-status, docker-services, linux-services, docker-logs, sftp-read (configured file).", ["id", "operation"], []),
+        new("ssh_inspect", "ssh", "Inspect test, health, docker-status, docker-services, linux-services, docker-logs or sftp-read. For more live command output pass nextOffset as offset.", ["id", "operation"], ["offset"]),
         new("ssh_request_operation", "ssh", "Request explicit approval for restart-docker on an SSH server, or deploy/rollback on a registered Swarm target. Deploy requires an image digest.", ["id", "operation"], ["image"])
     ];
 
-    public static IEnumerable<object> Describe(Agent agent) => Registry
-        .Where(tool => tool.Permission.Length == 0 || ToolAccess.Has(agent, tool.Permission))
-        .Select(tool => new
+    public static IEnumerable<object> Describe(Agent agent)
+    {
+        var deferred = new List<object>();
+        foreach (var tool in Registry.Where(tool => tool.Permission.Length == 0 || ToolAccess.Has(agent, tool.Permission)))
         {
-            type = "function", name = tool.Name, description = tool.Description, deferLoading = false,
-            inputSchema = new
-            {
-                type = "object",
-                properties = tool.Required.Concat(tool.Optional).ToDictionary(x => x, _ => new { type = "string" }),
-                required = tool.Required,
-                additionalProperties = false
-            }
-        });
+            bool onDemand = tool.Permission is "git" or "ssh" or "resources" or "delegate" ||
+                tool.Name is "memory_archive" or "memory_consolidate" or "memory_update" or "memory_create";
+            var spec = DescribeFunction(tool, onDemand);
+            if (onDemand) deferred.Add(spec);
+            else yield return spec;
+        }
+        if (deferred.Count > 0)
+            yield return new { type = "namespace", name = "platform", description = "Platform tools for managing notes, project resources, Git, SSH, and delegation.", tools = deferred };
+    }
+
+    private static object DescribeFunction(Tool tool, bool deferLoading) => new
+    {
+        type = "function", name = tool.Name, description = tool.Description, deferLoading,
+        inputSchema = new
+        {
+            type = "object",
+            properties = tool.Required.Concat(tool.Optional).ToDictionary(x => x, x => new { type = x == "offset" ? "integer" : "string" }),
+            required = tool.Required,
+            additionalProperties = false
+        }
+    };
 
     public async Task<object?> RunAsync(string name, JsonElement args, ChatRun run, CancellationToken ct)
     {
@@ -112,24 +126,24 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
                 {
                     var allowedProjects = ToolAccess.Split(agent.AllowedProjects);
                     visible = await db.Resources.AsNoTracking().Where(x => x.Id == id &&
-                        x.ProjectId != null && Enumerable.Contains(allowedProjects, x.ProjectId)).ToListAsync(ct);
+                        (x.ProjectId == null ? x.IsGlobal : Enumerable.Contains(allowedProjects, x.ProjectId))).ToListAsync(ct);
                 }
-                return visible.Select(x => new { x.Id, x.Name, Kind = x.Kind.ToString(), x.ProjectId, x.Address, x.Production }).ToArray();
+                return visible.Select(x => new { x.Id, x.Name, Kind = x.Kind.ToString(), x.ProjectId, x.IsGlobal, x.Address, x.Production }).ToArray();
             case "git_workspace":
                 if (!ToolAccess.Has(agent, "workspace")) throw new UnauthorizedAccessException("Çalışma alanı izni gerekli.");
                 await RequireResourceProjectAsync(db, id!, run, ct);
                 return await operations.GitAsync(agent, id!, run.Workspace!, args.String("operation")!, args.String("argument"), ct,
-                    run.ConversationId, run.WorkId);
+                    run.ConversationId, run.WorkId, OutputOffset(args));
             case "git_request_push":
             case "ssh_request_operation":
                 await RequireResourceProjectAsync(db, id!, run, ct);
                 var approval = await operations.RequestAsync(agent, run.ConversationId, id!,
                     name == "git_request_push" ? "GitPush" : args.String("operation") == "restart-docker" ? "SshChange" : "SshRelease",
                     args.String("operation") ?? "push", run.Workspace, args.String("destinationBranch"), ct, args.String("image"), run.WorkId);
-                return new { approval.Id, approval.Scope, approval.Status, approval.ExpiresAtUtc };
+                return new ApprovalReply(approval.Id, approval.Scope, approval.Status, approval.ExpiresAtUtc);
             case "ssh_inspect":
                 await RequireResourceProjectAsync(db, id!, run, ct);
-                return await operations.InspectSshAsync(agent, id!, args.String("operation")!, ct, run.ConversationId, run.WorkId);
+                return await operations.InspectSshAsync(agent, id!, args.String("operation")!, ct, run.ConversationId, run.WorkId, OutputOffset(args));
             case "agent_list":
                 var agents = await db.Agents.AsNoTracking().Where(x => !x.Archived && x.Id != agent.Id).ToListAsync(ct);
                 return agents.Where(a => ToolAccess.AllowsProject(a, run.ProjectId)).Select(a => new { a.Id, a.Name, a.Title }).ToArray();
@@ -142,6 +156,14 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
             default:
                 return await WorkAsync(db, name, args, run, ct);
         }
+    }
+
+    private static int OutputOffset(JsonElement args)
+    {
+        var value = args.Get("offset");
+        if (value.ValueKind == JsonValueKind.Undefined) return 0;
+        if (value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var offset) && offset >= 0) return offset;
+        throw new ArgumentException("Geçerli bir çıktı konumu gerekli.");
     }
 
     private async Task<object?> WorkAsync(PlatformDb db, string operation, JsonElement args, ChatRun run, CancellationToken ct)
@@ -238,7 +260,7 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
 
     private static async Task RequireResourceProjectAsync(PlatformDb db, string id, ChatRun run, CancellationToken ct)
     {
-        if (run.ProjectId is null || !await db.Resources.AnyAsync(x => x.Id == id && x.ProjectId == run.ProjectId, ct))
+        if (!await db.Resources.AnyAsync(x => x.Id == id && (x.ProjectId == null ? x.IsGlobal : x.ProjectId == run.ProjectId), ct))
             throw new UnauthorizedAccessException("Bu kaynağın projesini sohbet kutusundan seçin.");
     }
 }

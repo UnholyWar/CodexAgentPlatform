@@ -17,7 +17,7 @@ public sealed class PlatformTests
         await using var fixture = await TestStorage.CreateAsync();
         await using var db = fixture.CreateDbContext();
         Assert.Equal(4, await db.Agents.CountAsync());
-        Assert.Equal(2, (await db.Database.GetAppliedMigrationsAsync()).Count());
+        Assert.Contains("20261117223000_ChatAutoApproval", await db.Database.GetAppliedMigrationsAsync());
         Assert.Empty(await db.Database.GetPendingMigrationsAsync());
         Assert.Matches("^[0-9A-F]{64}$", (await File.ReadAllTextAsync(fixture.Paths.BootstrapFile)).Trim());
 
@@ -132,6 +132,61 @@ public sealed class PlatformTests
         await db.SaveChangesAsync();
         await Assert.ThrowsAsync<InvalidOperationException>(() => operations.InspectSshAsync(devops, resource.Id, "anything", default));
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => operations.RequestAsync(devops, "c", resource.Id, "GitPush", "push", null, null, default));
+    }
+
+    [Fact]
+    public async Task GlobalResourcesWorkWithoutProjectAndKeepToolPermissions()
+    {
+        await using var fixture = await TestStorage.CreateAsync();
+        await using var db = fixture.CreateDbContext();
+        var ops = new Operations(fixture, fixture.Paths, new Vault(fixture.Paths, null));
+        var tools = new AgentTools(fixture, new MemoryStore(fixture, fixture.Paths), ops, fixture.Paths);
+        var global = new Resource { IsGlobal = true, Kind = ResourceKind.SshServer, Name = "Ortak sunucu" };
+        var project = new Resource { ProjectId = "private", Kind = ResourceKind.SshServer, Name = "Özel sunucu" };
+        db.Resources.AddRange(global, project, new Resource { Name = "Eski atanmamış kaynak" });
+        await db.SaveChangesAsync();
+        var devops = await db.Agents.SingleAsync(a => a.Id == "devops");
+        Assert.Equal(global.Id, Assert.Single(await ops.VisibleResourcesAsync(devops, null, default)).Id);
+        var run = new ChatRun { AgentId = devops.Id, ConversationId = "chat" };
+        var args = System.Text.Json.JsonSerializer.SerializeToElement(new { id = global.Id, operation = "restart-docker" });
+        var approval = Assert.IsType<ApprovalReply>(await tools.RunAsync("ssh_request_operation", args, run, default));
+        Assert.Equal("Pending", approval.Status);
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => tools.RunAsync("ssh_request_operation",
+            System.Text.Json.JsonSerializer.SerializeToElement(new { id = project.Id, operation = "restart-docker" }), run, default));
+        run.AgentId = "developer";
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => tools.RunAsync("ssh_request_operation", args, run, default));
+    }
+
+    [Fact]
+    public async Task ChatSwitchOnlyApprovesEligibleRequestsAndRevokesUnclaimedDecisions()
+    {
+        await using var fixture = await TestStorage.CreateAsync();
+        await using var db = fixture.CreateDbContext();
+        var ops = new Operations(fixture, fixture.Paths, new Vault(fixture.Paths, null));
+        var agent = await db.Agents.SingleAsync(a => a.Id == "devops");
+        agent.AllowedProjects = "p";
+        var host = new Resource { Name = "Dev", Kind = ResourceKind.SshServer, ProjectId = "p", Address = "test.invalid" };
+        var chat = new Conversation();
+        db.AddRange(host, chat);
+        await db.SaveChangesAsync();
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => ops.SetAutoApprovalAsync(chat.Id, true, "other", default));
+        await ops.SetAutoApprovalAsync(chat.Id, true, PlatformUser.OwnerId, default);
+        Task<Approval> Request() => ops.RequestAsync(agent, chat.Id, host.Id, "SshChange", "restart-docker", null, null, default);
+        var first = await Request();
+        Assert.Equal("Pending", first.Status);
+        await ops.DecideAsync(first.Id, true, PlatformUser.OwnerId, default);
+        // Record the successful prior operation without connecting to a server.
+        await db.Approvals.Where(a => a.Id == first.Id).ExecuteUpdateAsync(s => s.SetProperty(a => a.Status, "Completed"));
+        var repeated = await Request();
+        Assert.Equal("Approved", repeated.Status);
+        Assert.Equal(Operations.AutomaticDecision, repeated.DecidedBy);
+        await ops.SetAutoApprovalAsync(chat.Id, false, PlatformUser.OwnerId, default);
+        Assert.Equal("Pending", (await db.Approvals.AsNoTracking().SingleAsync(a => a.Id == repeated.Id)).Status);
+        await ops.SetAutoApprovalAsync(chat.Id, true, PlatformUser.OwnerId, default);
+        Assert.Equal("Approved", (await db.Approvals.AsNoTracking().SingleAsync(a => a.Id == repeated.Id)).Status);
+        host.Production = true;
+        await db.SaveChangesAsync();
+        Assert.Equal("Pending", (await Request()).Status);
     }
 
     [Fact]

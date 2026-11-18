@@ -4,6 +4,8 @@
 @implements IDisposable
 @inject ChatStore Chats
 @inject ChatUpdates Updates
+@inject Operations Operations
+@inject AuthenticationStateProvider Authentication
 @inject ChatWorker Worker
 @inject IDbContextFactory<PlatformDb> Dbs
 @inject NavigationManager Navigation
@@ -12,26 +14,35 @@
 <PageTitle>Sohbet · Codex Agent Platform</PageTitle>
 <section class="chat-shell">
     <header class="page-bar">
-        <div class="page-heading"><h1>@Title</h1></div>
+        <button class="icon-button chat-menu" type="button" popovertarget="mobile-menu" aria-label="Menüyü aç"><Icon Name="menu" /></button>
+        <div class="page-heading"><Icon Name="chat" /><div class="chat-title"><h1>@Title</h1>
+            <small>@(agents.Find(a => a.Id == (selectedAgent ?? snapshot.Run?.AgentId))?.Name ?? "Ajan · Otomatik")@(AutoApprove ? " · Otomatik onay açık" : "")</small></div></div>
         <div class="actions">
-            @if (snapshot.Run is { } run && ChatStore.Active.Contains(run.Status))
-            {
-                <button class="button" @onclick="PauseAsync">Durdur</button>
-            }
-            @if (Id is not null) { <a class="button" href="/">＋ Yeni sohbet</a> }
+            <button type="button" class="icon-button settings-launch" aria-label="Sohbet ayarları" title="Sohbet ayarları" aria-haspopup="dialog" @onclick="OpenSettingsAsync"><Icon Name="settings" /></button>
+            @if (Id is not null) { <a class="icon-button" href="/" title="Yeni sohbet" aria-label="Yeni sohbet"><Icon Name="plus" /></a> }
         </div>
     </header>
-    <div class="chat-scroll" id="chat-scroll">
+    <div class="chat-scroll" id="chat-scroll" @key="Id">
         @if (snapshot.Messages.Count == 0)
         {
             <div class="empty-chat">
-                <div class="empty-mark" aria-hidden="true">⌘</div>
-                <h2>Bugün ne üzerinde çalışıyoruz?</h2>
-                <p>Bir soru sorun veya üzerinde çalışılacak işi anlatın.</p>
+                <div class="welcome-panel">
+                    <div class="welcome-copy">
+                        <h2>Bugün ne üzerinde çalışıyoruz?</h2>
+                        <p>Bir soru sorun veya üzerinde çalışılacak işi anlatın.</p>
+                    </div>
+                    <img class="orbit-art" src="@Assets["orbit.svg"]" alt="" />
+                </div>
                 <div class="prompt-row">
-                    <button @onclick='() => draft = "Developer, Python ile küçük bir hesap makinesi yaz ve test et."'>Kod yaz</button>
-                    <button @onclick='() => draft = "Architect, dün hangi konular üzerinde çalıştık?"'>Geçmişi hatırla</button>
-                    <button @onclick='() => draft = "QA, bu proje için bir regresyon test planı hazırla."'>Test planla</button>
+                    <button @onclick='() => ChoosePromptAsync("Developer, Python ile küçük bir hesap makinesi yaz ve test et.")'>
+                        <span class="prompt-icon"><Icon Name="code" /></span><span><strong>Kod yaz</strong><small>Python ile hesap makinesi</small></span><Icon Name="arrow" />
+                    </button>
+                    <button @onclick='() => ChoosePromptAsync("Architect, dün hangi konular üzerinde çalıştık?")'>
+                        <span class="prompt-icon"><Icon Name="memory" /></span><span><strong>Geçmişi hatırla</strong><small>Dünün çalışmalarını bul</small></span><Icon Name="arrow" />
+                    </button>
+                    <button @onclick='() => ChoosePromptAsync("QA, bu proje için bir regresyon test planı hazırla.")'>
+                        <span class="prompt-icon"><Icon Name="checklist" /></span><span><strong>Test planla</strong><small>Regresyon planı hazırla</small></span><Icon Name="arrow" />
+                    </button>
                 </div>
             </div>
         }
@@ -45,7 +56,7 @@
                 @foreach (var message in snapshot.Messages)
                 {
                     <article class="message @message.Role" @key="message.Id">
-                        <div class="avatar" aria-hidden="true">@(message.Role == "user" ? "S" : "C")</div>
+                        <div class="avatar" aria-hidden="true"><Icon Name="@(message.Role == "user" ? "person" : "agent")" /></div>
                         <div class="message-main">
                             <div class="message-meta">
                                 <strong>@(message.Role == "user" ? "Siz" : AgentName(message.AgentId))</strong>
@@ -59,7 +70,7 @@
                                 }
                             }
                             else if (message.Role == "user") { <div class="user-text">@message.Text</div> }
-                            else { <MarkdownBody Text="@message.Text" /> }
+                            else { <MarkdownBody Text="@message.Text" CompactCode="true" /> }
                         </div>
                     </article>
                 }
@@ -71,25 +82,13 @@
                 {
                     <p class="notice" role="status">@workspaceNotice</p>
                 }
-                @foreach (var approval in snapshot.Approvals)
+                @if (snapshot.Approvals.Count(a => a.Status == "Pending" && a.ExpiresAtUtc > DateTime.UtcNow) is > 0 and var pending)
                 {
-                    <div class="notice"><span>Onay · @approval.Status</span><strong>@approval.Scope</strong>
-                        <a href="/approvals">Onayları aç</a>
-                        @if (approval.Result is { } result) { <pre>@result</pre> }
-                    </div>
+                    <a class="approval-callout" href="/approvals"><Icon Name="approve" /><strong>@pending işlem onay bekliyor</strong><Icon Name="chevron" /></a>
                 }
-                @if (snapshot.Events.Count > 0)
+                @if (snapshot.Events.Count > 0 || snapshot.Approvals.Count > 0)
                 {
-                    <details class="event-panel">
-                        <summary>Çalışma olayları <span>@snapshot.Events.Count</span></summary>
-                        @foreach (var entry in snapshot.Events)
-                        {
-                            <div class="event-line"><span>@LocalTime(entry.EventOccurredAtUtc)</span><strong>@entry.Kind</strong>
-                                @if (entry.Detail.Length > 0) { <pre>@entry.Detail</pre> }
-                                @if (entry.Artifact is { } href && href.EndsWith(".txt")) { <a href="/artifacts/@href">Tam çıktıyı indir</a> }
-                            </div>
-                        }
-                    </details>
+                    <ChatActivity @key="Id" Events="snapshot.Events" Approvals="snapshot.Approvals" Zone="zone" />
                 }
             </div>
         }
@@ -97,25 +96,39 @@
     <footer class="composer-zone">
         @if (issue is not null) { <p class="notice error" role="alert">@issue</p> }
         <form class="composer" @onsubmit="SendAsync" @onsubmit:preventDefault>
-            <textarea aria-label="Mesajınız" placeholder="Ajanlara bir mesaj yazın…" @bind="draft" @bind:event="oninput" maxlength="16000" rows="2" data-send-on-enter="true" enterkeyhint="send"></textarea>
-            <div class="composer-bar">
-                <div class="composer-selects">
-                    <select aria-label="Ajan" @bind="selectedAgent" disabled="@IsActive">
-                        <option value="">Ajan · Otomatik</option>
-                        @foreach (var a in agents.Where(a => !a.Archived)) { <option value="@a.Id">@a.Name</option> }
-                    </select>
-                    @if (projects.Count > 0)
-                    {
-                        <select aria-label="Proje" @bind="projectId" disabled="@IsActive">
-                            <option value="">Proje · Otomatik</option>
-                            @foreach (var p in projects) { <option value="@p.Id">@p.Name</option> }
-                        </select>
-                    }
-                </div>
-                <button type="submit" class="primary send" disabled="@((IsActive && !ChatStore.IsPauseRequest(draft)) || sending || string.IsNullOrWhiteSpace(draft))">Gönder <span aria-hidden="true">↑</span></button>
-            </div>
+            <textarea @ref="composerInput" aria-label="Mesajınız" placeholder="Bir mesaj yazın…" @bind="draft" @bind:event="oninput" maxlength="16000" rows="1" data-send-on-enter="true" enterkeyhint="enter"></textarea>
+            @if (IsActive && !ChatStore.IsPauseRequest(draft))
+            {
+                <button type="button" class="primary send" aria-label="Çalışmayı durdur" title="Çalışmayı durdur" @onclick="PauseAsync"><Icon Name="pause" /></button>
+            }
+            else
+            {
+                <button type="submit" class="primary send" aria-label="Gönder" disabled="@(sending || string.IsNullOrWhiteSpace(draft))"><Icon Name="up" /></button>
+            }
         </form>
     </footer>
+    <dialog class="chat-sheet settings-sheet" @ref="settingsSheet" aria-labelledby="chat-settings-title" @key="@($"settings-{Id}")">
+        <header class="sheet-head"><h2 id="chat-settings-title">Sohbet ayarları</h2>
+            <form method="dialog"><button class="icon-button" aria-label="Ayarları kapat" autofocus><Icon Name="close" /></button></form>
+        </header>
+        <div class="sheet-body fields">
+            <label>Ajan<select @bind="selectedAgent" disabled="@IsActive"><option value="">Otomatik</option>
+                @foreach (var agent in agents.Where(a => !a.Archived)) { <option value="@agent.Id">@agent.Name</option> }
+            </select></label>
+            @if (projects.Count > 0)
+            {
+                <label>Proje<select @bind="projectId" disabled="@IsActive"><option value="">Otomatik</option>
+                    @foreach (var project in projects) { <option value="@project.Id">@project.Name</option> }
+                </select></label>
+            }
+            <button type="button" class="switch-row" role="switch" aria-label="Otomatik onay" aria-describedby="approval-help"
+                    aria-checked="@(AutoApprove ? "true" : "false")" disabled="@savingApproval" @onclick="ToggleApprovalAsync">
+                <span><Icon Name="approve" /><strong>Otomatik onay</strong></span><span class="switch-track" aria-hidden="true"></span>
+            </button>
+            <p id="approval-help" class="muted">Bu sohbette ajan kendi geliştirme dalına gönderebilir. Daha önce elle onaylayıp tamamladığınız aynı Docker yeniden başlatma ve dağıtım işlemleri de otomatik onaylanır. Üretim, global kaynaklar ve geri almalar için elle onay gerekir.</p>
+            @if (approvalError is not null) { <p class="notice error" role="alert">@approvalError</p> }
+        </div>
+    </dialog>
 </section>
 
 @code {
@@ -126,9 +139,35 @@
     private TimeZoneInfo zone = TimeZoneInfo.Utc;
     private string? title, loaded, issue, selectedAgent, projectId;
     private string draft = "";
+    private ElementReference composerInput, settingsSheet;
+    private bool draftAutoApprove, savingApproval;
+    private string? approvalError;
+    private bool AutoApprove => Id is null ? draftAutoApprove : snapshot.AutoApprove;
+
+    private async Task OpenSettingsAsync() => await JS.InvokeVoidAsync("platformChat.openDialog", settingsSheet);
+
+    private async Task ToggleApprovalAsync()
+    {
+        if (savingApproval) return;
+        approvalError = null;
+        if (Id is not { } chat) { draftAutoApprove = !draftAutoApprove; return; }
+        savingApproval = true;
+        try
+        {
+            var user = (await Authentication.GetAuthenticationStateAsync()).User;
+            await Operations.SetAutoApprovalAsync(chat, !snapshot.AutoApprove,
+                user.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? "", default);
+            Updates.Publish(chat);
+            await RefreshAsync();
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or DbUpdateException or UnauthorizedAccessException)
+        { approvalError = "Otomatik onay ayarı kaydedilemedi."; }
+        finally { savingApproval = false; }
+    }
     private int limit = 60;
     private bool sending, disposed, scroll;
     private int refreshQueued;
+    private int refreshVersion;
     private bool IsActive => snapshot.Run is { } run && ChatStore.Active.Contains(run.Status);
     private string? WorkspaceNotice => snapshot.Run is { } run
         ? snapshot.Events.FirstOrDefault(entry => entry.Kind == "WorkspaceUnavailable" && entry.AgentId == run.AgentId &&
@@ -136,9 +175,16 @@
         : null;
     private string Title => title ?? "Sohbet";
 
+    private async Task ChoosePromptAsync(string text)
+    {
+        draft = text;
+        await composerInput.FocusAsync(preventScroll: true);
+    }
+
     protected override async Task OnInitializedAsync()
     {
         Updates.Changed += OnChange;
+        Updates.AnswerChanged += OnAnswer;
         await using var db = await Dbs.CreateDbContextAsync();
         agents = await db.Agents.OrderBy(x => x.Name).ToListAsync();
         projects = await db.Projects.OrderBy(x => x.Name).ToListAsync();
@@ -150,6 +196,8 @@
         if (loaded != Id)
         {
             loaded = Id;
+            draftAutoApprove = false;
+            approvalError = null;
             issue = null;
             limit = 60;
             if (Id is null) { title = null; snapshot = new([], [], null, []); return; }
@@ -173,8 +221,13 @@
     private async Task RefreshAsync()
     {
         if (Id is not { } id) return;
+        var version = ++refreshVersion;
         var result = await Chats.ReadAsync(id, limit, default);
-        if (!disposed && Id == id) snapshot = result;
+        if (!disposed && Id == id && version == refreshVersion)
+        {
+            Updates.ApplyAnswer(id, result);
+            snapshot = result;
+        }
     }
 
     private async Task SendAsync()
@@ -194,7 +247,7 @@
         issue = null;
         try
         {
-            var id = await Chats.SendAsync(Id, draft, selectedAgent, projectId, default);
+            var id = await Chats.SendAsync(Id, draft, selectedAgent, projectId, default, draftAutoApprove);
             draft = "";
             scroll = true;
             if (Id != id) Navigation.NavigateTo($"/chat/{id}");
@@ -216,6 +269,18 @@
         await RefreshAsync();
     }
 
+    private void OnAnswer(string id)
+    {
+        if (disposed || id != Id) return;
+        _ = InvokeAsync(() =>
+        {
+            if (disposed || id != Id) return;
+            Updates.ApplyAnswer(id, snapshot);
+            scroll = true;
+            StateHasChanged();
+        });
+    }
+
     private void OnChange(string id)
     {
         if (disposed || Id is null || (id != Id && id != "") || Interlocked.Exchange(ref refreshQueued, 1) != 0) return;
@@ -231,5 +296,5 @@
 
     private string AgentName(string? id) => agents.Find(a => a.Id == id)?.Name ?? "Codex";
     private string LocalTime(DateTime time) => TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(time, DateTimeKind.Utc), zone).ToString("dd.MM · HH:mm");
-    public void Dispose() { disposed = true; Updates.Changed -= OnChange; }
+    public void Dispose() { disposed = true; Updates.Changed -= OnChange; Updates.AnswerChanged -= OnAnswer; }
 }

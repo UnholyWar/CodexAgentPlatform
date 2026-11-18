@@ -28,6 +28,7 @@ public sealed class Agent
 
 public sealed class Conversation
 {
+    public bool AutoApprove { get; set; }
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public string Title { get; set; } = "";
     public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
@@ -138,6 +139,7 @@ public sealed class MemoryRevision
 
 public sealed class Resource
 {
+    public bool IsGlobal { get; set; }
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public string? ProjectId { get; set; }
     public string Name { get; set; } = "";
@@ -161,6 +163,7 @@ public sealed class Project
 
 public sealed class Approval
 {
+    public bool AutoEligible { get; set; }
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public string AgentId { get; set; } = "";
     public string? ConversationId { get; set; }

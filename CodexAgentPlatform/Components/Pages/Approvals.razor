@@ -15,7 +15,8 @@
         <article class="card fields">
             <div class="section-head"><h2>@row.Kind</h2><span class="status">@row.Status</span></div>
             <p class="scope">@row.Scope</p>
-            @if (row.Result is { } result) { <pre>@result</pre> }
+            @if (row.DecidedBy == CodexAgentPlatform.Infrastructure.Operations.AutomaticDecision) { <small>Bu sohbette otomatik onaylandı.</small> }
+            @if (row.Result is { Length: > 0 } result) { <details class="code-fold"><summary>İşlem çıktısı</summary><pre>@result</pre></details> }
             @if (row.Status == "Pending" && row.ExpiresAtUtc > DateTime.UtcNow)
             {
                 <small class="muted">Son onay zamanı @row.ExpiresAtUtc.ToString("HH:mm:ss") UTC</small>

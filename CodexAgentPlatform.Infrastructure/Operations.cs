@@ -15,6 +15,29 @@ public sealed record OperationTarget(string ResourceId, string Operation, string
 
 public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, PlatformPaths paths, Vault vault)
 {
+    public const string AutomaticDecision = "owner:auto";
+
+    public async Task SetAutoApprovalAsync(string conversation, bool enabled, string ownerId, CancellationToken ct)
+    {
+        if (ownerId != PlatformUser.OwnerId) throw new UnauthorizedAccessException();
+        await using var db = await dbs.CreateDbContextAsync(ct);
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        var count = await db.Conversations.Where(x => x.Id == conversation)
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.AutoApprove, enabled), ct);
+        if (count == 0) throw new InvalidOperationException("Sohbet bulunamadı.");
+        var now = DateTime.UtcNow;
+        var requests = db.Approvals.Where(x => x.ConversationId == conversation && x.AutoEligible && x.ExpiresAtUtc > now);
+        if (enabled)
+            await requests.Where(x => x.Status == "Pending").ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, "Approved")
+                .SetProperty(x => x.DecidedBy, AutomaticDecision), ct);
+        else
+            await requests.Where(x => x.Status == "Approved" && x.DecidedBy == AutomaticDecision)
+                .ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, "Pending").SetProperty(x => x.DecidedBy, (string?)null), ct);
+        db.Events.Add(new Activity { ConversationId = conversation, Kind = enabled ? "AutoApprovalEnabled" : "AutoApprovalDisabled" });
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+    }
+
     private static readonly Dictionary<string, string> SshCommands = new(StringComparer.Ordinal)
     {
         ["health"] = "uptime && df -hP && free -m",
@@ -30,25 +53,27 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         if (!ToolAccess.Has(agent, "resources")) return [];
         await using var db = await dbs.CreateDbContextAsync(ct);
         var projects = ToolAccess.Split(agent.AllowedProjects);
-        var resources = db.Resources.AsNoTracking().Where(x => x.ProjectId != null && Enumerable.Contains(projects, x.ProjectId));
+        var resources = db.Resources.AsNoTracking().Where(x => x.ProjectId == null ? x.IsGlobal : Enumerable.Contains(projects, x.ProjectId));
         if (!string.IsNullOrWhiteSpace(query)) resources = resources.Where(x => x.Name.Contains(query));
         return await resources.OrderBy(x => x.Name).Take(25).ToListAsync(ct);
     }
 
     public async Task<object> InspectSshAsync(Agent agent, string resourceId, string command, CancellationToken ct,
-        string? conversationId = null, string? workId = null)
+        string? conversationId = null, string? workId = null, int offset = 0)
     {
         var resource = await ResolveAsync(agent, resourceId, ResourceKind.SshServer, "ssh", ct);
         if (command is "restart-docker" || (command is not ("test" or "sftp-read") && !SshCommands.ContainsKey(command)))
             throw new InvalidOperationException("Bu SSH işlemi doğrudan çalıştırılamaz.");
-        var result = await SshAsync(resource, command, ct);
+        var result = await SshAsync(resource, command, ct, offset: offset);
         await AuditAsync(agent.Id, resource.ProjectId, conversationId, workId, "SSHExecuted", $"{resource.Name} · {command}", ct);
         return result;
     }
 
     public async Task<object> GitAsync(Agent agent, string resourceId, string workspaceId,
-        string operation, string? argument, CancellationToken ct, string? conversationId = null, string? workId = null)
+        string operation, string? argument, CancellationToken ct, string? conversationId = null, string? workId = null, int offset = 0)
     {
+        if (offset != 0 && operation is not ("status" or "diff"))
+            throw new ArgumentException("Sayfalama yalnızca status ve diff için kullanılabilir.");
         var resource = await ResolveAsync(agent, resourceId, ResourceKind.GitRepository, "git", ct);
         var root = paths.Workspace(workspaceId);
         var repo = Path.Combine(root, "project");
@@ -57,15 +82,18 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
             if (Directory.Exists(repo))
                 throw new InvalidOperationException("Bu çalışma alanında zaten bir repository var.");
             await using var db = await dbs.CreateDbContextAsync(ct);
-            var branch = await db.Projects.Where(x => x.Id == resource.ProjectId).Select(x => x.DefaultBranch).SingleAsync(ct);
-            ValidateBranch(branch);
+            var branch = resource.IsGlobal ? null : await db.Projects.Where(x => x.Id == resource.ProjectId).Select(x => x.DefaultBranch).SingleAsync(ct);
+            if (branch is not null) ValidateBranch(branch);
             var cacheRoot = Path.Combine(paths.Workspaces, ".git-cache");
             Directory.CreateDirectory(cacheRoot);
             PlatformPaths.CheckLinks(cacheRoot);
             var clone = Path.Combine(cacheRoot, Guid.NewGuid().ToString("N"));
             var url = GitAddress(resource);
-            await RunGitAsync(root, ["clone", "--no-checkout", "--single-branch", "--branch", branch, "--", url, clone], resource, ct);
-            await RunGitAsync(clone, ["worktree", "add", "-b", $"agent/{workspaceId}", "--", repo, $"refs/remotes/origin/{branch}"], null, ct);
+            var cloneArgs = new List<string> { "clone", "--no-checkout", "--single-branch" };
+            if (branch is not null) cloneArgs.AddRange(["--branch", branch]);
+            cloneArgs.AddRange(["--", url, clone]);
+            await RunGitAsync(root, cloneArgs.ToArray(), resource, ct);
+            await RunGitAsync(clone, ["worktree", "add", "-b", $"agent/{workspaceId}", "--", repo, branch is null ? "HEAD" : $"refs/remotes/origin/{branch}"], null, ct);
             await File.WriteAllTextAsync(Path.Combine(clone, ".git", "platform-resource"), resource.Id, ct);
             await AuditAsync(agent.Id, resource.ProjectId, conversationId, workId, "GitWorkspacePrepared", $"{resource.Name} · {branch}", ct);
             return new { path = "project", branch = $"agent/{workspaceId}" };
@@ -84,7 +112,8 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         };
         await AuditAsync(agent.Id, resource.ProjectId, conversationId, workId, operation == "commit" ? "GitCommitted" : "GitOperation",
             $"{resource.Name} · {operation}", ct);
-        return new { output = TextLimits.Clip(output, 16_000) };
+        if (operation is "diff" or "status") return ToolOutput.Page(output, offset, 16_000);
+        return new { output = TextLimits.Clip(output, 3000), truncated = output.Length > 3000 };
     }
 
     public async Task<Approval> RequestAsync(Agent agent, string conversationId, string resourceId, string kind,
@@ -93,6 +122,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         OperationTarget target;
         string scope;
         Resource resource;
+        var globalServer = false;
         if (kind == "GitPush")
         {
             resource = await ResolveAsync(agent, resourceId, ResourceKind.GitRepository, "git", ct);
@@ -108,6 +138,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         {
             var deployment = await ReleaseAsync(agent, resourceId, operation, image, ct);
             resource = deployment.Target;
+            globalServer = deployment.Server.IsGlobal;
             target = new(resourceId, operation, ResourceBinding: deployment.Binding, Image: image);
             scope = $"{deployment.Target.Name} · {deployment.Server.Address}:{deployment.Server.Port} · {deployment.Command}";
             if (deployment.Server.Production) resource.Production = true;
@@ -122,17 +153,38 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         }
 
         await using var db = await dbs.CreateDbContextAsync(ct);
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
         var payload = JsonSerializer.Serialize(target with { WorkId = workId });
         var now = DateTime.UtcNow;
-        var existing = await db.Approvals.FirstOrDefaultAsync(x => x.Status == "Pending" && x.AgentId == agent.Id &&
+        var existing = await db.Approvals.FirstOrDefaultAsync(x => (x.Status == "Pending" || x.Status == "Approved" || x.Status == "Executing") && x.AgentId == agent.Id &&
             x.ConversationId == conversationId && x.Payload == payload && x.ExpiresAtUtc > now, ct);
         if (existing is not null) return existing;
         var approval = new Approval { AgentId = agent.Id, ConversationId = conversationId, Kind = kind,
             Scope = resource.Production ? $"ÜRETİM · {scope}" : scope, Payload = payload };
+        if (!resource.Production && !resource.IsGlobal && !globalServer)
+        {
+            if (kind == "GitPush")
+                approval.AutoEligible = target.Operation == $"agent/{workspaceId}" && target.Branch == target.Operation &&
+                    !await db.Projects.AnyAsync(p => p.Id == resource.ProjectId && p.DefaultBranch == target.Branch, ct);
+            else if (operation is "restart-docker" or "deploy")
+            {
+                var approvedScopes = await db.Approvals.Where(a => a.ConversationId == conversationId && a.AgentId == agent.Id &&
+                    a.Scope == scope && a.Kind == kind && a.DecidedBy == PlatformUser.OwnerId && a.Status == "Completed")
+                    .Select(a => a.Payload).ToListAsync(ct);
+                approval.AutoEligible = approvedScopes.Any(p => JsonSerializer.Deserialize<OperationTarget>(p) is { } prior &&
+                    (prior with { WorkId = null }) == target);
+            }
+        }
+        if (approval.AutoEligible && await db.Conversations.AnyAsync(c => c.Id == conversationId && c.AutoApprove, ct))
+        {
+            approval.Status = "Approved";
+            approval.DecidedBy = AutomaticDecision;
+        }
         db.Approvals.Add(approval);
         db.Events.Add(new Activity { AgentId = agent.Id, ConversationId = conversationId, ProjectId = resource.ProjectId, WorkId = workId,
-            Kind = "ApprovalRequested", Detail = approval.Scope });
+            Kind = approval.DecidedBy == AutomaticDecision ? "AutoApproved" : "ApprovalRequested", Detail = approval.Scope });
         await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
         return approval;
     }
 
@@ -168,6 +220,9 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
             if (approval.Kind == "GitPush")
             {
                 var resource = await ResolveAsync(agent, target.ResourceId, ResourceKind.GitRepository, "git", ct);
+                if (approval.DecidedBy == AutomaticDecision && await db.Projects.AnyAsync(p =>
+                    p.Id == resource.ProjectId && p.DefaultBranch == target.Branch, ct))
+                    throw new InvalidOperationException("Varsayılan branch için yönetici onayı gerekli.");
                 if (Binding(resource) != target.ResourceBinding) throw new InvalidOperationException("Kaynak onaydan sonra değişti.");
                 var repo = Path.Combine(paths.Workspace(target.WorkspaceId!), "project");
                 await VerifyRepoAsync(resource, repo, ct);
@@ -218,7 +273,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         await using var db = await dbs.CreateDbContextAsync(ct);
         var current = await db.Agents.AsNoTracking().SingleOrDefaultAsync(x => x.Id == agent.Id, ct);
         var resource = await db.Resources.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id && x.Kind == kind, ct);
-        if (current is null || !ToolAccess.Has(current, tool) || resource?.ProjectId is null ||
+        if (current is null || !ToolAccess.Has(current, tool) || resource is null || (resource.ProjectId is null && !resource.IsGlobal) ||
             !ToolAccess.AllowsProject(current, resource.ProjectId))
             throw new UnauthorizedAccessException("Ajan bu kaynak veya araç için yetkili değil.");
         return resource;
@@ -231,7 +286,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         if (!ServiceName().IsMatch(target.Address) || target.SshServerId is null)
             throw new InvalidOperationException("Geçerli bir Docker Swarm servisi ve SSH kaynağı gerekli.");
         var server = await ResolveAsync(agent, target.SshServerId, ResourceKind.SshServer, "ssh", ct);
-        if (server.ProjectId != target.ProjectId)
+        if (!server.IsGlobal && server.ProjectId != target.ProjectId)
             throw new UnauthorizedAccessException("Dağıtım ve SSH kaynağı aynı projeye ait olmalı.");
         var command = operation switch
         {
@@ -242,7 +297,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         return (target, server, Binding(target) + Binding(server), command);
     }
 
-    private async Task<object> SshAsync(Resource resource, string operation, CancellationToken ct, string? approvedCommand = null)
+    private async Task<object> SshAsync(Resource resource, string operation, CancellationToken ct, string? approvedCommand = null, int offset = 0)
     {
         if (resource is not { Username.Length: > 0, HostFingerprint.Length: > 0, VaultId.Length: > 0, Port: > 0 and <= 65535 })
             throw new InvalidOperationException("SSH kullanıcı adı, host key ve Vault kaydı gerekli.");
@@ -265,7 +320,10 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
             await command.ExecuteAsync(timeout.Token);
             if (command.ExitStatus != 0)
                 throw new InvalidOperationException($"SSH komutu {command.ExitStatus} koduyla sonlandı.");
-            return new { output = TextLimits.Clip(command.Result.Replace(secret, "[credential]", StringComparison.Ordinal), 8000) };
+            var output = command.Result.Replace(secret, "[credential]", StringComparison.Ordinal);
+            if (SshCommands.ContainsKey(operation) && operation != "restart-docker")
+                return ToolOutput.Page(output, offset, 8000);
+            return new { output = TextLimits.Clip(output, 8000) };
         }
         finally { CryptographicOperations.ZeroMemory(bytes); }
     }

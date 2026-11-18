@@ -66,6 +66,7 @@
     <article class="card">
         <h2>Token kullanımı</h2>
         <div class="data-list"><span>Girdi <strong>@input.ToString("N0")</strong></span><span>Önbellek <strong>@cached.ToString("N0")</strong></span><span>Çıktı <strong>@output.ToString("N0")</strong></span><span>Toplam <strong>@total.ToString("N0")</strong></span></div>
+        @if (missingUsage > 0) { <p class="muted">@missingUsage tur için kullanım bildirimi alınamadı.</p> }
     </article>
 </section>
 
@@ -75,6 +76,7 @@
     private bool sandboxStarting;
     private string? sandboxStatus;
     private long input, cached, output, total;
+    private int missingUsage;
     private List<CodexModel> models = [];
     private Preferences? prefs;
     private bool LoginEnabled => Configuration.GetValue<bool>("Platform:LocalCodexLogin");
@@ -87,6 +89,8 @@
         var usage = await db.Usage.GroupBy(x => 1).Select(g => new { Input = g.Sum(x => x.Input), Cache = g.Sum(x => x.Cached),
             Output = g.Sum(x => x.Output), Total = g.Sum(x => x.Total) }).FirstOrDefaultAsync();
         if (usage is not null) (input, cached, output, total) = (usage.Input, usage.Cache, usage.Output, usage.Total);
+        missingUsage = await db.Runs.CountAsync(r => r.TurnId != null && !Enumerable.Contains(ChatStore.Active, r.Status) &&
+            !db.Usage.Any(u => u.ThreadId == r.ThreadId && u.TurnId == r.TurnId));
         if (Codex.Connected) await RunAsync(ReadAsync);
     }
 

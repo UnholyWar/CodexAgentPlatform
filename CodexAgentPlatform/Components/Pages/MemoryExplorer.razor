@@ -6,12 +6,12 @@
 <PageTitle>Hafıza · Codex Agent Platform</PageTitle>
 <section class="admin-page">
     <header class="section-head">
-        <h1>Hafıza</h1><button class="primary" @ref="addButton" disabled="@busy" @onclick="NewNote">＋ Not ekle</button>
+        <h1>Hafıza</h1><button class="primary" @ref="addButton" disabled="@busy" @onclick="NewNote"><Icon Name="plus" /> Not ekle</button>
     </header>
     <form class="filter" @onsubmit="SearchAsync" @onsubmit:preventDefault>
         <input placeholder="Başlık, özet veya etiket…" aria-label="Hafıza ara" @bind="query" maxlength="150" />
         <label class="check"><input type="checkbox" @bind="archived" /> Arşiv dahil</label>
-        <button class="button" type="submit" disabled="@busy">Ara</button>
+        <button class="button" type="submit" disabled="@busy"><Icon Name="search" /> Ara</button>
     </form>
     @if (!editing && error is not null) { <p class="notice error" role="alert">@error</p> }
     @if (!editing && notice is not null) { <p class="notice" role="status">@notice</p> }
@@ -29,6 +29,7 @@
         @if (editing)
         {
             <form class="card fields" aria-busy="@busy" @onsubmit="SaveAsync" @onsubmit:preventDefault>
+                <button type="button" class="editor-back" disabled="@busy" @onclick="CancelEdit"><Icon Name="chevron" /> Not listesi</button>
                 <h2 @ref="editorHeading" tabindex="-1">@(selected is null ? "Yeni not" : selected.Title)</h2>
                 <label>Başlık <input @bind="title" maxlength="160" required /></label>
                 <label>Özet <input @bind="summary" maxlength="600" /></label>
