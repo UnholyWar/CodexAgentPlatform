@@ -33,6 +33,8 @@ const fragmentSource = `
         float radius = length(position);
         vec3 normal = vec3(position, sqrt(max(0.0, 1.0 - radius * radius)));
         vec3 material = normal;
+        float pitch = .29 + .10 * sin(angle);
+        material.yz = mat2(cos(pitch), sin(pitch), -sin(pitch), cos(pitch)) * material.yz;
         material.xy = mat2(.87, -.49, .49, .87) * material.xy;
         float spin = angle + .6;
         material.xz = mat2(cos(spin), sin(spin), -sin(spin), cos(spin)) * material.xz;
@@ -40,13 +42,16 @@ const fragmentSource = `
         // The veils rotate with the material while the light stays fixed.
         float mist = noise(material * 3.1);
         float detail = noise(material * 9.0);
-        float flow = 5.7 * material.y + 2.2 * material.x + 4.2 * mist;
+        float flow = 5.1 * material.y + 3.5 * material.x - 3.0 * material.z + 4.2 * mist;
         float veil = .5 + .5 * sin(flow);
         float filament = pow(veil, 13.0) * smoothstep(.21, .74, mist + .22 * detail);
         float hue = smoothstep(.15, .72, .50 - .36 * normal.x + .26 * normal.y + .20 * material.x);
         vec3 light = mix(vec3(.55, .39, .98), vec3(1.0, .34, .48), hue);
         vec3 color = mix(vec3(.041, .048, .14), vec3(.25, .14, .47), mist);
-        color += light * (.36 * pow(veil, 3.0) + filament * (.51 + .24 * detail));
+        // A brighter patch travels with the veil and disappears around the back.
+        vec3 brightPatch = normalize(vec3(-.74, .31, .58));
+        float patch = pow(max(0.0, dot(material, brightPatch)), 19.0);
+        color += light * (.36 * pow(veil, 3.0) + filament * (.51 + .24 * detail) + .30 * patch);
 
         vec3 key = normalize(vec3(-.48, .66, .62));
         color *= .59 + .47 * max(0.0, dot(normal, key));
@@ -88,7 +93,7 @@ export function animateOrb(canvas, signal) {
     gl.vertexAttribPointer(corner, 2, gl.FLOAT, false, 0, 0);
     const angle = gl.getUniformLocation(program, "angle");
     const motion = matchMedia("(prefers-reduced-motion: reduce)");
-    const period = 28000;
+    const period = 16000;
     const start = performance.now();
     let frame;
     let lastDraw = -Infinity;

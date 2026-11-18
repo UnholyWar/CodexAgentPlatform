@@ -114,26 +114,40 @@ function gatherIce(peer, signal) {
 }
 
 function monitorSpeaking(dialog, call, receiver) {
-    let lastSpeech = -Infinity;
-    let previousEnergy = 0;
+    let previousAudio, previousTime;
+    let expansion = 0;
     async function sample() {
         if (calls.get(dialog) !== call || call.receiver !== receiver) return;
+        let level = 0;
         try {
             const report = await receiver.getStats();
-            const remote = Array.from(report.values()).find(row => row.type === "inbound-rtp" && row.kind === "audio");
-            const energy = remote?.totalAudioEnergy ?? 0;
+            const remote = Array.from(report.values()).find(row =>
+                row.type === "inbound-rtp" && (row.kind ?? row.mediaType) === "audio");
             const time = performance.now();
-            const level = receiver.getSynchronizationSources?.().some(source =>
-                source.audioLevel > .008 && time - source.timestamp < 300);
-            if (energy - previousEnergy > 1e-8 || remote?.audioLevel > .008 || level) lastSpeech = time;
-            previousEnergy = energy;
-            if (calls.get(dialog) === call)
-                dialog.dataset.speaking = String(time - lastSpeech < 500);
+            if (remote?.packetsReceived === undefined || remote.packetsReceived !== previousAudio?.packetsReceived)
+                level = remote?.audioLevel ?? 0;
+            if (previousAudio && remote) {
+                const energy = (remote.totalAudioEnergy ?? 0) - (previousAudio.totalAudioEnergy ?? 0);
+                const duration = (remote.totalSamplesDuration ?? 0) - (previousAudio.totalSamplesDuration ?? 0);
+                const seconds = duration > 0 ? duration : (time - previousTime) / 1000;
+                if (seconds > 0 && energy > 0) level = Math.max(level, Math.sqrt(energy / seconds));
+            }
+            previousAudio = remote;
+            previousTime = time;
+            for (const source of receiver.getSynchronizationSources?.() ?? []) {
+                if (time - source.timestamp < 250) level = Math.max(level, source.audioLevel ?? 0);
+            }
         } catch {
             // A stats report can be unavailable while the peer is closing.
         }
-        if (calls.get(dialog) === call && call.receiver === receiver)
-            call.levelTimer = setTimeout(sample, 100);
+        if (calls.get(dialog) !== call || call.receiver !== receiver) return;
+
+        const target = level > .008 ? .035 + .105 * Math.sqrt(Math.min(1, level / .19)) : 0;
+        // Respond to speech promptly and ease back through brief pauses between words.
+        expansion += (target - expansion) * (target > expansion ? .55 : .19);
+        dialog.style.setProperty("--voice-speech-scale", (1 + expansion).toFixed(3));
+        dialog.dataset.speaking = String(expansion > .025);
+        call.levelTimer = setTimeout(sample, 100);
     }
     clearTimeout(call.levelTimer);
     call.receiver = receiver;
@@ -159,6 +173,7 @@ export function stop(dialog) {
     dialog.querySelector(".voice-play").hidden = true;
     dialog.removeAttribute("data-connected");
     delete dialog.dataset.speaking;
+    dialog.style.removeProperty("--voice-speech-scale");
 }
 
 export function close(dialog) {
