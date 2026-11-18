@@ -138,6 +138,14 @@ sudo bash deploy/docker-sandbox/enable.sh --image ghcr.io/unholywar/codexagentpl
 
 Betik mevcut disk bağlantılarını, uygulama ortam ayarlarını, portu ve sandbox profillerini kullanır. Yeni container kontrolleri geçemezse önceki container’ı yeniden başlatır.
 
+Eski, etiketsiz platform imajlarını temizlemek için güncelleme komutuna `--cleanup-old-images` ekleyin. Bu seçenek tek başına da çalışır.
+
+```bash
+sudo bash deploy/docker-sandbox/enable.sh --cleanup-old-images
+```
+
+Temizlik son geri dönüş container’ını saklar. Daha eski durmuş kurulum yedeklerinden etiketsiz platform imajına bağlı olanları kaldırır. Ardından hiçbir container’ın kullanmadığı, etiketsiz platform imajlarını siler ve volume’ları korur.
+
 Canlı container 2. adımdaki `docker run` komutuyla yönetiliyorsa önce imajı çekin. Mevcut container’ı durdurup geri dönüş için farklı bir ada alın, ardından canlı komutu mevcut bağlantılarla yeniden çalıştırın.
 
 ## Kalıcı veriler
@@ -148,7 +156,15 @@ Canlı container 2. adımdaki `docker run` komutuyla yönetiliyorsa önce imajı
 
 ## Private Git ve SSH kaynakları
 
-Uygulama Git erişim belirteçlerini ve SSH özel anahtarlarını şifreleyerek `/data/credentials` altında saklar. Vault anahtarını ayrı bir Docker volume’unda tutabilirsiniz. Çalışan canlı kurulumda ilk kez anahtar oluşturmak için aşağıdaki komutu Docker hostunda çalıştırın.
+Uygulama Git erişim belirteçlerini ve SSH özel anahtarlarını şifreleyerek `/data/credentials` altında saklar. Sandbox betiğiyle yönetilen canlı container’da Vault’u Docker hostunda bir kez etkinleştirin.
+
+```bash
+sudo bash deploy/docker-sandbox/enable.sh --enable-vault
+```
+
+Betik anahtarı ayrı bir Docker volume’unda hazırlar ve uygulamaya salt okunur olarak bağlar. Uygulamanın anahtarı okuyabildiğini ve ajanların terminalinin anahtara erişemediğini kontrol eder. **Vault etkinleştirildi** mesajından sonra **Kaynaklar** ekranından erişim bilgilerini ekleyebilirsiniz.
+
+Canlı container’ı doğrudan `docker run` ile yönetiyorsanız anahtar volume’unu Docker hostunda aşağıdaki komutla hazırlayın.
 
 ```bash
 platform_image=$(docker inspect -f '{{.Image}}' codex-agent-platform)
