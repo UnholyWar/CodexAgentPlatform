@@ -17,20 +17,26 @@
         </button>
     </header>
     <div class="voice-center">
-        <div class="voice-orb" aria-hidden="true">
-            <div class="voice-sphere">
-                <div class="voice-grid"></div>
+        <div class="voice-stage" aria-hidden="true">
+            <div class="voice-orb">
+                <div class="voice-color">
+                    <canvas class="voice-orb-canvas"></canvas>
+                    <div class="voice-particles">
+                        <span></span><span></span>
+                    </div>
+                    <div class="voice-meteors">
+                        <span></span><span></span><span></span>
+                    </div>
+                </div>
             </div>
-            <span class="voice-orbit"></span>
-            <span class="voice-orbit"></span>
         </div>
-        <p class="voice-status" role="status">@status</p>
+        <p class="voice-status @(connected && !muted ? "voice-status-hidden" : null)" role="status">@status</p>
         @if (error is not null) { <p class="voice-error" role="alert">@error</p> }
         <audio autoplay playsinline @ref="speaker"></audio>
     </div>
     <footer class="voice-controls">
         <button type="button" class="button voice-play" hidden>Play audio</button>
-        <button type="button" class="icon-button" aria-label="Mute microphone" aria-pressed="@(muted ? "true" : "false")"
+        <button type="button" class="icon-button voice-mute" aria-label="Mute microphone" aria-pressed="@(muted ? "true" : "false")"
                 disabled="@(!connected)" @onclick="ToggleMuteAsync">
             <Icon Name="microphone" /><span>@(muted ? "Unmute" : "Mute")</span>
         </button>
@@ -120,7 +126,7 @@
         if (call is not null)
         {
             connected = true;
-            status = "Connected";
+            status = "Voice call ready";
             StateHasChanged();
         }
         return Task.CompletedTask;
@@ -144,7 +150,7 @@
         if (module is null || !connected) return;
         muted = !muted;
         await module.InvokeVoidAsync("mute", dialog, muted);
-        status = muted ? "Microphone muted" : "Connected";
+        status = muted ? "Microphone muted" : "Voice call ready";
     }
 
     private async Task CloseAsync()

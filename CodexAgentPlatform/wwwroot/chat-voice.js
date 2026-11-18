@@ -1,3 +1,5 @@
+import { animateOrb } from "./voice-orb.js";
+
 const calls = new WeakMap();
 
 export async function start(dialog, speaker, server) {
@@ -57,11 +59,15 @@ export async function start(dialog, speaker, server) {
         peer.addEventListener("connectionstatechange", () => {
             if (!current()) return;
             clearTimeout(call.disconnectTimer);
-            if (peer.connectionState === "connected") {
+            const connected = peer.connectionState === "connected";
+            dialog.toggleAttribute("data-connected", connected);
+            if (connected) {
                 clearTimeout(call.connectTimer);
                 if (!call.ready) {
                     call.ready = true;
                     server.invokeMethodAsync("VoiceReadyAsync").catch(() => stop(dialog));
+                    const canvas = dialog.querySelector(".voice-orb-canvas");
+                    if (canvas) animateOrb(canvas, signal);
                 }
             } else if (peer.connectionState === "failed" || peer.connectionState === "closed") {
                 void fail("The voice connection was interrupted.");
@@ -151,6 +157,7 @@ export function stop(dialog) {
     call.peer?.close();
     call.speaker.srcObject = null;
     dialog.querySelector(".voice-play").hidden = true;
+    dialog.removeAttribute("data-connected");
     delete dialog.dataset.speaking;
 }
 
