@@ -55,8 +55,10 @@
                 @if (selected.Kind == ResourceKind.SshServer)
                 {
                     <label>SSH username <input @bind="selected.Username" maxlength="120" required disabled="@busy" /></label>
-                    <label>SSH port <input type="number" @bind="selected.Port" min="1" max="65535" required disabled="@busy" /></label>
-                    <label>Host key fingerprint <input @bind="selected.HostFingerprint" placeholder="SHA256:…" maxlength="64" required disabled="@busy" /></label>
+                    <label>SSH port <input type="number" @bind="sshPort" min="1" max="65535" required disabled="@busy" /></label>
+                    <label>Host key fingerprint <input @bind="selected.HostFingerprint" placeholder="SHA256:…" maxlength="512"
+                        aria-describedby="host-fingerprint-help" required disabled="@busy" /></label>
+                    <small id="host-fingerprint-help" class="muted">Use the server's verified SHA256 fingerprint or paste the output of <code>ssh-keygen -lf</code> for the server's host key.</small>
                     <label>SSH private key
                         <textarea @bind="credential" rows="4" spellcheck="false" autocomplete="off" maxlength="65536" required="@(Vault.Configured && selected.VaultId is null)" disabled="@(busy || !Vault.Configured)"></textarea>
                     </label>
@@ -144,6 +146,7 @@
     private List<Project> projects = [];
     private Resource? selected;
     private string? credential, error, notice, savedName;
+    private string sshPort = "22";
     private bool busy, confirmDelete, focusOnRender, returnToDeleteButton, gitUsesToken;
     private ElementReference addButton, editorHeading, confirmationHeading, deleteButton, feedback;
     protected override Task OnInitializedAsync() => LoadAsync();
@@ -172,6 +175,7 @@
         if (busy) return;
         CancelEditor();
         selected = new() { IsGlobal = projects.Count == 0 };
+        sshPort = selected.Port.ToString(System.Globalization.CultureInfo.InvariantCulture);
     }
 
     private async Task EditAsync(string id)
@@ -183,6 +187,7 @@
             await using var db = await Dbs.CreateDbContextAsync();
             selected = await db.Resources.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id);
             savedName = selected?.Name;
+            sshPort = selected?.Port.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "22";
             gitUsesToken = selected is { Kind: ResourceKind.GitRepository, VaultId: not null };
             credential = notice = null;
             error = selected is null ? "Resource not found." : null;
@@ -300,8 +305,10 @@
         {
             item.Name = item.Name.Trim();
             item.Address = item.Address.Trim();
-            if (item.Name.Length is 0 or > 100 || item.Address.Length is 0 or > 1024)
-                throw new ArgumentException("Invalid resource name or address.");
+            if (item.Name.Length is 0 or > 100)
+                throw new ArgumentException("Enter a resource name between 1 and 100 characters.");
+            if (item.Address.Length is 0 or > 1024)
+                throw new ArgumentException("Enter a resource address between 1 and 1,024 characters.");
             await using var db = await Dbs.CreateDbContextAsync();
             await using var tx = await db.Database.BeginTransactionAsync();
             if (item.IsGlobal) item.ProjectId = null;
@@ -314,19 +321,23 @@
                 await HasDeploymentTargetsAsync(db, item.Id))
                 throw new InvalidOperationException("Update linked deployment targets before changing the resource type or project.");
             if (item.Kind == ResourceKind.GitRepository) _ = Operations.GitAddress(item);
-            if (item.Kind == ResourceKind.DeploymentTarget &&
-                (!System.Text.RegularExpressions.Regex.IsMatch(item.Address, @"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,100}\z") ||
-                 !await db.Resources.AnyAsync(x => x.Id == item.SshServerId && x.Id != item.Id && x.Kind == ResourceKind.SshServer &&
-                    (x.IsGlobal || (item.ProjectId != null && x.ProjectId == item.ProjectId)))))
-                throw new ArgumentException("A valid Swarm service name and an SSH server available in this scope are required.");
+            if (item.Kind == ResourceKind.DeploymentTarget)
+            {
+                if (!Operations.IsSwarmServiceName(item.Address))
+                    throw new ArgumentException("Enter the Docker Swarm service name, such as app_web.");
+                if (!await db.Resources.AnyAsync(x => x.Id == item.SshServerId && x.Id != item.Id && x.Kind == ResourceKind.SshServer &&
+                    (x.IsGlobal || (item.ProjectId != null && x.ProjectId == item.ProjectId))))
+                    throw new ArgumentException("Choose an SSH server available in this scope.");
+            }
             if (item.Kind == ResourceKind.SshServer)
             {
-                item.Username = item.Username?.Trim();
-                item.HostFingerprint = item.HostFingerprint?.Trim();
-                if (Uri.CheckHostName(item.Address) == UriHostNameType.Unknown || item.Port is < 1 or > 65535 ||
-                    string.IsNullOrWhiteSpace(item.Username) || !System.Text.RegularExpressions.Regex.IsMatch(item.HostFingerprint ?? "", @"^SHA256:[a-zA-Z0-9+/]{43}=?$"))
-                    throw new ArgumentException("SSH requires a valid hostname, port, username, and SHA256 fingerprint.");
+                if (!int.TryParse(sshPort, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var port))
+                    throw new ArgumentException("Enter the SSH port as a whole number between 1 and 65535.");
+                item.Port = port;
+                Operations.ValidateSshServer(item);
                 item.SftpFile = string.IsNullOrWhiteSpace(item.SftpFile) ? null : item.SftpFile.Trim();
+                if (item.SftpFile is { } path && (path.Length > 512 || !Operations.IsSftpFile(path)))
+                    throw new ArgumentException("Enter an absolute SFTP text file path, such as /srv/reports/status.txt. Use letters, numbers, dots, hyphens, or underscores in its names.");
             }
             else item.SftpFile = null;
             if (item.Kind != ResourceKind.DeploymentTarget) item.SshServerId = null;
@@ -334,7 +345,7 @@
                 throw new ArgumentException("Keep credentials out of the address.");
             var vaultId = existing is not null && existing.Address == item.Address && existing.Kind == item.Kind &&
                 existing.IsGlobal == item.IsGlobal && existing.ProjectId == item.ProjectId && existing.Username == item.Username && existing.Port == item.Port &&
-                existing.HostFingerprint == item.HostFingerprint ? existing.VaultId : null;
+                existing.HostFingerprint?.TrimEnd('=') == item.HostFingerprint?.TrimEnd('=') ? existing.VaultId : null;
             if (item.Kind == ResourceKind.DeploymentTarget || (item.Kind == ResourceKind.GitRepository && !gitUsesToken))
                 vaultId = null;
             else if (!string.IsNullOrWhiteSpace(credential))

@@ -133,6 +133,18 @@ public static class AgentPermissionGrants
     private static string Scope(string agentName, string kind, string label) =>
         $"Grant {agentName} {(kind == "tool" ? "the tool permission" : "access to the project")} “{label}”.";
 
+    internal static async Task CloseDeletedProjectRequestsAsync(PlatformDb db, string projectId, CancellationToken ct)
+    {
+        var pending = await db.Approvals.Where(a => a.Kind == ApprovalKind && a.Status == "Pending").ToListAsync(ct);
+        foreach (var approval in pending)
+        {
+            if (JsonSerializer.Deserialize<Grant>(approval.Payload) is not { PermissionKind: "project" } grant ||
+                grant.PermissionId != projectId) continue;
+            approval.Status = "Declined";
+            approval.Result = "The project was deleted.";
+        }
+    }
+
     private static string Add(string existing, string key) =>
         string.Join(',', ToolAccess.Split(existing).Append(key).Distinct(StringComparer.Ordinal));
 }

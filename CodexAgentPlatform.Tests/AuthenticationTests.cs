@@ -71,6 +71,11 @@ public sealed partial class AuthenticationTests
             Assert.Equal("/setup?error=code", invalid.Headers.Location?.OriginalString);
         Assert.Contains("Invalid setup code.", await client.GetStringAsync("/setup?error=code", ct));
         form["bootstrap"] = code;
+        form["confirm"] = "Wrong-confirmation!2026";
+        using (var invalid = await client.PostAsync("/session/setup", new FormUrlEncodedContent(form), ct))
+            Assert.Equal("/setup?error=confirmation", invalid.Headers.Location?.OriginalString);
+        Assert.Contains("The two password fields do not match.", await client.GetStringAsync("/setup?error=confirmation", ct));
+        form["confirm"] = password;
         using (var valid = await client.PostAsync("/session/setup", new FormUrlEncodedContent(form), ct))
         {
             Assert.Equal(HttpStatusCode.Redirect, valid.StatusCode);

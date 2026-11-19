@@ -42,14 +42,21 @@ public static class OwnerEndpoints
 
         var name = form["username"].ToString().Trim();
         var password = form["password"].ToString();
-        if (name.Length is < 3 or > 64 || name.Equals("admin", StringComparison.OrdinalIgnoreCase) ||
-            password.Length is < 14 or > 128 || password != form["confirm"].ToString() ||
-            password.Contains(name, StringComparison.OrdinalIgnoreCase))
-            return Results.Redirect("/setup?error=credentials");
+        if (name.Length is < 3 or > 64 || name.Equals("admin", StringComparison.OrdinalIgnoreCase))
+            return Results.Redirect("/setup?error=username");
+        if (password.Length is < 14 or > 128 || password.Contains(name, StringComparison.OrdinalIgnoreCase))
+            return Results.Redirect("/setup?error=password");
+        if (password != form["confirm"].ToString())
+            return Results.Redirect("/setup?error=confirmation");
 
         var user = new PlatformUser { Id = PlatformUser.OwnerId, UserName = name };
         var created = await users.CreateAsync(user, password);
-        if (!created.Succeeded) return Results.Redirect("/setup?error=credentials");
+        if (!created.Succeeded)
+        {
+            var error = created.Errors.Any(e => e.Code == nameof(IdentityErrorDescriber.InvalidUserName)) ? "username"
+                : created.Errors.Any(e => e.Code.StartsWith("Password", StringComparison.Ordinal)) ? "password" : "credentials";
+            return Results.Redirect("/setup?error=" + error);
+        }
         try { File.Delete(paths.BootstrapFile); }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }

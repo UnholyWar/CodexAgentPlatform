@@ -10,8 +10,10 @@ public static class ProjectStore
     {
         project.Name = project.Name.Trim();
         project.DefaultBranch = project.DefaultBranch.Trim();
-        if (project.Name.Length is 0 or > 80 || project.DefaultBranch.Length is 0 or > 150)
-            throw new ArgumentException("A project name (up to 80 characters) and default branch (up to 150 characters) are required.");
+        if (project.Name.Length is 0 or > 80)
+            throw new ArgumentException("Enter a project name between 1 and 80 characters.");
+        if (project.DefaultBranch.Length > 150 || !Operations.IsSupportedGitBranch(project.DefaultBranch))
+            throw new ArgumentException("Enter a valid default Git branch of up to 150 characters, such as main or release/v1.");
     }
 
     public static async Task<Project> CreateAsync(PlatformDb db, string name, string? defaultBranch,
@@ -43,5 +45,39 @@ public static class ProjectStore
         }
         await transaction.CommitAsync(ct);
         return project;
+    }
+
+    public static async Task<string?> DeleteAsync(PlatformDb db, string id, string? expectedName, CancellationToken ct)
+    {
+        await using var transaction = await db.Database.BeginTransactionAsync(ct);
+        var project = await db.Projects.SingleOrDefaultAsync(p => p.Id == id, ct);
+        if (project is null) return "This project no longer exists.";
+        if (project.Name != expectedName) return "The project was renamed. Reopen it before deleting.";
+
+        var links = new (int Count, string Label)[]
+        {
+            (await db.Resources.CountAsync(r => r.ProjectId == id, ct), "linked resources"),
+            (await db.Work.CountAsync(w => w.ProjectId == id, ct), "work items"),
+            (await db.Runs.CountAsync(r => r.ProjectId == id, ct), "chat runs"),
+            (await db.Notes.CountAsync(n => n.ProjectId == id, ct), "memory notes"),
+            (await db.Messages.CountAsync(m => m.VoiceProjectId == id, ct), "voice messages")
+        };
+        var blockers = links.Where(link => link.Count > 0).Select(link => $"{link.Label} ({link.Count})").ToArray();
+        if (blockers.Length > 0)
+            return $"Deletion is blocked by {string.Join(", ", blockers)}.";
+
+        foreach (var agent in await db.Agents.ToListAsync(ct))
+        {
+            var projects = ToolAccess.Split(agent.AllowedProjects);
+            if (projects.Contains(id, StringComparer.Ordinal))
+                agent.AllowedProjects = string.Join(',', projects.Where(allowed => allowed != id));
+        }
+
+        await AgentPermissionGrants.CloseDeletedProjectRequestsAsync(db, id, ct);
+        // Keep historical events. Project routing only selects existing projects.
+        db.Projects.Remove(project);
+        await db.SaveChangesAsync(ct);
+        await transaction.CommitAsync(ct);
+        return null;
     }
 }

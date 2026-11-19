@@ -27,8 +27,8 @@
             <form class="card fields" aria-busy="@busy" @onsubmit="SaveAsync" @onsubmit:preventDefault>
                 <button type="button" class="editor-back" disabled="@busy" @onclick="CancelEdit"><Icon Name="chevron" /> Agent list</button>
                 <h2 @ref="editorHeading" tabindex="-1">@(isNew ? "New agent" : edit.Name)</h2>
-                <label>Name <input @bind="edit.Name" required maxlength="60" /></label>
-                <label>Title <input @bind="edit.Title" required maxlength="120" /></label>
+                <label>Name <input @bind="edit.Name" required minlength="2" maxlength="60" /></label>
+                <label>Title <input @bind="edit.Title" required minlength="2" maxlength="120" /></label>
                 <label>Role instructions <textarea @bind="edit.Instructions" maxlength="8000" rows="5"></textarea></label>
                 <div class="fields side-by-side"><ModelFields Models="models" @bind-Model="edit.Model" @bind-Effort="edit.Effort" /></div>
                 <div><button type="button" class="button" disabled="@busy" @onclick="LoadModelsAsync">Load models</button></div>
@@ -200,8 +200,12 @@
             var row = isNew ? new Agent { Id = draft.Id } : await db.Agents.SingleAsync(x => x.Id == draft.Id);
             row.Name = draft.Name.Trim();
             row.Title = draft.Title.Trim();
-            if (row.Name.Length is < 2 or > 60 || row.Title.Length is < 2 or > 120 || draft.Instructions.Length > 8000)
-                throw new ArgumentException("Invalid agent name, title, or role instructions.");
+            if (row.Name.Length is < 2 or > 60)
+                throw new ArgumentException("Enter an agent name between 2 and 60 characters.");
+            if (row.Title.Length is < 2 or > 120)
+                throw new ArgumentException("Enter an agent title between 2 and 120 characters.");
+            if (draft.Instructions.Length > 8000)
+                throw new ArgumentException("Keep the role instructions to 8,000 characters or fewer.");
             row.Instructions = draft.Instructions;
             row.Model = draft.Model;
             row.Effort = draft.Effort;
@@ -225,6 +229,8 @@
             focusAddOnRender = true;
             notice = "Agent saved.";
         }
+        catch (DbUpdateException ex) when (ex.InnerException is Microsoft.Data.Sqlite.SqliteException { SqliteExtendedErrorCode: 2067 })
+        { error = "This agent name is already in use."; }
         catch (Exception ex) when (ex is DbUpdateException or ArgumentException or IOException or InvalidOperationException)
         { error = ex is ArgumentException ? ex.Message : "Could not save the agent or its Markdown identity."; }
         finally { busy = false; }

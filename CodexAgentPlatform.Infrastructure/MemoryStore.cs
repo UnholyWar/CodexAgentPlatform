@@ -68,11 +68,16 @@ public sealed partial class MemoryStore(IDbContextFactory<PlatformDb> dbs, Platf
         string? workId, string? conversationId, CancellationToken ct, string? mergeId = null, bool admin = false,
         int? expectedVersion = null)
     {
-        if (string.IsNullOrWhiteSpace(draft.Title) || string.IsNullOrWhiteSpace(draft.Markdown))
-            throw new InvalidOperationException("A title and Markdown content are required.");
-        if (draft.Title.Length > 160 || draft.Summary.Length > 600 || draft.Tags.Length > 300 ||
-            draft.Markdown.Length > 32_000 || draft.SourceReferences?.Length > 2000)
-            throw new InvalidOperationException("The memory note exceeds the size limit.");
+        if (string.IsNullOrWhiteSpace(draft.Title) || draft.Title.Length > 160)
+            throw new InvalidOperationException("Enter a note title between 1 and 160 characters.");
+        if (string.IsNullOrWhiteSpace(draft.Markdown) || draft.Markdown.Length > 32_000)
+            throw new InvalidOperationException("Enter Markdown content between 1 and 32,000 characters.");
+        if (draft.Summary.Length > 600)
+            throw new InvalidOperationException("Keep the summary to 600 characters or fewer.");
+        if (draft.Tags.Length > 300)
+            throw new InvalidOperationException("Keep the tags to 300 characters or fewer.");
+        if (draft.SourceReferences?.Length > 2000)
+            throw new InvalidOperationException("Keep the source references to 2,000 characters or fewer.");
         if (SecretShape().IsMatch(string.Join('\n', draft.Title, draft.Summary, draft.Tags, draft.Markdown, draft.SourceReferences)))
             throw new InvalidOperationException("Credentials cannot be stored in memory.");
         if (draft.Verification is not ("verified" or "inference" or "hypothesis"))
@@ -81,6 +86,8 @@ public sealed partial class MemoryStore(IDbContextFactory<PlatformDb> dbs, Platf
         await using var db = await dbs.CreateDbContextAsync(ct);
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         var note = id is null ? null : await db.Notes.SingleOrDefaultAsync(x => x.Id == id, ct);
+        if (note is null && id is null && projectId is not null && !await db.Projects.AnyAsync(p => p.Id == projectId, ct))
+            throw new InvalidOperationException("The selected project no longer exists. Reopen the Memory page to refresh the project list.");
         if (id is not null && (note is null || (!admin && (note.AgentId != agentId || note.ProjectId != projectId))))
             throw new InvalidOperationException("You do not have permission to edit this memory note.");
         var normalizedTitle = draft.Title.Trim();

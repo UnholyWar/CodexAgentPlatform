@@ -8,13 +8,14 @@
 <section class="admin-page">
     <header class="section-head"><h1>System settings</h1></header>
     @if (notice is not null) { <p class="notice" role="status">@notice</p> }
+    @if (error is not null) { <p class="notice error" role="alert">@error</p> }
     @if (prefs is not null)
     {
         <form class="card fields" @onsubmit="SaveAsync" @onsubmit:preventDefault>
             <h2>Context and time zone</h2>
-            <label>Time zone <input @bind="prefs.TimeZone" placeholder="Europe/Istanbul" maxlength="80" required /></label>
-            <label>Additional context limit (characters) <input type="number" @bind="prefs.ContextCharacters" min="4000" max="24000" /></label>
-            <div><button class="primary">Save</button></div>
+            <label>Time zone <input @bind="prefs.TimeZone" placeholder="Europe/Istanbul" maxlength="80" required disabled="@saving" /></label>
+            <label>Additional context limit (characters) <input type="number" @bind="contextLimit" min="4000" max="24000" required disabled="@saving" /></label>
+            <div><button class="primary" disabled="@saving">Save</button></div>
         </form>
     }
     <article class="card fields">
@@ -26,29 +27,45 @@
 
 @code {
     private Preferences? prefs;
-    private string? notice;
-    private bool backingUp;
+    private string? notice, error;
+    private string contextLimit = "";
+    private bool backingUp, saving;
     protected override async Task OnInitializedAsync()
     {
         await using var db = await Dbs.CreateDbContextAsync();
         prefs = await db.Preferences.AsNoTracking().SingleAsync();
+        contextLimit = prefs.ContextCharacters.ToString(System.Globalization.CultureInfo.InvariantCulture);
     }
     private async Task SaveAsync()
     {
-        if (prefs is null) return;
+        if (prefs is null || saving) return;
+        error = notice = null;
         var zone = prefs.TimeZone.Trim();
-        if (!TimeZoneInfo.TryFindSystemTimeZoneById(zone, out _) || prefs.ContextCharacters is < 4000 or > 24000)
-        { notice = "Enter a valid time zone and a limit between 4,000 and 24,000 characters."; return; }
-        await using var db = await Dbs.CreateDbContextAsync();
-        await db.Preferences.ExecuteUpdateAsync(s => s.SetProperty(x => x.TimeZone, zone)
-            .SetProperty(x => x.ContextCharacters, prefs.ContextCharacters));
-        notice = "System settings saved.";
+        if (!TimeZoneInfo.TryFindSystemTimeZoneById(zone, out _))
+        { error = "Enter a valid time zone, such as Europe/Istanbul."; return; }
+        if (!int.TryParse(contextLimit, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var limit) ||
+            limit is < 4000 or > 24000)
+        { error = "Enter a whole-number context limit between 4,000 and 24,000 characters."; return; }
+
+        saving = true;
+        try
+        {
+            await using var db = await Dbs.CreateDbContextAsync();
+            await db.Preferences.ExecuteUpdateAsync(s => s.SetProperty(x => x.TimeZone, zone)
+                .SetProperty(x => x.ContextCharacters, limit));
+            prefs.TimeZone = zone;
+            contextLimit = limit.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            notice = "System settings saved.";
+        }
+        catch (System.Data.Common.DbException) { error = "Could not save system settings. Try again."; }
+        finally { saving = false; }
     }
     private async Task BackupAsync()
     {
         backingUp = true;
+        error = notice = null;
         try { notice = $"Backup saved · {await Storage.BackupAsync(default)}"; }
-        catch (Exception ex) when (ex is IOException or Microsoft.Data.Sqlite.SqliteException) { notice = "Could not save the backup."; }
+        catch (Exception ex) when (ex is IOException or Microsoft.Data.Sqlite.SqliteException) { error = "Could not save the backup."; }
         finally { backingUp = false; }
     }
 }

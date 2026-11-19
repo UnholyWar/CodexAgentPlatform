@@ -256,6 +256,12 @@
             .Select(a => new Agent { Id = a.Id, Name = a.Name, Title = a.Title, AllowedProjects = a.AllowedProjects, Archived = a.Archived })
             .ToListAsync();
         projects = await db.Projects.AsNoTracking().OrderBy(x => x.Name).ToListAsync();
+        if (projectId is { Length: > 0 } id && projects.All(p => p.Id != id))
+        {
+            projectId = null;
+            selectedAgent = null;
+            mentionedAgent = null;
+        }
     }
 
     protected override async Task OnParametersSetAsync()

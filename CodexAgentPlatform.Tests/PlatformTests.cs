@@ -109,6 +109,28 @@ public sealed class PlatformTests
     }
 
     [Fact]
+    public void SshSourceAcceptsAHostFingerprintOrTheCompleteOpenSshFingerprintLine()
+    {
+        var digest = Convert.ToBase64String(System.Security.Cryptography.SHA256.HashData("test host key"u8));
+        var fingerprint = "SHA256:" + digest.TrimEnd('=');
+        var resource = new Resource
+        {
+            Kind = ResourceKind.SshServer, IsGlobal = true, Address = "host.example", Port = 2222, Username = " deploy ",
+            HostFingerprint = $"256 SHA256:{digest} host.example (ED25519)"
+        };
+
+        Operations.ValidateSshServer(resource);
+        Assert.Equal(fingerprint, resource.HostFingerprint);
+        Assert.Equal("deploy", resource.Username);
+        Operations.ValidateSshServer(resource);
+
+        resource.HostFingerprint = $"{fingerprint} {fingerprint}";
+        Assert.Contains("host key fingerprint", Assert.Throws<ArgumentException>(() => Operations.ValidateSshServer(resource)).Message);
+        resource.Address = "ssh://host.example:2222";
+        Assert.Contains("hostname or IP", Assert.Throws<ArgumentException>(() => Operations.ValidateSshServer(resource)).Message);
+    }
+
+    [Fact]
     public async Task VaultAndBrokerEnforceScopeBeforeConnecting()
     {
         await using var fixture = await TestStorage.CreateAsync();

@@ -304,7 +304,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         Agent agent, string resourceId, string operation, string? image, CancellationToken ct)
     {
         var target = await ResolveAsync(agent, resourceId, ResourceKind.DeploymentTarget, "ssh", ct);
-        if (!ServiceName().IsMatch(target.Address) || target.SshServerId is null)
+        if (!IsSwarmServiceName(target.Address) || target.SshServerId is null)
             throw new InvalidOperationException("A valid Docker Swarm service and SSH resource are required.");
         var server = await ResolveAsync(agent, target.SshServerId, ResourceKind.SshServer, "ssh", ct);
         if (!server.IsGlobal && server.ProjectId != target.ProjectId)
@@ -365,10 +365,29 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         finally { CryptographicOperations.ZeroMemory(bytes); }
     }
 
+    public static void ValidateSshServer(Resource resource)
+    {
+        if (Uri.CheckHostName(resource.Address) == UriHostNameType.Unknown)
+            throw new ArgumentException("Enter only the hostname or IP address. Use the separate fields for the SSH username and port.");
+        if (resource.Port is < 1 or > 65535)
+            throw new ArgumentException("Enter an SSH port between 1 and 65535.");
+        resource.Username = resource.Username?.Trim();
+        if (string.IsNullOrWhiteSpace(resource.Username))
+            throw new ArgumentException("Enter the SSH username.");
+
+        var fingerprints = (resource.HostFingerprint ?? "").Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
+            .Where(token => token.StartsWith("SHA256:", StringComparison.OrdinalIgnoreCase)).Take(2).ToArray();
+        Span<byte> digest = stackalloc byte[32];
+        if (fingerprints.Length != 1 || !SshFingerprint().IsMatch(fingerprints[0]) ||
+            !Convert.TryFromBase64String(fingerprints[0][7..].TrimEnd('=') + "=", digest, out var length) || length != digest.Length)
+            throw new ArgumentException("Enter the server's verified SHA256 host key fingerprint, or paste one line from ssh-keygen -lf.");
+        resource.HostFingerprint = "SHA256:" + Convert.ToBase64String(digest).TrimEnd('=');
+    }
+
     private static async Task<object> ReadSftpAsync(Resource resource, PrivateKeyFile key, string secret, CancellationToken ct)
     {
         var path = resource.SftpFile;
-        if (path is null || !SftpPath().IsMatch(path) || path.Split('/').Any(s => s is "." or ".."))
+        if (path is null || !IsSftpFile(path))
             throw new InvalidOperationException("No valid SFTP file is configured for this SSH resource.");
         using var client = new SftpClient(resource.Address, resource.Port, resource.Username!, key);
         PinHost(client, resource);
@@ -540,10 +559,18 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
 
     private static void ValidateBranch(string branch)
     {
-        if (!BranchShape().IsMatch(branch) || branch.Contains("..", StringComparison.Ordinal) ||
-            branch.Split('/').Any(x => x.Length == 0 || x.StartsWith('.') || x.EndsWith('.') || x.EndsWith(".lock", StringComparison.Ordinal)))
+        if (!IsSupportedGitBranch(branch))
             throw new InvalidOperationException("Invalid branch name.");
     }
+
+    internal static bool IsSupportedGitBranch(string branch) =>
+        BranchShape().IsMatch(branch) && !branch.Contains("..", StringComparison.Ordinal) &&
+        branch.Split('/').All(part => part.Length > 0 && !part.StartsWith('.') && !part.EndsWith('.') &&
+            !part.EndsWith(".lock", StringComparison.Ordinal));
+
+    public static bool IsSwarmServiceName(string name) => ServiceName().IsMatch(name);
+
+    public static bool IsSftpFile(string path) => SftpPath().IsMatch(path) && !path.Split('/').Any(part => part is "." or "..");
 
     [GeneratedRegex("^[A-Za-z0-9][A-Za-z0-9._/-]{0,150}$")]
     private static partial Regex BranchShape();
@@ -559,4 +586,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
 
     [GeneratedRegex(@"^/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+\z")]
     private static partial Regex SftpPath();
+
+    [GeneratedRegex(@"\ASHA256:[A-Za-z0-9+/]{43}=?\z", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex SshFingerprint();
 }

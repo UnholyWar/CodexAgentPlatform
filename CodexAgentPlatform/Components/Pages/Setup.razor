@@ -12,22 +12,31 @@
 <p class="muted">Create an administrator account to start using the platform.</p>
 @if (Error is not null)
 {
-    <p class="notice error" role="alert">@(Error == "code" ? "Invalid setup code." : "The username or password does not meet the requirements.")</p>
+    <p class="notice error" role="alert">@ErrorMessage</p>
 }
 <form method="post" action="/session/setup" class="fields">
     <AntiforgeryToken />
     <label>Setup code <input name="bootstrap" type="password" autocomplete="off" maxlength="64" required /></label>
     <small class="muted">@(Local ? "Use admin as the temporary setup password for local development." : "Find the code in data/credentials/bootstrap-code on the server.")</small>
     <label>New username <input name="username" autocomplete="username" minlength="3" maxlength="64" required /></label>
+    <small class="muted">Choose a username other than admin.</small>
     <label>New password <input name="password" type="password" autocomplete="new-password" minlength="14" maxlength="128" required /></label>
     <label>Confirm new password <input name="confirm" type="password" autocomplete="new-password" minlength="14" maxlength="128" required /></label>
-    <small class="muted">Use at least 14 characters with uppercase and lowercase letters, a number, and a special character. Choose a username other than admin.</small>
+    <small class="muted">Use at least 14 characters and 6 distinct characters. Include uppercase and lowercase letters, a number, and a special character. Keep your username out of the password.</small>
     <button class="primary" type="submit">Create administrator account</button>
 </form>
 
 @code {
     [CascadingParameter] private HttpContext? HttpContext { get; set; }
     [SupplyParameterFromQuery] public string? Error { get; set; }
+    private string ErrorMessage => Error switch
+    {
+        "code" => "Invalid setup code.",
+        "username" => "Choose a username of 3 to 64 characters other than admin. Use A–Z, numbers, or the symbols -._@+.",
+        "password" => "Your password does not meet the requirements below.",
+        "confirmation" => "The two password fields do not match.",
+        _ => "Could not create the administrator account."
+    };
     private bool Local => HttpContext is not null && CodexAgentPlatform.Auth.OwnerEndpoints.LocalSetupAllowed(HttpContext, HostEnvironment, Configuration);
 
     protected override async Task OnInitializedAsync()

@@ -219,6 +219,9 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
         bool autoApprove, CancellationToken ct)
     {
         await using var db = await dbs.CreateDbContextAsync(ct);
+        await using var transaction = await db.Database.BeginTransactionAsync(ct);
+        if (projectId is not null && !await db.Projects.AnyAsync(p => p.Id == projectId, ct))
+            throw new InvalidOperationException("The project selected for this call no longer exists.");
         var chat = conversationId is null
             ? new Conversation { Title = role == "user" ? TextLimits.Clip(text.Replace('\n', ' '), 65) : "Voice conversation",
                 AutoApprove = autoApprove }
@@ -229,6 +232,7 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
             VoiceProjectId = projectId ?? "", AgentId = role == "assistant" ? PlatformChat.Id : null };
         db.Messages.Add(message);
         await db.SaveChangesAsync(ct);
+        await transaction.CommitAsync(ct);
         updates.Publish(chat.Id);
         return message;
     }
