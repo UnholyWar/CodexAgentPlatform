@@ -31,6 +31,10 @@ public sealed class ContextBudget(IDbContextFactory<PlatformDb> dbs)
             content.AppendLine("For an explicit request to create a repository on GitHub, find the saved global GitHub connection " +
                 "and call github_request_create_repository. If you just created the platform project, pass its ID. " +
                 "Confirm the name and visibility if unclear. Report a pending approval as pending.");
+        if (!normal && ToolAccess.Has(agent, "ssh"))
+            content.AppendLine("For a requested terminal job on a registered SSH host, use ssh_request_command. Combine the related commands " +
+                "into one reviewable Bash script, use non-interactive commands, and keep credentials out of the script. " +
+                "Report the request as pending until ssh_command_result confirms the outcome.");
         if (run.ProjectId is { } project)
         {
             var name = await db.Projects.AsNoTracking().Where(p => p.Id == project).Select(p => p.Name).SingleOrDefaultAsync(ct);

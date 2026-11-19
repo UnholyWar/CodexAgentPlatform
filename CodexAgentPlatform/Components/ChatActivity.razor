@@ -26,6 +26,7 @@
                     <details class="activity-item" @key="row.Id"><summary><Icon Name="approve" /><span><strong>@ApprovalLabel(row.Status)</strong>
                         <small>@When(row.CreatedAtUtc) @(row.DecidedBy == Operations.AutomaticDecision ? "· Automatic" : "")</small></span></summary>
                         <div class="activity-detail"><p>@ApprovalDisplay.Scope(row.Scope)</p>
+                            @if (Operations.SshCommandScript(row) is { } script) { <pre dir="ltr">@script</pre> }
                             @if (!string.IsNullOrWhiteSpace(row.Result)) { <pre>@row.Result</pre> }
                             <a href="/approvals">Open approvals</a>
                         </div>

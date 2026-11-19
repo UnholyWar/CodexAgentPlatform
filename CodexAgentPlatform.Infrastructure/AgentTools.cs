@@ -57,7 +57,13 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
             "Use the active project or pass projectId (ID or exact name). After approval the platform initializes and links the repository.",
             ["sourceId", "owner", "name", "visibility"], ["projectId"]),
         new("ssh_inspect", "ssh", "Inspect test, health, docker-status, docker-services, linux-services, docker-logs or sftp-read. For more live command output pass nextOffset as offset.", ["id", "operation"], ["offset"]),
-        new("ssh_request_operation", "ssh", "Request explicit approval for restart-docker on an SSH server, or deploy/rollback on a registered Swarm target. Deploy requires an image digest.", ["id", "operation"], ["image"])
+        new("ssh_request_operation", "ssh", "Request explicit approval for restart-docker on an SSH server, or deploy/rollback on a registered Swarm target. Deploy requires an image digest.", ["id", "operation"], ["image"]),
+        new("ssh_request_command", "ssh",
+            "On the owner's request, propose one Bash script for a registered SSH server. Combine related commands in one script for one manual approval. " +
+            "Runs as the saved SSH user with no interactive prompts. Never put tokens or passwords in the script.",
+            ["id", "command"], []),
+        new("ssh_command_result", "ssh", "Read the status and result of an SSH command you requested in this conversation. Pass its approval ID.",
+            ["id"], [])
     ];
 
     public static IEnumerable<object> Describe(Agent agent, bool projectSelected = false, bool voice = false)
@@ -79,6 +85,8 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
             bool onDemand = tool.Permission is "git" or "ssh" or ToolAccess.ProjectResources ||
                 tool.Name is "memory_archive" or "memory_consolidate" or "memory_update" or "memory_create";
             if ((projectSelected || voice) && tool.Name is ("resource_search" or "resource_get" or "git_workspace"))
+                onDemand = false;
+            if (tool.Name is "ssh_request_command" or "ssh_command_result")
                 onDemand = false;
             var spec = DescribeFunction(tool, onDemand);
             if (onDemand) deferred.Add(spec);
@@ -220,6 +228,12 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
                     name == "git_request_push" ? "GitPush" : args.String("operation") == "restart-docker" ? "SshChange" : "SshRelease",
                     args.String("operation") ?? "push", run.Workspace, args.String("destinationBranch"), ct, args.String("image"), run.WorkId);
                 return new ApprovalReply(approval.Id, approval.Scope, approval.Status, approval.ExpiresAtUtc);
+            case "ssh_request_command":
+                await RequireResourceProjectAsync(db, id!, run, ct);
+                var command = await operations.RequestSshCommandAsync(agent, run, id!, args.String("command")!, ct);
+                return new ApprovalReply(command.Id, command.Scope, command.Status, command.ExpiresAtUtc);
+            case "ssh_command_result":
+                return await operations.ReadSshCommandResultAsync(agent, run, id!, ct);
             case "ssh_inspect":
                 await RequireResourceProjectAsync(db, id!, run, ct);
                 return await operations.InspectSshAsync(agent, id!, args.String("operation")!, ct, run.ConversationId, run.WorkId, OutputOffset(args));

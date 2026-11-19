@@ -47,7 +47,7 @@ public sealed class StorageStartup(IDbContextFactory<PlatformDb> dbs, PlatformPa
             work.Status = WorkStatus.Interrupted;
             work.UpdatedAtUtc = now;
         }
-        await db.Approvals.Where(x => x.Status == "Executing" || x.Status == "Approved" ||
+        await db.Approvals.Where(x => (x.Status == "Executing" && x.Kind != Operations.SshCommandApproval) || x.Status == "Approved" ||
             x.Status == "Pending" && x.ContinuationRunId == null)
             .ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, "Interrupted"), ct);
         await db.SaveChangesAsync(ct);

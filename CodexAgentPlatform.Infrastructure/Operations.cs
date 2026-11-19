@@ -235,11 +235,17 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
                 .SetProperty(r => r.Error, "The permission request expired. The task was cancelled."), ct);
         var approval = await db.Approvals.AsNoTracking().Where(x => x.Status == "Approved" && x.Kind != AgentPermissionGrants.ApprovalKind)
             .OrderBy(x => x.CreatedAtUtc).FirstOrDefaultAsync(ct);
-        if (approval is null) return expiredRequests != 0;
+        if (approval is null)
+            return await CheckSshCommandAsync(db, ct) || expiredRequests != 0;
         var claimed = await db.Approvals.Where(x => x.Id == approval.Id && x.Status == "Approved" && x.ExpiresAtUtc > now)
             .ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, "Executing"), ct);
         if (claimed != 1) return true;
         db.Attach(approval);
+        if (approval.Kind == SshCommandApproval)
+        {
+            await StartSshCommandAsync(db, approval, ct);
+            return true;
+        }
         try
         {
             var agent = await db.Agents.AsNoTracking().SingleAsync(x => x.Id == approval.AgentId, ct);
