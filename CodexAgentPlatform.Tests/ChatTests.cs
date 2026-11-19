@@ -251,6 +251,107 @@ public sealed class ChatTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public async Task ArchitectKeepsTheConversationAndDeveloperStartsTheSameRequestAfterApproval()
+    {
+        await using var storage = await TestStorage.CreateAsync();
+        await using var db = storage.CreateDbContext();
+        var architect = await db.Agents.SingleAsync(a => a.Id == "architect");
+        architect.AllowedTools += ",projects.create";
+        await db.SaveChangesAsync();
+        var codex = new FakeCodex { WorkspaceReady = true };
+        var updates = new ChatUpdates();
+        var chats = new ChatStore(storage, updates);
+        var operations = new Operations(storage, storage.Paths, new Vault(storage.Paths, null));
+        using var worker = Worker(storage, codex, updates);
+        await worker.StartAsync(default);
+        try
+        {
+            var chat = await chats.SendAsync(null, "Mimarla görüşmek istiyorum.", null, null, default);
+            Task Completed(int count) => WaitAsync(async () =>
+                await db.Runs.CountAsync(r => r.ConversationId == chat && r.Status == WorkStatus.Completed) == count);
+            await Completed(1);
+            codex.NextToolCalls.Enqueue(("project_create", new { name = "Atlas" }));
+            await chats.SendAsync(chat, "Atlas adında bir proje oluştur.", null, null, default);
+            await Completed(2);
+            var project = await db.Projects.SingleAsync();
+            Assert.Equal(project.Id, (await chats.ReadAsync(chat, 10, default)).ProjectId);
+
+            const string implementation = "Bu projeye Node.js ile basit bir uygulama yap.";
+            await chats.SendAsync(chat, implementation, null, null, default);
+            var waiting = await chats.ReadAsync(chat, 10, default);
+            Assert.Equal("developer", waiting.Run?.AgentId);
+            Assert.Equal(project.Id, waiting.Run?.ProjectId);
+            Assert.Equal(WorkStatus.WaitingForApproval, waiting.Run?.Status);
+            Assert.Equal("architect", waiting.CoordinatorAgentId);
+            var approval = Assert.Single(waiting.Approvals);
+            Assert.Equal(waiting.Run?.Id, approval.ContinuationRunId);
+            Assert.Equal(2, codex.TurnRequests.Count);
+
+            await new StorageStartup(storage, storage.Paths).InitializeAsync(default);
+            Assert.Equal("Pending", await db.Approvals.AsNoTracking().Where(a => a.Id == approval.Id).Select(a => a.Status).SingleAsync());
+            await operations.DecideAsync(approval.Id, true, PlatformUser.OwnerId, default);
+            await Completed(3);
+            var completed = await chats.ReadAsync(chat, 10, default);
+            Assert.Equal(waiting.Run?.Id, completed.Run?.Id);
+            Assert.Contains(implementation, codex.TurnRequests[^1].Items("input").Single().String("text"));
+            Assert.Equal("platform_work", codex.TurnRequests[^1].String("permissions"));
+            Assert.Contains(completed.Events, e => e.Kind == "AgentHandoff" && e.AgentId == "developer");
+
+            await chats.SendAsync(chat, "Mimar, sonucu değerlendirir misin?", null, null, default);
+            await Completed(4);
+            Assert.Equal("architect", (await chats.ReadAsync(chat, 10, default)).Run?.AgentId);
+
+            (await db.Agents.SingleAsync(a => a.Id == "qa")).AllowedProjects = project.Id;
+            await db.SaveChangesAsync();
+            codex.NextToolCalls.Enqueue(("task_delegate", new { agentId = "devops", brief = "Unauthorized follow-up" }));
+            codex.NextToolCalls.Enqueue(("task_delegate", new { agentId = "qa", brief = "Verify the Node.js application." }));
+            await chats.SendAsync(chat, "Uygulamanın çalıştığını doğrula.", null, null, default);
+            await Completed(6);
+            var verified = await chats.ReadAsync(chat, 15, default);
+            Assert.Equal("qa", verified.Run?.AgentId);
+            Assert.Equal("architect", verified.CoordinatorAgentId);
+            Assert.Equal(completed.Run?.Workspace, verified.Run?.Workspace);
+            Assert.Contains("Verify the Node.js application.", codex.TurnRequests[^1].Items("input").Single().String("text"));
+            Assert.Contains(verified.Events, e => e.Kind == "AgentHandoff" && e.AgentId == "qa");
+        }
+        finally { await worker.StopAsync(default); }
+    }
+
+    [Fact]
+    public async Task CombinedCreationAndImplementationQueuesBothStepsAndCanBeDeclined()
+    {
+        await using var storage = await TestStorage.CreateAsync();
+        await using var db = storage.CreateDbContext();
+        var codex = new FakeCodex();
+        var updates = new ChatUpdates();
+        var chats = new ChatStore(storage, updates);
+        var operations = new Operations(storage, storage.Paths, new Vault(storage.Paths, null));
+        using var worker = Worker(storage, codex, updates);
+        await worker.StartAsync(default);
+        try
+        {
+            var id = await chats.SendAsync(null, "Atlas adında bir proje oluştur ve Node.js ile basit bir uygulama yap.", null, null, default);
+            var first = Assert.Single((await chats.ReadAsync(id, 10, default)).Approvals);
+            Assert.Contains("Create projects", first.Scope);
+            codex.NextToolCalls.Enqueue(("project_create", new { name = "Atlas" }));
+            await operations.DecideAsync(first.Id, true, PlatformUser.OwnerId, default);
+
+            await WaitAsync(() => db.Approvals.AnyAsync(a => a.ConversationId == id && a.Id != first.Id && a.Status == "Pending"));
+            var staged = await chats.ReadAsync(id, 10, default);
+            var project = await db.Projects.SingleAsync();
+            var access = Assert.Single(staged.Approvals, a => a.Status == "Pending");
+            Assert.Equal("developer", staged.Run?.AgentId);
+            Assert.Equal(project.Id, staged.ProjectId);
+            Assert.Equal(staged.Run?.Id, access.ContinuationRunId);
+            Assert.Single(staged.Messages, m => m.Role == "user");
+            await operations.DecideAsync(access.Id, false, PlatformUser.OwnerId, default);
+            Assert.Equal(WorkStatus.Cancelled, (await chats.ReadAsync(id, 10, default)).Run?.Status);
+            Assert.Single(codex.TurnRequests);
+        }
+        finally { await worker.StopAsync(default); }
+    }
+
+    [Fact]
     public async Task NormalChatHandsTheOriginalRequestToOneSpecialistAndKeepsTheFollowUp()
     {
         await using var storage = await TestStorage.CreateAsync();
@@ -428,6 +529,11 @@ public sealed class ChatTests(ITestOutputHelper output)
     public async Task VoiceHandoffUsesOneTranscriptAndSpeaksTheSelectedAgentsResult()
     {
         await using var storage = await TestStorage.CreateAsync();
+        await using (var db = storage.CreateDbContext())
+        {
+            (await db.Agents.SingleAsync(a => a.Id == "qa")).Voice = "maple";
+            await db.SaveChangesAsync();
+        }
         var codex = new FakeCodex();
         var updates = new ChatUpdates();
         var chats = new ChatStore(storage, updates);
@@ -441,6 +547,7 @@ public sealed class ChatTests(ITestOutputHelper output)
                 var opened = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
                 voice.ConversationOpened += id => opened.SetResult(id);
                 Assert.Equal("v=0 fake answer", await voice.StartAsync("v=0 fake offer"));
+                Assert.Equal("maple", codex.VoiceUsed);
                 const string text = "Please run the regression tests.";
                 var request = new { type = "handoff_request", item_id = "handoff-1", input_transcript = text };
                 codex.Emit("thread/realtime/itemAdded", new { threadId = "t1", item = request });
@@ -588,6 +695,7 @@ public sealed class ChatTests(ITestOutputHelper output)
         public bool Connected { get; private set; }
         public bool DropNext { get; set; }
         public bool DenyWorkspaceNamespace { get; set; }
+        public bool WorkspaceReady { get; set; }
         public List<string> Methods { get; } = [];
         public List<JsonElement> ThreadRequests { get; } = [];
         public List<JsonElement> TurnRequests { get; } = [];
@@ -596,6 +704,7 @@ public sealed class ChatTests(ITestOutputHelper output)
         public System.Collections.Concurrent.ConcurrentQueue<string> SpokenResults { get; } = new();
         public string? TurnModel { get; private set; }
         public string? VoicePrompt { get; private set; }
+        public string? VoiceUsed { get; private set; }
         private int count;
         public event Action<CodexEvent>? Received;
         public void Emit(string method, object parameters) => Received?.Invoke(new CodexEvent(method, Args(parameters)));
@@ -613,15 +722,18 @@ public sealed class ChatTests(ITestOutputHelper output)
             Methods.Add(method);
             if (method == "account/read")
                 return Task.FromResult(Args(new { account = new { type = "chatgpt" } }));
+            if (method == "thread/realtime/listVoices")
+                return Task.FromResult(Args(new { voices = new { v3 = new[] { "juniper", "maple" } } }));
             if (method == "thread/realtime/start")
             {
                 var request = Args(parameters!);
                 VoicePrompt = request.String("prompt");
+                VoiceUsed = request.String("voice");
                 Emit("thread/realtime/sdp", new { threadId = request.String("threadId"), sdp = "v=0 fake answer" });
             }
             if (method == "thread/realtime/appendSpeech")
                 SpokenResults.Enqueue(Args(parameters!).String("text")!);
-            if (method == "windowsSandbox/readiness" && DenyWorkspaceNamespace)
+            if (method == "windowsSandbox/readiness" && (WorkspaceReady || DenyWorkspaceNamespace))
                 return Task.FromResult(Args(new { status = "ready" }));
             if (method is "thread/start" or "thread/resume")
             {

@@ -20,6 +20,7 @@ public sealed class Agent
     public string Instructions { get; set; } = "";
     public string? Model { get; set; }
     public string? Effort { get; set; }
+    public string? Voice { get; set; }
     public string AllowedTools { get; set; } = "memory";
     public string AllowedProjects { get; set; } = "";
     public DateTime? LastActivityUtc { get; set; }
@@ -29,6 +30,7 @@ public sealed class Agent
 public sealed class Conversation
 {
     public bool AutoApprove { get; set; }
+    public string? CoordinatorAgentId { get; set; }
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public string Title { get; set; } = "";
     public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
@@ -169,6 +171,7 @@ public sealed class Approval
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public string AgentId { get; set; } = "";
     public string? ConversationId { get; set; }
+    public string? ContinuationRunId { get; set; }
     public string Kind { get; set; } = "";
     public string Scope { get; set; } = "";
     public string Payload { get; set; } = "";

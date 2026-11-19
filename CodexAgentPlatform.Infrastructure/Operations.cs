@@ -222,9 +222,13 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         var now = DateTime.UtcNow;
         await db.Approvals.Where(x => (x.Status == "Pending" || x.Status == "Approved") && x.ExpiresAtUtc <= now)
             .ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, "Expired"), ct);
+        var expiredRequests = await db.Runs.Where(r => r.Status == WorkStatus.WaitingForApproval &&
+            db.Approvals.Any(a => a.ContinuationRunId == r.Id && a.Status == "Expired"))
+            .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, WorkStatus.Cancelled).SetProperty(r => r.UpdatedAtUtc, now)
+                .SetProperty(r => r.Error, "The permission request expired. The task was cancelled."), ct);
         var approval = await db.Approvals.AsNoTracking().Where(x => x.Status == "Approved" && x.Kind != AgentPermissionGrants.ApprovalKind)
             .OrderBy(x => x.CreatedAtUtc).FirstOrDefaultAsync(ct);
-        if (approval is null) return false;
+        if (approval is null) return expiredRequests != 0;
         var claimed = await db.Approvals.Where(x => x.Id == approval.Id && x.Status == "Approved" && x.ExpiresAtUtc > now)
             .ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, "Executing"), ct);
         if (claimed != 1) return true;

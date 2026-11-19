@@ -11,7 +11,10 @@
 </button>
 <dialog class="voice-dialog" aria-labelledby="voice-title" @ref="dialog" @onclose="EndAsync">
     <header class="voice-header">
-        <h2 id="voice-title">Voice call</h2>
+        <div>
+            <h2 id="voice-title">Voice call</h2>
+            @if (speakerName is not null) { <small>@speakerName</small> }
+        </div>
         <button type="button" class="icon-button" aria-label="Close voice call" title="Close voice call" @onclick="CloseAsync">
             <Icon Name="close" />
         </button>
@@ -51,6 +54,8 @@
     [Parameter] public string? ProjectId { get; set; }
     [Parameter] public bool PinProject { get; set; }
     [Parameter] public string? SelectedAgent { get; set; }
+    [Parameter] public string? VoiceAgentId { get; set; }
+    [Parameter] public string? VoiceAgentName { get; set; }
     [Parameter] public bool AutoApprove { get; set; }
     [Parameter] public EventCallback<string> ConversationOpened { get; set; }
 
@@ -61,7 +66,7 @@
     private string? callConversationId, previousConversationId;
     private bool starting, connected, muted, disposed;
     private string status = "Connecting…";
-    private string? error;
+    private string? error, speakerName;
 
     private async Task OpenAsync()
     {
@@ -69,13 +74,14 @@
         starting = true;
         connected = muted = false;
         error = null;
+        speakerName = VoiceAgentName;
         status = "Connecting…";
         try
         {
             module ??= await JS.InvokeAsync<IJSObjectReference>("import", "./" + Assets["chat-voice.js"]);
             if (disposed) return;
             reference ??= DotNetObjectReference.Create(this);
-            var current = new ChatVoiceCall(Codex, Chats, Worker, Log, ConversationId, ProjectId, SelectedAgent, AutoApprove, PinProject);
+            var current = new ChatVoiceCall(Codex, Chats, Worker, Log, ConversationId, ProjectId, SelectedAgent, AutoApprove, PinProject, VoiceAgentId);
             call = current;
             callConversationId = ConversationId;
             current.ConversationOpened += id => _ = InvokeAsync(async () =>

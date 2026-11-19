@@ -96,6 +96,9 @@ namespace CodexAgentPlatform.Infrastructure.Migrations
                         .IsRequired()
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("Voice")
+                        .HasColumnType("TEXT");
+
                     b.HasKey("Id");
 
                     b.HasIndex("Name")
@@ -115,6 +118,9 @@ namespace CodexAgentPlatform.Infrastructure.Migrations
 
                     b.Property<bool>("AutoEligible")
                         .HasColumnType("INTEGER");
+
+                    b.Property<string>("ContinuationRunId")
+                        .HasColumnType("TEXT");
 
                     b.Property<string>("ConversationId")
                         .HasColumnType("TEXT");
@@ -225,6 +231,9 @@ namespace CodexAgentPlatform.Infrastructure.Migrations
 
                     b.Property<bool>("AutoApprove")
                         .HasColumnType("INTEGER");
+
+                    b.Property<string>("CoordinatorAgentId")
+                        .HasColumnType("TEXT");
 
                     b.Property<DateTime>("CreatedAtUtc")
                         .HasColumnType("TEXT");

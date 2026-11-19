@@ -26,8 +26,9 @@ public sealed class StorageStartup(IDbContextFactory<PlatformDb> dbs, PlatformPa
         }
 
         var now = DateTime.UtcNow;
-        var stale = await db.Runs.Where(x => x.Status == WorkStatus.Pending || x.Status == WorkStatus.Running ||
-            x.Status == WorkStatus.WaitingForApproval || x.Status == WorkStatus.WaitingForUser).ToListAsync(ct);
+        var stale = await db.Runs.Where(x => x.Status == WorkStatus.Running || x.Status == WorkStatus.WaitingForUser ||
+            (x.Status == WorkStatus.Pending || x.Status == WorkStatus.WaitingForApproval) &&
+            !db.Approvals.Any(a => a.ContinuationRunId == x.Id && (a.Status == "Pending" || a.Status == "Completed"))).ToListAsync(ct);
         foreach (var run in stale)
         {
             run.Status = WorkStatus.Interrupted;
@@ -46,7 +47,8 @@ public sealed class StorageStartup(IDbContextFactory<PlatformDb> dbs, PlatformPa
             work.Status = WorkStatus.Interrupted;
             work.UpdatedAtUtc = now;
         }
-        await db.Approvals.Where(x => x.Status == "Executing" || x.Status == "Pending" || x.Status == "Approved")
+        await db.Approvals.Where(x => x.Status == "Executing" || x.Status == "Approved" ||
+            x.Status == "Pending" && x.ContinuationRunId == null)
             .ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, "Interrupted"), ct);
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);

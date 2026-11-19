@@ -16,7 +16,7 @@
     <header class="page-bar">
         <button class="icon-button chat-menu" type="button" popovertarget="mobile-menu" aria-label="Open menu"><Icon Name="menu" /></button>
         <div class="page-heading"><Icon Name="chat" /><div class="chat-title"><h1>@Title</h1>
-            <small>@AgentName(ReplyAgentId)@(AutoApprove ? " · Auto-approval enabled" : "")</small></div></div>
+            <small>@AgentName(ReplyAgentId)@(projects.Find(p => p.Id == EffectiveProject) is { } focusedProject ? $" · {focusedProject.Name}" : "")@(AutoApprove ? " · Auto-approval enabled" : "")</small></div></div>
         <div class="actions">
             <button type="button" class="icon-button settings-launch" aria-label="Chat settings" title="Chat settings" aria-haspopup="dialog" @onclick="OpenSettingsAsync"><Icon Name="settings" /></button>
             @if (Id is not null) { <a class="icon-button" href="/" title="New chat" aria-label="New chat"><Icon Name="plus" /></a> }
@@ -66,7 +66,7 @@
                             {
                                 @if (snapshot.Run?.AssistantMessageId == message.Id && IsActive)
                                 {
-                                    <div class="thinking"><span></span> Preparing a response</div>
+                                    <div class="thinking" role="status"><span></span> @RunStatus(snapshot.Run.Status)</div>
                                 }
                             }
                             else if (message.Role == "user") { <div class="user-text">@message.Text</div> }
@@ -118,7 +118,8 @@
                     }
                 }
             </div>
-            <ChatVoice ConversationId="@Id" ProjectId="@EffectiveProject" PinProject="@(projectId == "")" SelectedAgent="@(mentionedAgent?.Id ?? selectedAgent)"
+            <ChatVoice ConversationId="@Id" ProjectId="@EffectiveProject" PinProject="@(projectId == "")" SelectedAgent="@(mentionedAgent?.Id ?? selectedAgent ?? snapshot.CoordinatorAgentId)"
+                       VoiceAgentId="@(mentionedAgent?.Id ?? ReplyAgentId)" VoiceAgentName="@AgentName(mentionedAgent?.Id ?? ReplyAgentId)"
                        AutoApprove="@AutoApprove" ConversationOpened="OpenVoiceConversation" />
             @if (IsActive && !ChatStore.IsPauseRequest(draft))
             {
@@ -174,7 +175,7 @@
             if (projectId is not null) return projectId == "" ? null : projectId;
             var speech = snapshot.Messages.FindLast(m => m.Role == "user" && m.VoiceProjectId is not null &&
                 m.Id > (snapshot.Run?.UserMessageId ?? 0));
-            return speech?.VoiceProjectId is { } voiceProject ? (voiceProject == "" ? null : voiceProject) : snapshot.Run?.ProjectId;
+            return speech?.VoiceProjectId is { } voiceProject ? (voiceProject == "" ? null : voiceProject) : snapshot.ProjectId;
         }
     }
     private string ProjectSelection
@@ -186,7 +187,7 @@
     {
         get
         {
-            var id = selectedAgent ?? (snapshot.Run?.ProjectId == EffectiveProject ? snapshot.Run?.AgentId : null);
+            var id = selectedAgent ?? snapshot.CoordinatorAgentId ?? (snapshot.Run?.ProjectId == EffectiveProject ? snapshot.Run?.AgentId : null);
             return agents.Any(a => a.Id == id && ToolAccess.AllowsProject(a, EffectiveProject)) ? id! : PlatformChat.Id;
         }
         set { selectedAgent = value; mentionedAgent = null; }
@@ -317,7 +318,7 @@
         try
         {
             var id = await Chats.SendAsync(Id, draft, mentionedAgent?.Id ?? selectedAgent,
-                projectId ?? EffectiveProject, default, draftAutoApprove);
+                projectId, default, draftAutoApprove);
             draft = "";
             mentionedAgent = null;
             selectedAgent = null;
@@ -384,6 +385,13 @@
     }
 
     private string AgentName(string? id) => id == PlatformChat.Id ? PlatformChat.Name : agents.Find(a => a.Id == id)?.Name ?? "Codex";
+    private static string RunStatus(WorkStatus status) => status switch
+    {
+        WorkStatus.WaitingForApproval => "Waiting for your approval",
+        WorkStatus.Pending => "Queued to start",
+        WorkStatus.WaitingForUser => "Waiting for your input",
+        _ => "Working on your request"
+    };
     private string LocalTime(DateTime time) => TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(time, DateTimeKind.Utc), zone).ToString("dd.MM · HH:mm");
     public void Dispose() { disposed = true; Updates.Changed -= OnChange; Updates.AnswerChanged -= OnAnswer; }
 }

@@ -33,6 +33,24 @@
                 <div class="fields side-by-side"><ModelFields Models="models" @bind-Model="edit.Model" @bind-Effort="edit.Effort" /></div>
                 <div><button type="button" class="button" disabled="@busy" @onclick="LoadModelsAsync">Load models</button></div>
                 @if (modelError is not null) { <p class="notice error" role="alert">@modelError</p> }
+                <label>Voice
+                    <select @bind="edit.Voice" disabled="@loadingVoices">
+                        <option value="">Default voice</option>
+                        @if (edit.Voice is { Length: > 0 } savedVoice && !voices.Contains(savedVoice))
+                        {
+                            <option value="@savedVoice">@VoiceLabel(savedVoice)</option>
+                        }
+                        @foreach (var voice in voices)
+                        {
+                            <option value="@voice">@VoiceLabel(voice)</option>
+                        }
+                    </select>
+                </label>
+                @if (loadingVoices) { <small role="status">Loading voice options…</small> }
+                @if (voiceError is not null)
+                {
+                    <div class="actions"><small role="status">@voiceError</small><button type="button" class="button" @onclick="LoadVoicesAsync">Retry</button></div>
+                }
                 <fieldset>
                     <legend>Tool permissions</legend>
                     @foreach (var tool in ToolAccess.Permissions)
@@ -68,9 +86,10 @@
     private List<Project> projects = [];
     private Dictionary<string, long> stats = [];
     private List<CodexModel> models = [];
+    private string[] voices = [];
     private Agent? edit;
-    private bool isNew, busy, focusOnRender, focusAddOnRender;
-    private string? error, modelError, notice;
+    private bool isNew, busy, loadingVoices, focusOnRender, focusAddOnRender;
+    private string? error, modelError, voiceError, notice;
     private ElementReference editorHeading, addButton;
     private HashSet<string> allowedTools = [], allowedProjects = [];
 
@@ -97,7 +116,7 @@
         stats = await db.Usage.GroupBy(x => x.AgentId).Select(g => new { Id = g.Key, Total = g.Sum(x => x.Total) })
             .ToDictionaryAsync(x => x.Id, x => x.Total);
     }
-    private void NewAgent()
+    private async Task NewAgent()
     {
         if (busy) return;
         edit = new();
@@ -106,6 +125,7 @@
         allowedTools = ["memory"];
         allowedProjects = [];
         focusOnRender = true;
+        if (voices.Length == 0) await LoadVoicesAsync();
     }
 
     private void CancelEdit()
@@ -139,7 +159,26 @@
             focusOnRender = true;
         }
         finally { busy = false; }
+        if (edit is not null && voices.Length == 0) await LoadVoicesAsync();
     }
+    private async Task LoadVoicesAsync()
+    {
+        if (loadingVoices) return;
+        loadingVoices = true;
+        voiceError = null;
+        try
+        {
+            voices = await Accounts.VoicesAsync(default);
+            if (voices.Length == 0) voiceError = "Codex returned no voice options.";
+        }
+        catch (Exception ex) when (ex is CodexRpcException or IOException or InvalidOperationException or TimeoutException or OperationCanceledException)
+        {
+            voiceError = "Could not load voice options from Codex.";
+        }
+        finally { loadingVoices = false; }
+    }
+
+    private static string VoiceLabel(string voice) => char.ToUpperInvariant(voice[0]) + voice[1..];
     private async Task LoadModelsAsync()
     {
         if (busy) return;
@@ -166,6 +205,10 @@
             row.Instructions = draft.Instructions;
             row.Model = draft.Model;
             row.Effort = draft.Effort;
+            var voice = string.IsNullOrEmpty(draft.Voice) ? null : draft.Voice;
+            if (voice is not null && voice != row.Voice && !voices.Contains(voice))
+                throw new ArgumentException("Select a voice from the Codex voice list.");
+            row.Voice = voice;
             row.Archived = draft.Archived;
             var addedProjects = allowedProjects.Except(ToolAccess.Split(draft.AllowedProjects)).ToArray();
             if (addedProjects.Length > 0 && await db.Projects.CountAsync(p => addedProjects.Contains(p.Id)) != addedProjects.Length)

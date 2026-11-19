@@ -14,6 +14,13 @@ public sealed class CodexAccounts(ICodexConnection codex)
     public Task<JsonElement> WindowsSetupAsync(CancellationToken ct) =>
         codex.CallAsync("windowsSandbox/setupStart", new { mode = "elevated" }, ct);
 
+    public async Task<string[]> VoicesAsync(CancellationToken ct)
+    {
+        var result = await codex.CallAsync("thread/realtime/listVoices", new { }, ct);
+        return result.Get("voices").Items("v3").Where(v => v.ValueKind == JsonValueKind.String)
+            .Select(v => v.GetString()!).Where(v => !string.IsNullOrWhiteSpace(v)).Distinct(StringComparer.Ordinal).ToArray();
+    }
+
     public async Task<List<CodexModel>> ModelsAsync(CancellationToken ct)
     {
         List<CodexModel> models = [];

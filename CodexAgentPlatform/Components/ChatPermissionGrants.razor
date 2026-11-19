@@ -6,6 +6,10 @@
 {
     <section class="card fields" @key="request.Id" aria-label="Agent permission request">
         <strong id="grant-scope-@request.Id">@request.Scope</strong>
+        @if (request.ContinuationRunId is not null)
+        {
+            <small>The queued task starts automatically after approval.</small>
+        }
         <small>Expires at @request.ExpiresAtUtc.ToString("HH:mm") UTC</small>
         <div class="actions">
             <button type="button" class="primary" disabled="@busy" aria-describedby="grant-scope-@request.Id"
@@ -33,7 +37,9 @@
             var owner = (await Authentication.GetAuthenticationStateAsync()).User;
             await Operations.DecideAsync(request.Id, allow,
                 owner.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? "", default);
-            notice = allow ? "Permission granted." : "Permission request declined.";
+            notice = allow
+                ? request.ContinuationRunId is null ? "Permission granted." : "Permission granted. The task is queued to start."
+                : request.ContinuationRunId is null ? "Permission request declined." : "Permission declined. The queued task was cancelled.";
             Updates.Publish("");
         }
         catch (Exception ex) when (ex is InvalidOperationException or UnauthorizedAccessException or DbUpdateException)

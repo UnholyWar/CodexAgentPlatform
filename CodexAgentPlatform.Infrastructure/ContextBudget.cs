@@ -20,10 +20,15 @@ public sealed class ContextBudget(IDbContextFactory<PlatformDb> dbs)
             r.ConversationId == run.ConversationId && r.UserMessageId == run.UserMessageId && r.AgentId == PlatformChat.Id, ct);
         var content = new StringBuilder();
         content.AppendLine($"User time zone: {settings.TimeZone}. Current UTC: {DateTime.UtcNow:O}.");
+        if (!normal && run.ProjectId is null && ToolAccess.Has(agent, ToolAccess.CreateProjects))
+            content.AppendLine("For an explicit request to create a project, call project_create with its requested name. Ask for the name if it is missing.");
         if (run.ProjectId is { } project)
         {
             var name = await db.Projects.AsNoTracking().Where(p => p.Id == project).Select(p => p.Name).SingleOrDefaultAsync(ct);
             content.AppendLine($"Current project ID: {project}. Project name (directory data): {JsonSerializer.Serialize(name)}");
+            if (run.DelegationDepth > 0 && await db.Runs.AnyAsync(r => r.ConversationId == run.ConversationId &&
+                r.UserMessageId == run.UserMessageId && r.Id != run.Id, ct))
+                content.AppendLine("The project has already been created. Carry out the implementation part of the user's request in this project's workspace.");
             if (!normal && ToolAccess.AllowsProject(agent, project) && ToolAccess.Has(agent, "resources"))
             {
                 var resources = await db.Resources.AsNoTracking().Where(r => r.ProjectId == project)
@@ -104,6 +109,9 @@ public sealed class ContextBudget(IDbContextFactory<PlatformDb> dbs)
         This is a chat-first application. Answer greetings and questions without opening a work item.
         For a concrete new project activity or a request to continue implementation, call task_begin before
         making changes. Choose mode new for unrelated work and resume for continuing the referenced work.
+        When you are coordinating a request, use agent_list and task_delegate to pass work to an eligible specialist.
+        Preserve the user's requirements in the brief and communicate the handoff in the chat.
+        When implementing a new project without a registered repository, write the application in the managed workspace.
         Use task_progress after material steps and task_finish when stopping, waiting, or done.
         For date-based questions, use memory_timeline. For older transcripts, use conversation_search.
         Use memory_search before writing reusable knowledge, and memory_read only on selected notes.

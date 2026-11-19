@@ -32,9 +32,15 @@ public sealed class ChatWorker(IDbContextFactory<PlatformDb> dbs, ICodexConnecti
     public async Task PauseAsync(string conversation, CancellationToken ct)
     {
         await using var db = await dbs.CreateDbContextAsync(ct);
-        var pending = await db.Runs.Where(x => x.ConversationId == conversation && x.Status == WorkStatus.Pending)
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        var pending = await db.Runs.Where(x => x.ConversationId == conversation && (x.Status == WorkStatus.Pending ||
+            x.Status == WorkStatus.WaitingForApproval && db.Approvals.Any(a => a.ContinuationRunId == x.Id && a.Status == "Pending")))
             .ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, WorkStatus.Paused)
                 .SetProperty(x => x.UpdatedAtUtc, DateTime.UtcNow), ct);
+        await db.Approvals.Where(a => a.ConversationId == conversation && a.Status == "Pending" &&
+            db.Runs.Any(r => r.Id == a.ContinuationRunId && r.Status == WorkStatus.Paused))
+            .ExecuteUpdateAsync(s => s.SetProperty(a => a.Status, "Declined").SetProperty(a => a.Result, "The task was paused."), ct);
+        await tx.CommitAsync(ct);
         if (pending == 0 && active.Values.FirstOrDefault(x => x.Run.ConversationId == conversation) is { } running)
         {
             running.Pause = true;
@@ -510,34 +516,45 @@ public sealed class ChatWorker(IDbContextFactory<PlatformDb> dbs, ICodexConnecti
         db.Events.Add(new Activity { ConversationId = run.ConversationId, AgentId = run.AgentId, WorkId = run.WorkId,
             ProjectId = run.ProjectId, Kind = $"Turn{status}", Detail = error ?? "" });
         await db.SaveChangesAsync(ct);
-        if (delegation is not null)
+        var createdProject = status == WorkStatus.Completed && run.DelegationDepth == 0
+            ? await ProjectRouting.CreatedProjectAsync(db, run.ConversationId, run.CreatedAtUtc, ct) : null;
+        var implementNewProject = createdProject is not null && ProjectRouting.Intent(await db.Messages
+            .Where(m => m.Id == run.UserMessageId && m.Role == "user").Select(m => m.Text).SingleOrDefaultAsync(ct) ?? "").Implement;
+        if (implementNewProject)
+        {
+            var agents = await db.Agents.AsNoTracking().Where(a => !a.Archived).ToListAsync(ct);
+            if (ProjectRouting.Developer(agents, createdProject!) is { } developer)
+            {
+                var needsAccess = !ToolAccess.AllowsProject(developer, createdProject);
+                var next = await QueueHandoffAsync(db, run, developer, createdProject, run.UserMessageId, 1, needsAccess, ct);
+                if (needsAccess) await AgentPermissionGrants.ForQueuedRunAsync(db, next, "project", createdProject!, ct);
+            }
+            else
+            {
+                const string reason = "The project was created. Implementation requires an active development agent with Workspace and terminal permission.";
+                db.Events.Add(new Activity { ConversationId = run.ConversationId, ProjectId = createdProject,
+                    AgentId = run.AgentId, Kind = "AgentHandoffUnavailable", Detail = reason });
+                msg.Text = string.IsNullOrWhiteSpace(msg.Text) ? reason : $"{msg.Text}\n\n{reason}";
+            }
+        }
+        else if (delegation is not null)
         {
             var agent = await db.Agents.AsNoTracking().SingleOrDefaultAsync(x => x.Id == delegation.AgentId, ct);
             var handoff = run.AgentId == PlatformChat.Id;
             if (agent is not null && agent.Id != PlatformChat.Id && ToolAccess.AllowsProject(agent, run.ProjectId))
             {
-                var settings = await db.Preferences.AsNoTracking().SingleAsync(ct);
                 Message? brief = null;
                 if (handoff)
                 {
                     msg.Text = $"{agent.Name} took over.";
-                    db.Events.Add(new Activity { ConversationId = run.ConversationId, AgentId = agent.Id, ProjectId = run.ProjectId,
-                        Kind = "AgentHandoff", Detail = msg.Text });
                 }
                 else
                 {
                     brief = new Message { ConversationId = run.ConversationId, Role = "agent", AgentId = run.AgentId, Text = delegation.Brief };
                     db.Messages.Add(brief);
                 }
-                var response = new Message { ConversationId = run.ConversationId, Role = "assistant", AgentId = agent.Id };
-                db.Messages.Add(response);
                 await db.SaveChangesAsync(ct);
-                var workspace = handoff ? await ChatStore.RecentWorkspaceAsync(db, run.ConversationId, agent.Id, run.ProjectId, ct) : null;
-                db.Runs.Add(new ChatRun { AgentId = agent.Id, ConversationId = run.ConversationId, ProjectId = run.ProjectId,
-                    Workspace = workspace ?? Guid.NewGuid().ToString("N"), DelegationDepth = handoff ? 0 : 1,
-                    UserMessageId = brief?.Id ?? run.UserMessageId, AssistantMessageId = response.Id,
-                    Model = agent.Model ?? settings.Model, Effort = agent.Effort ?? (agent.Model is null ? settings.Effort : null) });
-                await db.SaveChangesAsync(ct);
+                await QueueHandoffAsync(db, run, agent, run.ProjectId, brief?.Id ?? run.UserMessageId, handoff ? 0 : 1, false, ct);
             }
             else if (handoff)
             {
@@ -545,8 +562,37 @@ public sealed class ChatWorker(IDbContextFactory<PlatformDb> dbs, ICodexConnecti
                 await db.SaveChangesAsync(ct);
             }
         }
+        await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
         if (work is not null) await WorkspaceMemory.WriteWorkAsync(paths, work, ct);
+    }
+
+    private static async Task<ChatRun> QueueHandoffAsync(PlatformDb db, ChatRun source, Agent target, string? projectId,
+        long messageId, int depth, bool needsAccess, CancellationToken ct)
+    {
+        var settings = await db.Preferences.AsNoTracking().SingleAsync(ct);
+        var workspace = await ChatStore.RecentWorkspaceAsync(db, source.ConversationId, target.Id, projectId, ct);
+        if (workspace is null && depth > 0 && projectId is not null && !needsAccess && ToolAccess.Has(target, "workspace"))
+        {
+            var projectAgents = await db.Agents.AsNoTracking().Where(a => !a.Archived).ToListAsync(ct);
+            var developer = ProjectRouting.Developer(projectAgents, projectId);
+            if (developer is not null && ToolAccess.AllowsProject(developer, projectId))
+                workspace = await ChatStore.RecentWorkspaceAsync(db, source.ConversationId, developer.Id, projectId, ct);
+        }
+        var response = new Message { ConversationId = source.ConversationId, Role = "assistant", AgentId = target.Id };
+        db.Messages.Add(response);
+        await db.SaveChangesAsync(ct);
+        var next = new ChatRun { AgentId = target.Id, ConversationId = source.ConversationId, ProjectId = projectId,
+            Workspace = workspace ?? Guid.NewGuid().ToString("N"), DelegationDepth = depth,
+            Status = needsAccess ? WorkStatus.WaitingForApproval : WorkStatus.Pending,
+            UserMessageId = messageId, AssistantMessageId = response.Id,
+            Model = target.Model ?? settings.Model, Effort = target.Effort ?? (target.Model is null ? settings.Effort : null) };
+        db.Runs.Add(next);
+        db.Events.Add(new Activity { ConversationId = source.ConversationId, AgentId = target.Id, ProjectId = projectId,
+            Kind = needsAccess ? "AgentHandoffWaiting" : "AgentHandoff",
+            Detail = needsAccess ? $"{target.Name} is waiting for project access." : $"{target.Name} took over the task." });
+        await db.SaveChangesAsync(ct);
+        return next;
     }
 
     private static string Answer(Dictionary<string, StringBuilder> text) => TextLimits.Clip(string.Join("\n\n", text.Values), 180_000);

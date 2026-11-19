@@ -53,7 +53,7 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
         }
         foreach (var tool in Registry.Where(tool => tool.Permission.Length == 0 || ToolAccess.Has(agent, tool.Permission)))
         {
-            bool onDemand = tool.Permission is "git" or "ssh" or "resources" or "delegate" or ToolAccess.CreateProjects ||
+            bool onDemand = tool.Permission is "git" or "ssh" or "resources" ||
                 tool.Name is "memory_archive" or "memory_consolidate" or "memory_update" or "memory_create";
             if (projectSelected && tool.Name is ("resource_search" or "resource_get" or "git_workspace"))
                 onDemand = false;
@@ -174,7 +174,8 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
                 return await operations.InspectSshAsync(agent, id!, args.String("operation")!, ct, run.ConversationId, run.WorkId, OutputOffset(args));
             case "agent_list":
                 var agents = await db.Agents.AsNoTracking().Where(x => !x.Archived && x.Id != agent.Id).ToListAsync(ct);
-                return agents.Where(a => ToolAccess.AllowsProject(a, run.ProjectId)).Select(a => new { a.Id, a.Name, a.Title }).ToArray();
+                return agents.Where(a => ToolAccess.AllowsProject(a, run.ProjectId))
+                    .Select(a => new { a.Id, a.Name, a.Title, workspace = ToolAccess.Has(a, "workspace") }).ToArray();
             case "task_delegate":
                 if (run.DelegationDepth != 0) throw new InvalidOperationException("Further delegation is not permitted for this work.");
                 var target = await db.Agents.AsNoTracking().SingleOrDefaultAsync(x => x.Id == args.String("agentId"), ct);

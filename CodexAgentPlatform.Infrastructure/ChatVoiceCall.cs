@@ -8,7 +8,8 @@ namespace CodexAgentPlatform.Infrastructure;
 
 public sealed partial class ChatVoiceCall(
     ICodexConnection codex, ChatStore chats, ChatWorker worker, ILogger<ChatVoiceCall> log,
-    string? conversationId, string? projectId, string? selectedAgent, bool autoApprove, bool pinProject = false) : IAsyncDisposable
+    string? conversationId, string? projectId, string? selectedAgent, bool autoApprove, bool pinProject = false,
+    string? voiceAgentId = null) : IAsyncDisposable
 {
     private readonly CancellationTokenSource lifetime = new();
     private readonly Channel<CodexEvent> inbox = Channel.CreateBounded<CodexEvent>(64);
@@ -48,6 +49,19 @@ public sealed partial class ChatVoiceCall(
             throw new InvalidOperationException("Sign in with ChatGPT in Codex settings before starting a voice call.");
 
         var context = await chats.VoiceContextAsync(conversationId, currentProjectId, ct);
+        var voice = await chats.AgentVoiceAsync(voiceAgentId ?? selectedAgent, currentProjectId, ct);
+        if (voice is not null)
+        {
+            try
+            {
+                if (!(await new CodexAccounts(codex).VoicesAsync(ct)).Contains(voice, StringComparer.Ordinal)) voice = null;
+            }
+            catch (CodexRpcException ex)
+            {
+                log.LogDebug(ex, "Could not verify the requested Realtime voice. Using the default voice.");
+                voice = null;
+            }
+        }
         codex.Received += Receive;
         var thread = await codex.CallAsync("thread/start", new
         {
@@ -58,7 +72,7 @@ public sealed partial class ChatVoiceCall(
         events = ReadEventsAsync(lifetime.Token);
         await codex.CallAsync("thread/realtime/start", new
         {
-            threadId, version = "v3", outputModality = "audio", includeStartupContext = false, initialItems = context.History,
+            threadId, version = "v3", voice, outputModality = "audio", includeStartupContext = false, initialItems = context.History,
             voiceSessionId = Guid.NewGuid().ToString(), clientManagedHandoffs = true,
             transport = new { type = "webrtc", sdp = offer },
             prompt = $$"""
@@ -167,12 +181,13 @@ public sealed partial class ChatVoiceCall(
             if (paired.Routed) return;
             user = paired.User;
         }
-        var named = await chats.FindSpokenProjectsAsync(text, ct);
+        var intent = ProjectRouting.Intent(text);
+        var named = intent.Create ? [] : await chats.FindSpokenProjectsAsync(text, ct);
         if (user is null)
         {
             if (currentProjectId is null && !pinProject && named.Length == 1) currentProjectId = named[0].Id;
             user = await SaveAsync("user", text, ct);
-            var route = fromHandoff || currentProjectId is not null || named.Length > 0 ||
+            var route = fromHandoff || intent.Create || ProjectRouting.RequestsArchitect(text) || currentProjectId is not null || named.Length > 0 ||
                 selectedAgent is not null && selectedAgent != PlatformChat.Id || IsStopRequest(text) && work is { IsCompleted: false };
             if (unpaired.Count >= 16) unpaired.RemoveAt(0);
             unpaired.Add((user, fromHandoff, route));
@@ -248,6 +263,7 @@ public sealed partial class ChatVoiceCall(
                     approvalAnnounced = true;
                 }
                 if (ChatStore.Active.Contains(result.Value.Status)) continue;
+                if (result.Value.ProjectId is { } projectId) currentProjectId = projectId;
                 var summary = TextLimits.Clip(result.Value.Text, 900);
                 if (!result.Value.PendingApproval)
                     await SpeakAsync(summary.Length > 0 ? $"Agent result: {summary}" : $"Task status: {result.Value.Status}.", ct);
