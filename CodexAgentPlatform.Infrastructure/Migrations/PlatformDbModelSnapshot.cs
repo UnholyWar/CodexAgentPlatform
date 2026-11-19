@@ -395,6 +395,33 @@ namespace CodexAgentPlatform.Infrastructure.Migrations
                     b.ToTable("Messages");
                 });
 
+            modelBuilder.Entity("CodexAgentPlatform.Application.MessagePhoto", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("TEXT");
+
+                    b.Property<byte[]>("Bytes")
+                        .IsRequired()
+                        .HasColumnType("BLOB");
+
+                    b.Property<string>("ContentType")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("MessageId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("MessageId");
+
+                    b.ToTable("MessagePhotos");
+                });
+
             modelBuilder.Entity("CodexAgentPlatform.Application.Preferences", b =>
                 {
                     b.Property<int>("Id")
@@ -659,6 +686,15 @@ namespace CodexAgentPlatform.Infrastructure.Migrations
                         .IsUnique();
 
                     b.ToTable("Users");
+                });
+
+            modelBuilder.Entity("CodexAgentPlatform.Application.MessagePhoto", b =>
+                {
+                    b.HasOne("CodexAgentPlatform.Application.Message", null)
+                        .WithMany()
+                        .HasForeignKey("MessageId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("CodexAgentPlatform.Application.Resource", b =>

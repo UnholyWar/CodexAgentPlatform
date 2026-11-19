@@ -37,6 +37,15 @@
         <p class="voice-status @(connected && !muted ? "voice-status-hidden" : null)" role="status">@status</p>
         @if (error is not null) { <p class="voice-error" role="alert">@error</p> }
         <p class="voice-error voice-playback-error" role="status" hidden></p>
+        @if (call is not null && Approvals.Count > 0)
+        {
+            <section class="voice-approvals" aria-label="Call approvals">
+                @foreach (var approval in Approvals)
+                {
+                    <ApprovalCard @key="approval.Id" Item="approval" />
+                }
+            </section>
+        }
     </div>
     <footer class="voice-controls">
         <button type="button" class="button voice-play" hidden>Enable sound</button>
@@ -60,6 +69,7 @@
     [Parameter] public bool PinProject { get; set; }
     [Parameter] public string? SelectedAgent { get; set; }
     [Parameter] public bool AutoApprove { get; set; }
+    [Parameter] public IReadOnlyList<Approval> Approvals { get; set; } = [];
     [Parameter] public EventCallback<string> ConversationOpened { get; set; }
     [Parameter] public EventCallback SpeakerChanged { get; set; }
 

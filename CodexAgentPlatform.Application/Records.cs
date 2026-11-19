@@ -50,6 +50,19 @@ public sealed class Message
     public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
 }
 
+public sealed record PhotoUpload(string Name, byte[] Bytes);
+
+public sealed record MessagePhotoPreview(string Id, long MessageId, string Name);
+
+public sealed class MessagePhoto
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+    public long MessageId { get; set; }
+    public string Name { get; set; } = "";
+    public string ContentType { get; set; } = "";
+    public byte[] Bytes { get; set; } = [];
+}
+
 public sealed class ConversationThread
 {
     public string ConversationId { get; set; } = "";

@@ -71,6 +71,16 @@
                             }
                             else if (message.Role == "user") { <div class="user-text">@message.Text</div> }
                             else { <MarkdownBody Text="@message.Text" CompactCode="true" /> }
+                            @if (snapshot.Photos.Contains(message.Id))
+                            {
+                                <div class="message-photos">
+                                    @foreach (var photo in snapshot.Photos[message.Id])
+                                    {
+                                        var url = $"/chat-images/{photo.Id}";
+                                        <a href="@url" target="_blank" rel="noopener noreferrer" title="@photo.Name"><img src="@url" alt="@photo.Name" loading="lazy" /></a>
+                                    }
+                                </div>
+                            }
                         </div>
                     </article>
                 }
@@ -82,15 +92,9 @@
                 {
                     <p class="notice" role="status">@workspaceNotice</p>
                 }
-                <ChatPermissionGrants Approvals="snapshot.Approvals" />
-                @if (snapshot.Approvals.Count(a => a.Kind != AgentPermissionGrants.ApprovalKind && a.Status == "Pending" && a.ExpiresAtUtc > DateTime.UtcNow) is > 0 and var pending)
+                @foreach (var approval in snapshot.Approvals.Where(ShowApprovalInChat))
                 {
-                    <a class="approval-callout" href="/approvals"><Icon Name="approve" /><strong>@pending operations awaiting approval</strong><Icon Name="chevron" /></a>
-                }
-                else if (snapshot.Run is { Status: WorkStatus.WaitingForApproval } waiting &&
-                    snapshot.Approvals.Any(a => a.ContinuationRunId == waiting.Id && a.Status is "Approved" or "Executing"))
-                {
-                    <p class="notice" role="status">Approved operation in progress. The agent will continue when it finishes.</p>
+                    <ApprovalCard @key="approval.Id" Item="approval" />
                 }
                 @if (snapshot.Events.Count > 0 || snapshot.Approvals.Count > 0)
                 {
@@ -101,6 +105,20 @@
     </div>
     <footer class="composer-zone">
         @if (issue is not null) { <p class="notice error" role="alert">@issue</p> }
+        @if (readingPhotos) { <p class="photo-loading" role="status">Preparing photos…</p> }
+        @if (uploads.Count > 0)
+        {
+            <div class="photo-drafts" aria-label="Attached photos">
+                @foreach (var upload in uploads)
+                {
+                    <span class="photo-draft" @key="upload">
+                        <Icon Name="image" /><span title="@upload.Name">@upload.Name</span>
+                        <button class="icon-button" type="button" aria-label="@($"Remove {upload.Name}")" disabled="@sending"
+                                @onclick="() => uploads.Remove(upload)"><Icon Name="close" /></button>
+                    </span>
+                }
+            </div>
+        }
         @if (mentionedAgent is not null)
         {
             <button type="button" class="mention-chip" aria-label="@($"Remove mention of {mentionedAgent.Name}")" @onclick="ClearMentionAsync">
@@ -123,8 +141,18 @@
                     }
                 }
             </div>
+            <div class="photo-picker">
+                <label class="icon-button photo-choice" title="Choose photos">
+                    <Icon Name="image" />
+                    <InputFile OnChange="ReadPhotosAsync" accept="image/*" multiple aria-label="Choose photos" disabled="@PhotoPickerDisabled" />
+                </label>
+                <label class="icon-button photo-choice photo-camera" title="Take photo">
+                    <Icon Name="camera" />
+                    <InputFile OnChange="ReadPhotosAsync" accept="image/*" capture="environment" aria-label="Take photo" disabled="@PhotoPickerDisabled" />
+                </label>
+            </div>
             <ChatVoice ConversationId="@Id" ProjectId="@EffectiveProject" PinProject="@(projectId == "")" SelectedAgent="@(mentionedAgent?.Id ?? selectedAgent ?? snapshot.CoordinatorAgentId)"
-                       SpeakerChanged="RefreshVoiceSpeakerAsync"
+                       SpeakerChanged="RefreshVoiceSpeakerAsync" Approvals="snapshot.Approvals.Where(ApprovalDisplay.IsActive).ToArray()"
                        AutoApprove="@AutoApprove" ConversationOpened="OpenVoiceConversation" />
             @if (IsActive && !ChatStore.IsPauseRequest(draft))
             {
@@ -132,7 +160,7 @@
             }
             else
             {
-                <button type="submit" class="primary send" aria-label="Send" disabled="@(sending || string.IsNullOrWhiteSpace(draft))"><Icon Name="up" /></button>
+                <button type="submit" class="primary send" aria-label="Send" disabled="@(sending || readingPhotos || !HasDraft)"><Icon Name="up" /></button>
             }
         </form>
     </footer>
@@ -169,9 +197,18 @@
     private string? title, loaded, issue, selectedAgent, projectId;
     private Agent? mentionedAgent;
     private string draft = "";
+    private readonly List<PhotoUpload> uploads = [];
+    private bool readingPhotos;
+    private int photoDraftVersion;
+    private bool HasDraft => !string.IsNullOrWhiteSpace(draft) || uploads.Count > 0;
+    private bool PhotoPickerDisabled => sending || readingPhotos || IsActive;
     private ElementReference composerInput, settingsSheet;
     private bool draftAutoApprove, savingApproval;
     private string? approvalError;
+    private bool ShowApprovalInChat(Approval item) => ApprovalDisplay.IsActive(item) ||
+        snapshot.Run is { } run && (item.ContinuationRunId is { } linked
+            ? linked == run.Id || linked == run.ResumesRunId
+            : item.CreatedAtUtc >= run.CreatedAtUtc);
     private bool AutoApprove => Id is null ? draftAutoApprove : snapshot.AutoApprove;
     private string? EffectiveProject
     {
@@ -274,6 +311,8 @@
         if (loaded != Id)
         {
             loaded = Id;
+            photoDraftVersion++;
+            uploads.Clear();
             mentionedAgent = null;
             selectedAgent = null;
             projectId = null;
@@ -311,9 +350,47 @@
         }
     }
 
+    private async Task ReadPhotosAsync(InputFileChangeEventArgs selection)
+    {
+        if (PhotoPickerDisabled) return;
+        issue = null;
+        var available = ChatPhotos.MaxCount - uploads.Count;
+        if (selection.FileCount > available)
+        {
+            issue = $"Attach up to {ChatPhotos.MaxCount} photos per message.";
+            return;
+        }
+        if (selection.FileCount == 0) return;
+
+        readingPhotos = true;
+        var draftVersion = photoDraftVersion;
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+        try
+        {
+            var batch = new List<PhotoUpload>();
+            foreach (var file in selection.GetMultipleFiles(available))
+            {
+                var image = file;
+                if (file.Size > ChatPhotos.MaxBytes || file.ContentType is not ("image/jpeg" or "image/png" or "image/webp"))
+                    image = await file.RequestImageFileAsync("image/jpeg", 3000, 3000).AsTask().WaitAsync(timeout.Token);
+                await using var stream = image.OpenReadStream(ChatPhotos.MaxBytes, timeout.Token);
+                using var buffer = new MemoryStream((int)image.Size);
+                await stream.CopyToAsync(buffer, timeout.Token);
+                batch.Add(new PhotoUpload(ChatPhotos.DisplayName(file.Name), buffer.ToArray()));
+            }
+            if (!disposed && draftVersion == photoDraftVersion) uploads.AddRange(batch);
+        }
+        catch (Exception ex) when (ex is IOException or InvalidOperationException or JSException or ArgumentException or OperationCanceledException)
+        {
+            if (!disposed && draftVersion == photoDraftVersion)
+                issue = "Could not read the selected photo. Try a JPEG, PNG or WebP image up to 8 MB.";
+        }
+        finally { readingPhotos = false; }
+    }
+
     private async Task SendAsync()
     {
-        if (sending || string.IsNullOrWhiteSpace(draft)) return;
+        if (sending || readingPhotos || !HasDraft) return;
         if (IsActive)
         {
             if (Id is { } activeChat && ChatStore.IsPauseRequest(draft))
@@ -329,8 +406,9 @@
         try
         {
             var id = await Chats.SendAsync(Id, draft, mentionedAgent?.Id ?? selectedAgent,
-                projectId, default, draftAutoApprove);
+                projectId, default, draftAutoApprove, uploads: uploads);
             draft = "";
+            uploads.Clear();
             mentionedAgent = null;
             selectedAgent = null;
             projectId = null;

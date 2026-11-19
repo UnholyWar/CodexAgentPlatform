@@ -1,0 +1,96 @@
+@inject Operations ApprovalOperations
+@inject AuthenticationStateProvider Authentication
+@inject ChatUpdates Updates
+
+<article class="card fields approval-card" aria-labelledby="@titleId">
+    <div class="approval-card-header">
+        <h3 id="@titleId">@Title</h3>
+        <span class="status" role="status">@Item.Status</span>
+    </div>
+    <p class="scope" id="@scopeId">@ApprovalDisplay.Scope(Item.Scope)</p>
+    @if (CodexAgentPlatform.Infrastructure.Operations.SshCommandScript(Item) is { } script)
+    {
+        <details class="code-fold" open="@Pending">
+            <summary>SSH commands</summary>
+            <pre dir="ltr">@script</pre>
+        </details>
+    }
+    @if (Item.DecidedBy == CodexAgentPlatform.Infrastructure.Operations.AutomaticDecision)
+    {
+        <small>Automatically approved in this chat.</small>
+    }
+    @if (Item.Result is { Length: > 0 } result)
+    {
+        <details class="code-fold"><summary>Operation output</summary><pre>@result</pre></details>
+    }
+    @if (Pending)
+    {
+        @if (Item.ContinuationRunId is not null && Item.Kind == AgentPermissionGrants.ApprovalKind)
+        {
+            <small>The queued task starts after approval.</small>
+        }
+        <small class="muted">Expires at @Item.ExpiresAtUtc.ToString("HH:mm") UTC</small>
+        <div class="actions">
+            <button type="button" class="primary" disabled="@(busy || saved)" aria-describedby="@scopeId"
+                    @onclick="() => DecideAsync(true)">@(ApprovalDisplay.IsProduction(Item.Scope) ? "Approve production operation" : "Approve")</button>
+            <button type="button" class="button" disabled="@(busy || saved)" aria-describedby="@scopeId"
+                    @onclick="() => DecideAsync(false)">Decline</button>
+        </div>
+    }
+    else if (Item.ContinuationRunId is not null && (Item.Status is "Approved" or "Executing"))
+    {
+        <small>The agent will continue when the operation finishes.</small>
+    }
+    @if (error is not null) { <p class="notice error" role="alert">@error</p> }
+    @if (ShowConversationLink && Item.ConversationId is { } chat)
+    {
+        <a href="/chat/@chat">Open conversation</a>
+    }
+</article>
+
+@code {
+    [Parameter, EditorRequired] public Approval Item { get; set; } = default!;
+    [Parameter] public bool ShowConversationLink { get; set; }
+    private readonly string titleId = $"approval-title-{Guid.NewGuid():N}";
+    private string scopeId => $"{titleId}-scope";
+    private bool busy, saved;
+    private string? error;
+    private bool Pending => Item.Status == "Pending" && Item.ExpiresAtUtc > DateTime.UtcNow;
+    private string Title => Item.Kind switch
+    {
+        AgentPermissionGrants.ApprovalKind => "Agent permission request",
+        Operations.GitHubRepositoryApproval => "Create GitHub repository",
+        Operations.SshCommandApproval => "Run SSH command",
+        "GitPush" => "Push to Git repository",
+        "SshRelease" => "Docker Swarm operation",
+        "SshChange" => "Restart Docker over SSH",
+        _ => Item.Kind
+    };
+
+    protected override void OnParametersSet()
+    {
+        if (Item.Status != "Pending") saved = false;
+    }
+
+    private async Task DecideAsync(bool allow)
+    {
+        if (!Pending || busy || saved) return;
+        busy = true;
+        error = null;
+        try
+        {
+            var user = (await Authentication.GetAuthenticationStateAsync()).User;
+            await ApprovalOperations.DecideAsync(Item.Id, allow, user.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? "", default);
+            saved = true;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or UnauthorizedAccessException or DbUpdateException)
+        {
+            error = ex is DbUpdateException ? "Could not save the approval decision." : ex.Message;
+        }
+        finally
+        {
+            busy = false;
+            Updates.Publish("");
+        }
+    }
+}

@@ -238,7 +238,7 @@ public sealed partial class ChatVoiceCall(
         try
         {
             using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(500));
-            bool approvalAnnounced = false;
+            string? announcedApproval = null;
             while (await timer.WaitForNextTickAsync(ct) && Volatile.Read(ref workGeneration) == generation)
             {
                 var result = await chats.VoiceWorkAsync(user.ConversationId, user.Id, ct);
@@ -254,15 +254,17 @@ public sealed partial class ChatVoiceCall(
                     var next = await chats.VoiceSpeakerAsync(coordinator, ct);
                     if (activeSpeaker == previous && next is not null) SetSpeaker(next);
                 }
-                if (result.Value.PendingApproval && !approvalAnnounced)
+                if (result.Value.PendingApprovalId is { } approvalId && approvalId != announcedApproval)
                 {
                     var agent = await chats.VoiceSpeakerAsync(result.Value.AgentId, ct) ?? activeSpeaker;
-                    ReplyReady?.Invoke(new(agent, "This task is waiting for your approval in the chat."));
-                    approvalAnnounced = true;
+                    ReplyReady?.Invoke(new(agent, ProjectRouting.IsTurkish(user.Text)
+                        ? "Bu işlem onayını bekliyor. Görüşme penceresinden inceleyip onaylayabilirsin."
+                        : "This operation is waiting for your approval. You can review and approve it in the call window."));
+                    announcedApproval = approvalId;
                 }
                 if (ChatStore.Active.Contains(result.Value.Status)) continue;
                 if (!pinProject && result.Value.ProjectId is { } projectId) currentProjectId = projectId;
-                if (!result.Value.PendingApproval)
+                if (result.Value.PendingApprovalId is null)
                 {
                     var agent = await chats.VoiceSpeakerAsync(result.Value.AgentId, ct) ?? activeSpeaker;
                     var text = result.Value.Text;

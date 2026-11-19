@@ -40,7 +40,10 @@ public sealed class ChatUpdates
 }
 
 public sealed record ChatSnapshot(List<Message> Messages, List<Activity> Events, ChatRun? Run, List<Approval> Approvals,
-    bool AutoApprove = false, string? ProjectId = null, string? CoordinatorAgentId = null);
+    bool AutoApprove = false, string? ProjectId = null, string? CoordinatorAgentId = null)
+{
+    public ILookup<long, MessagePhotoPreview> Photos { get; init; } = Array.Empty<MessagePhotoPreview>().ToLookup(p => p.MessageId);
+}
 internal sealed record ProjectReference(string Id, string Name);
 
 public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpdates updates)
@@ -60,23 +63,25 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
     }
 
     public async Task<string> SendAsync(string? chatId, string text, string? selectedAgent, string? projectId, CancellationToken ct,
-        bool autoApproveNewChat = false, long? voiceMessageId = null) =>
-        (await SubmitAsync(chatId, text, selectedAgent, projectId, ct, autoApproveNewChat, voiceMessageId)).ChatId;
+        bool autoApproveNewChat = false, long? voiceMessageId = null, IReadOnlyList<PhotoUpload>? uploads = null) =>
+        (await SubmitAsync(chatId, text, selectedAgent, projectId, ct, autoApproveNewChat, voiceMessageId, uploads)).ChatId;
 
     internal async Task<VoiceReply?> SubmitVoiceAsync(Message user, string? selectedAgent, CancellationToken ct) =>
         (await SubmitAsync(user.ConversationId, user.Text, selectedAgent, user.VoiceProjectId, ct, voiceMessageId: user.Id)).Reply;
 
     private async Task<(string ChatId, VoiceReply? Reply)> SubmitAsync(string? chatId, string text, string? selectedAgent, string? projectId, CancellationToken ct,
-        bool autoApproveNewChat = false, long? voiceMessageId = null)
+        bool autoApproveNewChat = false, long? voiceMessageId = null, IReadOnlyList<PhotoUpload>? uploads = null)
     {
         text = text.Trim();
         var inputProject = projectId ?? "";
         var inheritProject = projectId is null;
         if (string.IsNullOrWhiteSpace(projectId)) projectId = null;
-        if (text.Length is 0 or > 16_000) throw new ArgumentException("Messages must contain between 1 and 16,000 characters.");
+        var photos = ChatPhotos.Prepare(uploads);
+        if (text.Length > 16_000 || (text.Length == 0 && photos.Length == 0))
+            throw new ArgumentException("Add a photo or enter a message of up to 16,000 characters.");
         await using var db = await dbs.CreateDbContextAsync(ct);
         await using var tx = await db.Database.BeginTransactionAsync(ct);
-        var chat = chatId is null ? new Conversation { Title = TextLimits.Clip(text.Replace('\n', ' '), 65), AutoApprove = autoApproveNewChat }
+        var chat = chatId is null ? new Conversation { Title = text.Length == 0 ? "Photo" : TextLimits.Clip(text.Replace('\n', ' '), 65), AutoApprove = autoApproveNewChat }
             : await db.Conversations.SingleAsync(x => x.Id == chatId, ct);
         if (await db.Runs.AnyAsync(x => x.ConversationId == chat.Id && Enumerable.Contains(Active, x.Status), ct))
             throw new InvalidOperationException("A response is already being prepared in this chat.");
@@ -96,7 +101,7 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
         if (ProjectRouting.RequestsArchitect(text))
             explicitAgent = agents.Find(a => a.Id == "architect") ?? throw new InvalidOperationException("Architect is not available.");
         var accessRequest = IsAccessRequest(text);
-        if (!accessRequest && ProjectRouting.GlobalResourceInventory(text))
+        if (photos.Length == 0 && !accessRequest && ProjectRouting.GlobalResourceInventory(text))
         {
             var current = PickTeamAgent(agents, explicitAgent?.Id ?? chat.CoordinatorAgentId);
             if (current is not null)
@@ -123,7 +128,7 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
             if (mentions.Length == 1) projectId = mentions[0].Id;
             else if (mentions.Length > 1)
                 return await SaveExchangeAsync(db, tx, chat, chatId, explicitAgent ?? normal, text,
-                    $"This request includes multiple projects. Which should we start with, {mentions[0].Name} or {mentions[1].Name}?", voiceMessageId, ct);
+                    $"This request includes multiple projects. Which should we start with, {mentions[0].Name} or {mentions[1].Name}?", voiceMessageId, ct, photos: photos);
             else projectId = currentProject;
         }
         var previousAgent = last is not null && last.ProjectId == projectId
@@ -181,7 +186,7 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
             {
                 var choices = string.Join("\n", previous.Select(x => $"- {x.Title}"));
                 var reply = $"I found multiple work items in this period. Which would you like to open?\n\n{choices}";
-                return await SaveExchangeAsync(db, tx, chat, chatId, agent, text, reply, voiceMessageId, ct);
+                return await SaveExchangeAsync(db, tx, chat, chatId, agent, text, reply, voiceMessageId, ct, photos: photos);
             }
             candidate = previous.SingleOrDefault();
             projectId ??= candidate?.ProjectId;
@@ -196,6 +201,7 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
         if (voiceMessageId is null) db.Messages.Add(user);
         db.Messages.Add(answer);
         await db.SaveChangesAsync(ct);
+        ChatPhotos.Attach(db, user.Id, photos);
         var run = new ChatRun
         {
             ConversationId = chat.Id, AgentId = agent.Id, UserMessageId = user.Id, AssistantMessageId = answer.Id,
@@ -396,7 +402,7 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
         db.Messages.Add(new Message { ConversationId = user.ConversationId, Role = "assistant", AgentId = reply.Speaker.Id,
             Text = reply.Text, VoiceProjectId = reply.Speaker.Id == PlatformChat.Id ? null : user.VoiceProjectId });
 
-    internal async Task<(WorkStatus Status, string Text, bool PendingApproval, string? ProjectId, string AgentId, string? ConversationAgentId)?> VoiceWorkAsync(
+    internal async Task<(WorkStatus Status, string Text, string? PendingApprovalId, string? ProjectId, string AgentId, string? ConversationAgentId)?> VoiceWorkAsync(
         string conversationId, long messageId, CancellationToken ct)
     {
         await using var db = await dbs.CreateDbContextAsync(ct);
@@ -404,15 +410,17 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
                 (r.UserMessageId == messageId || r.OriginMessageId == messageId))
             .OrderByDescending(r => r.AssistantMessageId)
             .Select(r => new { r.Status, r.Error, r.ProjectId, r.CreatedAtUtc, r.AgentId, Text = db.Messages.Where(m => m.Id == r.AssistantMessageId).Select(m => m.Text).FirstOrDefault(),
-                PendingApproval = db.Approvals.Any(a => a.ConversationId == conversationId && a.AgentId == r.AgentId &&
-                    a.Status == "Pending" && a.ExpiresAtUtc > DateTime.UtcNow && a.CreatedAtUtc >= r.CreatedAtUtc) })
+                PendingApprovalId = db.Approvals.Where(a => a.ConversationId == conversationId && a.AgentId == r.AgentId &&
+                    a.Status == "Pending" && a.ExpiresAtUtc > DateTime.UtcNow &&
+                    (a.ContinuationRunId == r.Id || (a.ContinuationRunId == null && a.CreatedAtUtc >= r.CreatedAtUtc)))
+                    .OrderBy(a => a.CreatedAtUtc).Select(a => a.Id).FirstOrDefault() })
             .FirstOrDefaultAsync(ct);
         if (result is null) return null;
         var projectId = await ProjectRouting.CreatedProjectAsync(db, conversationId, result.CreatedAtUtc, ct) ?? result.ProjectId;
         var conversationAgent = await db.Conversations.Where(c => c.Id == conversationId)
             .Select(c => c.CoordinatorAgentId).SingleOrDefaultAsync(ct);
         return (result.Status, result.Status == WorkStatus.Completed ? result.Text ?? "" : result.Error ?? "",
-            result.PendingApproval, projectId, result.AgentId, conversationAgent);
+            result.PendingApprovalId, projectId, result.AgentId, conversationAgent);
     }
 
     public async Task<ChatSnapshot> ReadAsync(string id, int messageLimit, CancellationToken ct)
@@ -427,13 +435,22 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
         var conversationApprovals = db.Approvals.AsNoTracking().Where(x => x.ConversationId == id);
         var recentIds = conversationApprovals.OrderByDescending(x => x.CreatedAtUtc).Take(12).Select(x => x.Id);
         var now = DateTime.UtcNow;
+        var runId = run?.Id;
+        var predecessor = run?.ResumesRunId;
         var approvals = await conversationApprovals.Where(x => recentIds.Contains(x.Id) ||
-                (x.Kind == AgentPermissionGrants.ApprovalKind && x.Status == "Pending" && x.ExpiresAtUtc > now))
+                (x.Status == "Pending" && x.ExpiresAtUtc > now) || x.Status == "Approved" || x.Status == "Executing" ||
+                (x.ContinuationRunId != null && (x.ContinuationRunId == runId || x.ContinuationRunId == predecessor)))
             .OrderByDescending(x => x.CreatedAtUtc).ToListAsync(ct);
         var chat = await db.Conversations.AsNoTracking().Where(c => c.Id == id)
             .Select(c => new { c.AutoApprove, c.CoordinatorAgentId }).FirstOrDefaultAsync(ct);
         var projectId = await ProjectRouting.FocusedProjectAsync(db, id, run?.ProjectId, run?.CreatedAtUtc, ct);
-        return new(messages, events, run, approvals, chat?.AutoApprove == true, projectId, chat?.CoordinatorAgentId);
+        var messageIds = messages.Where(m => m.Role == "user").Select(m => m.Id).ToList();
+        var photos = await db.MessagePhotos.AsNoTracking().Where(p => messageIds.Contains(p.MessageId))
+            .Select(p => new MessagePhotoPreview(p.Id, p.MessageId, p.Name)).ToListAsync(ct);
+        return new(messages, events, run, approvals, chat?.AutoApprove == true, projectId, chat?.CoordinatorAgentId)
+        {
+            Photos = photos.ToLookup(p => p.MessageId)
+        };
     }
 
     public async Task TouchAsync(string id, CancellationToken ct)
@@ -522,13 +539,23 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
 
     private async Task<(string ChatId, VoiceReply? Reply)> SaveExchangeAsync(PlatformDb db, Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction tx,
         Conversation chat, string? chatId, Agent agent, string input, string answer, long? voiceMessageId, CancellationToken ct,
-        string? voiceProjectId = null)
+        string? voiceProjectId = null, IReadOnlyList<MessagePhoto>? photos = null)
     {
         if (chatId is null) db.Conversations.Add(chat);
         chat.UpdatedAtUtc = DateTime.UtcNow;
-        if (voiceMessageId is null) db.Messages.Add(new Message { ConversationId = chat.Id, Role = "user", Text = input });
+        Message? user = null;
+        if (voiceMessageId is null)
+        {
+            user = new Message { ConversationId = chat.Id, Role = "user", Text = input };
+            db.Messages.Add(user);
+        }
         db.Messages.Add(new Message { ConversationId = chat.Id, Role = "assistant", AgentId = agent.Id, Text = answer, VoiceProjectId = voiceProjectId });
         await db.SaveChangesAsync(ct);
+        if (user is not null && photos is { Count: > 0 })
+        {
+            ChatPhotos.Attach(db, user.Id, photos);
+            await db.SaveChangesAsync(ct);
+        }
         await tx.CommitAsync(ct);
         updates.Publish(chat.Id);
         return (chat.Id, new(new(agent.Id, agent.Name, agent.Voice), answer));

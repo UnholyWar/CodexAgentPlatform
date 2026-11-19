@@ -250,6 +250,53 @@ public sealed class ChatTests(ITestOutputHelper output)
         finally { await worker.StopAsync(default); }
     }
 
+    [Fact]
+    public async Task APhotoReachesTheSpecialistAsVisualInputAndAReusableWorkspaceFile()
+    {
+        await using var storage = await TestStorage.CreateAsync();
+        await using var db = storage.CreateDbContext();
+        var project = new Project { Name = "Photo website" };
+        (await db.Agents.SingleAsync(a => a.Id == "developer")).AllowedProjects = project.Id;
+        db.Projects.Add(project);
+        await db.SaveChangesAsync();
+        var codex = new FakeCodex { WorkspaceReady = true };
+        var updates = new ChatUpdates();
+        var chats = new ChatStore(storage, updates);
+        using var worker = Worker(storage, codex, updates);
+        var image = Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aZ1sAAAAASUVORK5CYII=");
+        codex.NextToolCalls.Enqueue(("handoff_to_agent", new { agentId = "developer" }));
+        await worker.StartAsync(default);
+        try
+        {
+            await Assert.ThrowsAsync<ArgumentException>(() => chats.SendAsync(null, "", null, project.Id, default,
+                uploads: [new("wrong.png", "<svg />"u8.ToArray())]));
+            var chat = await chats.SendAsync(null, "Use this photograph on the site.", PlatformChat.Id, project.Id, default,
+                uploads: [new("../../Cover photo.png", image)]);
+            await WaitAsync(() => db.Runs.AnyAsync(r => r.ConversationId == chat && r.AgentId == "developer" && r.Status == WorkStatus.Completed));
+            var snapshot = await chats.ReadAsync(chat, 10, default);
+            var original = Assert.Single(snapshot.Messages, m => m.Role == "user");
+            Assert.Equal("Cover photo.png", Assert.Single(snapshot.Photos[original.Id]).Name);
+            Assert.Equal(2, codex.TurnRequests.Count);
+            var turn = codex.TurnRequests[^1];
+            var sentImage = Assert.Single(turn.Items("input"), input => input.String("type") == "localImage");
+            var asset = sentImage.String("path")!;
+            Assert.StartsWith(Path.Combine(storage.Paths.Workspace(snapshot.Run!.Workspace!), "chat-images"), asset);
+            Assert.Equal(image, await File.ReadAllBytesAsync(asset));
+            Assert.Contains("photo-Cover-photo.png", turn.Get("input")[0].String("text"));
+
+            await chats.SendAsync(chat, "Use the photo as a cover.", "developer", project.Id, default);
+            await WaitAsync(async () => await db.Runs.CountAsync(r => r.ConversationId == chat && r.Status == WorkStatus.Completed) == 3);
+            var followUp = codex.TurnRequests[^1].Items("input").ToArray();
+            Assert.Single(followUp);
+            Assert.Contains("photo-Cover-photo.png", followUp[0].String("text"));
+
+            var photoOnly = await chats.SendAsync(null, "", null, null, default, uploads: [new("image.png", image)]);
+            await WaitAsync(() => db.Runs.AnyAsync(r => r.ConversationId == photoOnly && r.Status == WorkStatus.Completed));
+            Assert.Contains("Describe the attached photo", codex.TurnRequests[^1].Get("input")[0].String("text"));
+        }
+        finally { await worker.StopAsync(default); }
+    }
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
@@ -734,6 +781,47 @@ public sealed class ChatTests(ITestOutputHelper output)
             Assert.Equal(2, runs.Count);
             Assert.All(runs, r => { Assert.Equal("developer", r.AgentId); Assert.Equal(project.Id, r.ProjectId); });
             Assert.Equal(2, await db.Messages.CountAsync(m => m.ConversationId == conversation && m.Role == "user"));
+        }
+        finally { await worker.StopAsync(default); }
+    }
+
+    [Fact]
+    public async Task VoiceReportsApprovalInTheCallAndReadsTheContinuationResult()
+    {
+        await using var storage = await TestStorage.CreateAsync();
+        await using var db = storage.CreateDbContext();
+        var agent = await db.Agents.SingleAsync(a => a.Id == "devops");
+        agent.AllowedTools += "," + ToolAccess.GlobalResources;
+        var host = new Resource { Name = "Example host", IsGlobal = true, Kind = ResourceKind.SshServer };
+        db.Resources.Add(host);
+        await db.SaveChangesAsync();
+        var codex = new FakeCodex { WorkspaceReady = true };
+        var updates = new ChatUpdates();
+        var chats = new ChatStore(storage, updates);
+        using var worker = Worker(storage, codex, updates);
+        await worker.StartAsync(default);
+        try
+        {
+            await using var voice = new ChatVoiceCall(codex, chats, worker, NullLogger<ChatVoiceCall>.Instance,
+                conversationId: null, projectId: null, selectedAgent: agent.Id, autoApprove: false);
+            var opened = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var replies = new System.Collections.Concurrent.ConcurrentQueue<VoiceReply>();
+            voice.ConversationOpened += id => opened.SetResult(id);
+            voice.ReplyReady += replies.Enqueue;
+            await voice.StartAsync("v=0 fake offer");
+            codex.NextToolCalls.Enqueue(("ssh_request_operation", new { id = host.Id, operation = "restart-docker" }));
+            codex.Emit("thread/realtime/transcript/done", new { threadId = "t1", role = "user", text = "Docker'ı yeniden başlat." });
+            var chat = await opened.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await WaitAsync(() => Task.FromResult(replies.Count == 1));
+            Assert.Contains("Görüşme penceresinden", Assert.Single(replies).Text);
+            var approval = await db.Approvals.AsNoTracking().SingleAsync(a => a.ConversationId == chat);
+
+            await db.Approvals.Where(a => a.Id == approval.Id).ExecuteUpdateAsync(s =>
+                s.SetProperty(a => a.Status, "Completed").SetProperty(a => a.Result, "Docker is active."));
+            await WaitAsync(() => Task.FromResult(replies.Count == 2));
+            Assert.All(replies, reply => Assert.Equal(agent.Id, reply.Speaker.Id));
+            Assert.Equal("Test yanıtı", replies.Last().Text);
+            Assert.NotNull((await chats.ReadAsync(chat, 10, default)).Run?.ResumesRunId);
         }
         finally { await worker.StopAsync(default); }
     }

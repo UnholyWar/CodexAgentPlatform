@@ -208,9 +208,20 @@ public sealed class ChatWorker(IDbContextFactory<PlatformDb> dbs, ICodexConnecti
             var turnContext = await context.BuildForTurnAsync(run, agent, resumed, ct, voice);
             var references = turnContext.Text;
             historyCharacters = turnContext.HistoryCharacters;
+            var (photoPaths, photosForCurrentRequest) = await ChatPhotos.StageAsync(db, run, workspace, workspaceReady, ct);
+            if (workspaceReady && photoPaths.Count > 0)
+                references += (photosForCurrentRequest ? "\nAttached image files in this workspace: " : "\nRecent image files in this workspace: ") +
+                    JsonSerializer.Serialize(photoPaths.Select(path => Path.GetRelativePath(workspace, path).Replace('\\', '/'))) +
+                    ". Copy only photos requested by the user to the project's asset directory.";
+            else if (photosForCurrentRequest)
+                references += "\nThe attached images are available for analysis. If asked to edit the project using them, " +
+                    "route the request to an eligible agent with workspace access.";
             if (windowsSandboxUnavailable)
                 references += "\nWindows workspace sandbox is not ready. If the user requests local execution, explain how to configure the sandbox in Codex settings.";
-            var input = new[] { new { type = "text", text = $"[Platform context — reference only]\n{references}\n[User or agent message]\n{prompt}" } };
+            if (prompt.Length == 0 && photoPaths.Count > 0) prompt = "Describe the attached photo or photos.";
+            var input = new List<object> { new { type = "text", text = $"[Platform context — reference only]\n{references}\n[User or agent message]\n{prompt}" } };
+            if (photosForCurrentRequest && (!resumed || run.ResumesRunId is null))
+                input.AddRange(photoPaths.Select(path => new { type = "localImage", path }));
             var started = await codex.CallAsync("turn/start", new
             {
                 threadId = run.ThreadId, input, cwd = workspace, model = run.Model, effort = run.Effort,

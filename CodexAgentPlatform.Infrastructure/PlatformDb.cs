@@ -16,6 +16,7 @@ public sealed class PlatformDb(DbContextOptions<PlatformDb> options) : DbContext
     public DbSet<Agent> Agents => Set<Agent>();
     public DbSet<Conversation> Conversations => Set<Conversation>();
     public DbSet<Message> Messages => Set<Message>();
+    public DbSet<MessagePhoto> MessagePhotos => Set<MessagePhoto>();
     public DbSet<ConversationThread> Threads => Set<ConversationThread>();
     public DbSet<ChatRun> Runs => Set<ChatRun>();
     public DbSet<WorkItem> Work => Set<WorkItem>();
@@ -40,6 +41,7 @@ public sealed class PlatformDb(DbContextOptions<PlatformDb> options) : DbContext
         model.Entity<Agent>().HasIndex(x => x.Name).IsUnique();
         model.Entity<Project>().HasIndex(x => x.Name).IsUnique();
         model.Entity<Message>().HasIndex(x => new { x.ConversationId, x.Id });
+        model.Entity<MessagePhoto>().HasOne<Message>().WithMany().HasForeignKey(x => x.MessageId).OnDelete(DeleteBehavior.Cascade);
         model.Entity<ChatRun>().HasIndex(x => new { x.ConversationId, x.Status });
         model.Entity<ChatRun>().HasIndex(x => x.ConversationId).IsUnique()
             .HasFilter("\"Status\" IN (0, 1, 2, 3)");

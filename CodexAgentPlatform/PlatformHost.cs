@@ -113,6 +113,14 @@ public static class PlatformHost
 
         app.MapStaticAssets().AllowAnonymous();
         app.MapOwnerEndpoints();
+        app.MapGet("/chat-images/{id:guid}", async (Guid id, IDbContextFactory<PlatformDb> dbs, HttpContext ctx) =>
+        {
+            await using var db = await dbs.CreateDbContextAsync(ctx.RequestAborted);
+            var key = id.ToString("N");
+            var photo = await db.MessagePhotos.AsNoTracking().SingleOrDefaultAsync(p => p.Id == key, ctx.RequestAborted);
+            ctx.Response.Headers.CacheControl = "private, no-store";
+            return photo is null ? Results.NotFound() : Results.File(photo.Bytes, photo.ContentType);
+        }).RequireAuthorization();
         app.MapGet("/artifacts/{id:guid}.txt", (Guid id, PlatformPaths paths) =>
         {
             var file = Path.Combine(paths.Data, "logs", $"{id:N}.txt");

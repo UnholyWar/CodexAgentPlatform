@@ -1,64 +1,26 @@
 @page "/approvals"
 @attribute [Authorize]
 @implements IDisposable
-@inject Operations Operations
 @inject IDbContextFactory<PlatformDb> Dbs
 @inject ChatUpdates Updates
-@inject AuthenticationStateProvider Authentication
 
 <PageTitle>Approvals · Codex Agent Platform</PageTitle>
 <section class="admin-page">
     <header class="section-head"><h1>Approvals</h1><button class="button" @onclick="LoadAsync">Refresh</button></header>
-    @if (error is not null) { <p class="notice error" role="alert">@error</p> }
     @foreach (var row in rows)
     {
-        <article class="card fields">
-            <div class="section-head"><h2>@Title(row.Kind)</h2><span class="status">@row.Status</span></div>
-            <p class="scope">@ApprovalDisplay.Scope(row.Scope)</p>
-            @if (CodexAgentPlatform.Infrastructure.Operations.SshCommandScript(row) is { } script) { <pre dir="ltr">@script</pre> }
-            @if (row.DecidedBy == CodexAgentPlatform.Infrastructure.Operations.AutomaticDecision) { <small>Automatically approved in this chat.</small> }
-            @if (row.Result is { Length: > 0 } result) { <details class="code-fold"><summary>Operation output</summary><pre>@result</pre></details> }
-            @if (row.Status == "Pending" && row.ExpiresAtUtc > DateTime.UtcNow)
-            {
-                <small class="muted">Approval expires at @row.ExpiresAtUtc.ToString("HH:mm:ss") UTC</small>
-                <div class="actions">
-                    <button class="primary" @onclick="() => DecideAsync(row, true)">@(ApprovalDisplay.IsProduction(row.Scope) ? "Approve production operation" : "Approve")</button>
-                    <button class="button" @onclick="() => DecideAsync(row, false)">Decline</button>
-                </div>
-            }
-            @if (row.ConversationId is { } chat) { <a href="/chat/@chat">Open conversation</a> }
-        </article>
+        <ApprovalCard @key="row.Id" Item="row" ShowConversationLink="true" />
     }
     @if (rows.Count == 0) { <div class="card empty">No approval requests.</div> }
 </section>
 
 @code {
     private List<Approval> rows = [];
-    private string? error;
-    private static string Title(string kind) => kind switch
-    {
-        AgentPermissionGrants.ApprovalKind => "Agent permission request",
-        Operations.GitHubRepositoryApproval => "Create GitHub repository",
-        Operations.SshCommandApproval => "Run SSH command",
-        _ => kind
-    };
     protected override async Task OnInitializedAsync() { Updates.Changed += OnUpdate; await LoadAsync(); }
     private async Task LoadAsync()
     {
         await using var db = await Dbs.CreateDbContextAsync();
         rows = await db.Approvals.AsNoTracking().OrderByDescending(r => r.CreatedAtUtc).Take(60).ToListAsync();
-    }
-    private async Task DecideAsync(Approval approval, bool allow)
-    {
-        error = null;
-        try
-        {
-            var user = (await Authentication.GetAuthenticationStateAsync()).User;
-            await Operations.DecideAsync(approval.Id, allow, user.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? "", default);
-            Updates.Publish(approval.Kind == AgentPermissionGrants.ApprovalKind ? "" : approval.ConversationId ?? "");
-            await LoadAsync();
-        }
-        catch (Exception ex) when (ex is InvalidOperationException or UnauthorizedAccessException) { error = ex.Message; }
     }
     private void OnUpdate(string id)
     {

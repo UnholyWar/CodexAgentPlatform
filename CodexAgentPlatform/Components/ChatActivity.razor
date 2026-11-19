@@ -28,7 +28,6 @@
                         <div class="activity-detail"><p>@ApprovalDisplay.Scope(row.Scope)</p>
                             @if (Operations.SshCommandScript(row) is { } script) { <pre dir="ltr">@script</pre> }
                             @if (!string.IsNullOrWhiteSpace(row.Result)) { <pre>@row.Result</pre> }
-                            <a href="/approvals">Open approvals</a>
                         </div>
                     </details>
                 }

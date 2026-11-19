@@ -1,3 +1,5 @@
+using CodexAgentPlatform.Application;
+
 namespace CodexAgentPlatform.Components;
 
 public static class ApprovalDisplay
@@ -14,4 +16,7 @@ public static class ApprovalDisplay
         scope.StartsWith(LegacyProductionPrefix, StringComparison.Ordinal)
             ? ProductionPrefix + scope[LegacyProductionPrefix.Length..]
             : scope;
+
+    public static bool IsActive(Approval approval) =>
+        (approval.Status == "Pending" && approval.ExpiresAtUtc > DateTime.UtcNow) || approval.Status is "Approved" or "Executing";
 }

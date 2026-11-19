@@ -110,7 +110,7 @@ document.addEventListener("keydown", event => {
     if (!submit) return;
 
     event.preventDefault();
-    if (event.repeat || !input.value.trim() || submit.matches(":disabled")) return;
+    if (event.repeat || submit.matches(":disabled")) return;
 
     form.requestSubmit(submit);
 });
