@@ -853,6 +853,20 @@ public sealed class ChatTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public async Task VoicePlaybackAcceptsTurkishCasingAcrossTranscriptParts()
+    {
+        var codex = new FakeCodex();
+        await using var playback = new CodexVoicePlayback(codex,
+            new(new("architect", "Architect", "juniper"), "İSTANBUL hakkında bilgi."));
+        await playback.ConnectAsync("v=0 playback offer");
+        var render = playback.RenderAsync();
+        codex.Emit("thread/realtime/transcript/done", new { threadId = "t1", role = "assistant", text = "İstanbul hakkında" });
+        Assert.False(playback.CanPlay);
+        codex.Emit("thread/realtime/transcript/done", new { threadId = "t1", role = "assistant", text = "BİLGİ." });
+        Assert.True(await render.WaitAsync(TimeSpan.FromSeconds(2)));
+    }
+
+    [Fact]
     public async Task VoicePlaybackReportsAnUnavailableSavedToneWithoutSubstitutingAnother()
     {
         var codex = new FakeCodex();

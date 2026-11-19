@@ -46,11 +46,28 @@
                     <label class="check"><input type="checkbox" @bind="gitUsesToken" @bind:after="ClearCredential" disabled="@busy" /> Private repository (use an HTTPS access token)</label>
                     @if (gitUsesToken)
                     {
+                        <label>Connection
+                            <select @bind="selected.ConnectionSourceId" @bind:after="ClearCredential" disabled="@busy">
+                                <option value="">Enter a token for this repository</option>
+                                @foreach (var source in GitConnections(selected))
+                                {
+                                    <option value="@source.Id">@source.Name</option>
+                                }
+                            </select>
+                        </label>
+                    }
+                    @if (gitUsesToken && string.IsNullOrEmpty(selected.ConnectionSourceId))
+                    {
                         <label>Git username (optional) <input @bind="selected.Username" maxlength="120" disabled="@busy" /></label>
                         <label>Git access token (PAT)
                             <input type="password" @bind="credential" maxlength="65536" autocomplete="new-password" required="@(Vault.Configured && selected.VaultId is null)" disabled="@(busy || !Vault.Configured)" />
                         </label>
                     }
+                }
+                @if (selected.Kind != ResourceKind.GitRepository && selected.ConnectionSourceId is { Length: > 0 } connectionId)
+                {
+                    <p class="muted">Saved connection · @rows.FirstOrDefault(r => r.Id == connectionId)?.Name</p>
+                    <button type="button" class="button" disabled="@busy" @onclick="() => selected.ConnectionSourceId = null">Use a separate credential</button>
                 }
                 @if (selected.Kind == ResourceKind.SshServer)
                 {
@@ -59,10 +76,13 @@
                     <label>Host key fingerprint <input @bind="selected.HostFingerprint" placeholder="SHA256:…" maxlength="512"
                         aria-describedby="host-fingerprint-help" required disabled="@busy" /></label>
                     <small id="host-fingerprint-help" class="muted">Use the server's verified SHA256 fingerprint or paste the output of <code>ssh-keygen -lf</code> for the server's host key.</small>
+                    @if (selected.ConnectionSourceId is null)
+                    {
                     <label>SSH private key
                         <textarea @bind="credential" rows="4" spellcheck="false" autocomplete="off" maxlength="65536" required="@(Vault.Configured && selected.VaultId is null)" disabled="@(busy || !Vault.Configured)"></textarea>
                     </label>
                     <small class="muted">Enter the complete private key without a passphrase. Add the public key (.pub) to this user's authorized_keys file on the remote server.</small>
+                    }
                     <label>SFTP text file (optional) <input @bind="selected.SftpFile" placeholder="/srv/reports/status.txt" maxlength="512" disabled="@busy" /></label>
                 }
                 @if (selected.Kind == ResourceKind.DeploymentTarget)
@@ -79,7 +99,7 @@
                         @(hosts.Length == 0 ? "Add an SSH server for this scope first." : "Showing SSH servers available to this target.")
                     </small>
                 }
-                @if (selected.Kind is not (ResourceKind.DeploymentTarget or ResourceKind.GitRepository or ResourceKind.SshServer) && Vault.Configured)
+                @if (selected.ConnectionSourceId is null && selected.Kind is not (ResourceKind.DeploymentTarget or ResourceKind.GitRepository or ResourceKind.SshServer) && Vault.Configured)
                 {
                     <label>New vault secret
                         <textarea @bind="credential" rows="3" autocomplete="off" maxlength="65536" disabled="@busy"></textarea>
@@ -188,7 +208,7 @@
             selected = await db.Resources.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id);
             savedName = selected?.Name;
             sshPort = selected?.Port.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "22";
-            gitUsesToken = selected is { Kind: ResourceKind.GitRepository, VaultId: not null };
+            gitUsesToken = selected?.Kind == ResourceKind.GitRepository && (selected.VaultId != null || selected.ConnectionSourceId != null);
             credential = notice = null;
             error = selected is null ? "Resource not found." : null;
             confirmDelete = false;
@@ -202,6 +222,10 @@
     private IEnumerable<Resource> SshServers(Resource item) => rows.Where(host =>
         host.Kind == ResourceKind.SshServer && host.Id != item.Id &&
         (host.IsGlobal || (item.ProjectId is not null && item.ProjectId == host.ProjectId)));
+
+    private IEnumerable<Resource> GitConnections(Resource item) => rows.Where(source => source.Kind == ResourceKind.GitRepository &&
+        source.Id != item.Id && source.VaultId != null && source.ConnectionSourceId == null &&
+        (source.IsGlobal || item.ProjectId != null && item.ProjectId == source.ProjectId));
 
     private void SetScope(bool global)
     {
@@ -217,7 +241,10 @@
         ClearCredential();
         gitUsesToken = false;
         if (selected is { } item)
+        {
+            item.ConnectionSourceId = null;
             item.Username = item.Kind == ResourceKind.SshServer ? "root" : null;
+        }
     }
 
     private void ClearCredential() => credential = null;
@@ -274,6 +301,8 @@
                 throw new InvalidOperationException("The resource was renamed. Reopen it before deleting.");
             if (await HasDeploymentTargetsAsync(db, item.Id))
                 throw new InvalidOperationException("Update or delete the deployment targets linked to this SSH resource first.");
+            if (await db.Resources.AnyAsync(r => r.ConnectionSourceId == item.Id))
+                throw new InvalidOperationException("Update the resources using this saved connection before deleting it.");
 
             var now = DateTime.UtcNow;
             var approvals = db.Approvals.FromSqlInterpolated($"""
@@ -347,7 +376,17 @@
                 existing.IsGlobal == item.IsGlobal && existing.ProjectId == item.ProjectId && existing.Username == item.Username && existing.Port == item.Port &&
                 existing.HostFingerprint?.TrimEnd('=') == item.HostFingerprint?.TrimEnd('=') ? existing.VaultId : null;
             if (item.Kind == ResourceKind.DeploymentTarget || (item.Kind == ResourceKind.GitRepository && !gitUsesToken))
+            {
+                item.ConnectionSourceId = null;
                 vaultId = null;
+            }
+            else if (!string.IsNullOrEmpty(item.ConnectionSourceId))
+            {
+                var source = await db.Resources.AsNoTracking().SingleOrDefaultAsync(r => r.Id == item.ConnectionSourceId);
+                ResourceRegistration.ValidateConnection(item, source);
+                item.Username = source!.Username;
+                vaultId = null;
+            }
             else if (!string.IsNullOrWhiteSpace(credential))
             {
                 var secret = item.Kind == ResourceKind.GitRepository ? credential.Trim() : credential;
@@ -362,6 +401,7 @@
                     ? "Enter the SSH private key to save the connection."
                     : "Enter a Git access token for the private repository.");
             item.VaultId = vaultId;
+            if (string.IsNullOrEmpty(item.ConnectionSourceId)) item.ConnectionSourceId = null;
             if (existing is null) db.Resources.Add(item); else db.Entry(existing).CurrentValues.SetValues(item);
             db.Events.Add(new Activity { ProjectId = item.ProjectId, Kind = "ResourceSaved", Detail = item.Name });
             await db.SaveChangesAsync();

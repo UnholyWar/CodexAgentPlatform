@@ -5,11 +5,12 @@ public static class ToolAccess
     public const string CreateProjects = "projects.create";
     public const string ProjectResources = "resources";
     public const string GlobalResources = "resources.global";
+    public const string CreateResources = "resources.create";
 
     public static IReadOnlyDictionary<string, string> Permissions { get; } = new Dictionary<string, string>
     {
         ["memory"] = "Memory", [ProjectResources] = "Project resources", [GlobalResources] = "Global resources",
-        ["workspace"] = "Workspace and terminal",
+        [CreateResources] = "Create resources", ["workspace"] = "Workspace and terminal",
         ["git"] = "Git", ["ssh"] = "SSH", ["delegate"] = "Delegation", [CreateProjects] = "Create projects"
     }.AsReadOnly();
 

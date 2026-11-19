@@ -24,8 +24,10 @@ public static partial class SafeMarkdown
             }
             codeStart = null;
         }
-        foreach (var raw in source.Replace("\r", "").Split('\n'))
+        var rows = source.Replace("\r", "").Split('\n');
+        for (var index = 0; index < rows.Length; index++)
         {
+            var raw = rows[index];
             if (raw.StartsWith("```", StringComparison.Ordinal))
             {
                 CloseList(html, ref list);
@@ -49,6 +51,7 @@ public static partial class SafeMarkdown
             }
             CloseList(html, ref list);
             if (string.IsNullOrWhiteSpace(raw)) continue;
+            if (raw.Contains('|') && TryRenderTable(rows, ref index, html)) continue;
             var heading = raw.TakeWhile(c => c == '#').Count();
             if (heading is >= 1 and <= 6 && raw.Length > heading && raw[heading] == ' ')
             {
@@ -67,6 +70,77 @@ public static partial class SafeMarkdown
         if (list) builder.Append("</ul>");
         list = false;
     }
+
+    private static bool TryRenderTable(string[] rows, ref int index, StringBuilder html)
+    {
+        var separator = NextNonBlank(rows, index + 1);
+        if (separator == rows.Length || !rows[separator].Contains('-')) return false;
+        var header = TableCells(rows[index]);
+        var markers = TableCells(rows[separator]);
+        if (header.Count == 0 || markers.Count != header.Count || markers.Any(m => !TableSeparator().IsMatch(m)))
+            return false;
+        var alignment = markers.Select(m => m.EndsWith(':')
+            ? (m.StartsWith(':') ? " class=\"align-center\"" : " class=\"align-right\"") : "").ToArray();
+        html.Append("<div class=\"markdown-table\" role=\"region\" aria-label=\"Table\" tabindex=\"0\"><table><thead><tr>");
+        for (var col = 0; col < header.Count; col++)
+            html.Append("<th scope=\"col\"").Append(alignment[col]).Append('>').Append(Inline(header[col])).Append("</th>");
+        html.Append("</tr></thead><tbody>");
+        index = separator;
+        for (var next = NextNonBlank(rows, index + 1); next < rows.Length; next = NextNonBlank(rows, index + 1))
+        {
+            var line = rows[next].TrimStart();
+            if (line.StartsWith("```") || !line.Contains('|')) break;
+            // Some chat replies separate every explicitly piped row with a blank line.
+            if (next > index + 1 && !line.StartsWith('|') && !line.StartsWith(@"\|")) break;
+            var cells = TableCells(line);
+            if (cells.Count == 0 || cells.Count > header.Count) break;
+            html.Append("<tr>");
+            for (var col = 0; col < cells.Count; col++)
+                html.Append("<td").Append(alignment[col]).Append('>').Append(Inline(cells[col])).Append("</td>");
+            html.Append("</tr>");
+            index = next;
+        }
+        html.Append("</tbody></table></div>");
+        return true;
+    }
+
+    private static int NextNonBlank(string[] rows, int index)
+    {
+        while (index < rows.Length && string.IsNullOrWhiteSpace(rows[index])) index++;
+        return index;
+    }
+
+    private static List<string> TableCells(string raw)
+    {
+        var line = raw.Trim();
+        if (line.StartsWith(@"\|")) line = line[1..];
+        List<string> cells = [];
+        var value = new StringBuilder();
+        bool inCode = false, delimited = false, endedAtPipe = false;
+        for (var i = 0; i < line.Length; i++)
+        {
+            var c = line[i];
+            endedAtPipe = false;
+            if (c == '\\' && i + 1 < line.Length && line[i + 1] is '|' or '\\') value.Append(line[++i]);
+            else if (c == '|' && !inCode)
+            {
+                if (i > 0) cells.Add(value.ToString().Trim());
+                value.Clear();
+                delimited = endedAtPipe = true;
+            }
+            else
+            {
+                if (c == '`') inCode = !inCode;
+                value.Append(c);
+            }
+        }
+        if (!delimited) return [];
+        if (!endedAtPipe) cells.Add(value.ToString().Trim());
+        return cells;
+    }
+
+    [GeneratedRegex(@"^:?-{3,}:?$")]
+    private static partial Regex TableSeparator();
 
     private static string Inline(string value)
     {

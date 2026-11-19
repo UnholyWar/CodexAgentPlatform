@@ -47,6 +47,8 @@ public sealed class PlatformDb(DbContextOptions<PlatformDb> options) : DbContext
         model.Entity<Activity>().HasIndex(x => x.EventOccurredAtUtc);
         model.Entity<Activity>().HasIndex(x => new { x.ConversationId, x.Id });
         model.Entity<Resource>().HasIndex(x => x.ProjectId);
+        model.Entity<Resource>().HasOne<Resource>().WithMany().HasForeignKey(x => x.ConnectionSourceId)
+            .OnDelete(DeleteBehavior.Restrict);
     }
 }
 

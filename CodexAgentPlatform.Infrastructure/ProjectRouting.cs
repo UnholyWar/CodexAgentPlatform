@@ -40,7 +40,7 @@ internal static partial class ProjectRouting
     [GeneratedRegex(@"\b(?:list|show|what|which|can you (?:see|access|read)|eriş\p{L}*|görebil\p{L}*|oku\p{L}*|listele\p{L}*|hangi|neler|bak\p{L}*)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex InventoryQuestion();
 
-    [GeneratedRegex(@"\b(?:ssh|docker|test|health|git|deploy\p{L}*|restart\p{L}*|delete\p{L}*|remove\p{L}*|update\p{L}*|create\p{L}*|sil\p{L}*|güncelle\p{L}*|değiştir\p{L}*|ekle\p{L}*|oluştur\p{L}*|bağlan\p{L}*)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"\b(?:ssh|docker|test|health|git|deploy\p{L}*|restart\p{L}*|delete\p{L}*|remove\p{L}*|update\p{L}*|create\p{L}*|attach\p{L}*|copy|link\p{L}*|sil\p{L}*|güncelle\p{L}*|değiştir\p{L}*|ekle\p{L}*|oluştur\p{L}*|bağla\p{L}*|kopyala\p{L}*)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex ResourceOperation();
 
     [GeneratedRegex(@"[çğıöşüİÇĞÖŞÜ]|\b(?:merhaba|kaynak\p{L}*|bana|kim|neler|hangi|var|bak\p{L}*)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]

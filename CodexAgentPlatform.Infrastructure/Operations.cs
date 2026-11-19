@@ -83,13 +83,14 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
             throw new ArgumentException("This Git operation does not support pagination.");
         var resource = await ResolveAsync(agent, resourceId, ResourceKind.GitRepository, "git", ct);
         var root = paths.Workspace(workspaceId);
-        var repo = Path.Combine(root, "project");
+        var folder = CheckoutFolder(resource);
+        var repo = Path.Combine(root, folder);
         if (operation == "prepare")
         {
             if (Directory.Exists(repo))
             {
                 await VerifyRepoAsync(resource, repo, ct);
-                return new { path = "project", branch = (await RunGitAsync(repo, ["branch", "--show-current"], null, ct)).Trim() };
+                return new { path = folder, branch = (await RunGitAsync(repo, ["branch", "--show-current"], null, ct)).Trim() };
             }
             await using var db = await dbs.CreateDbContextAsync(ct);
             var branch = resource.IsGlobal ? null : await db.Projects.Where(x => x.Id == resource.ProjectId).Select(x => x.DefaultBranch).SingleAsync(ct);
@@ -106,7 +107,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
             await RunGitAsync(clone, ["worktree", "add", "-b", $"agent/{workspaceId}", "--", repo, branch is null ? "HEAD" : $"refs/remotes/origin/{branch}"], null, ct);
             await File.WriteAllTextAsync(Path.Combine(clone, ".git", "platform-resource"), resource.Id, ct);
             await AuditAsync(agent.Id, resource.ProjectId, conversationId, workId, "GitWorkspacePrepared", $"{resource.Name} · {branch}", ct);
-            return new { path = "project", branch = $"agent/{workspaceId}" };
+            return new { path = folder, branch = $"agent/{workspaceId}" };
         }
 
         await VerifyRepoAsync(resource, repo, ct);
@@ -138,7 +139,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         if (kind == "GitPush")
         {
             resource = await ResolveAsync(agent, resourceId, ResourceKind.GitRepository, "git", ct);
-            var repo = Path.Combine(paths.Workspace(workspaceId!), "project");
+            var repo = Path.Combine(paths.Workspace(workspaceId!), CheckoutFolder(resource));
             await VerifyRepoAsync(resource, repo, ct);
             var local = SafeBranch((await RunGitAsync(repo, ["branch", "--show-current"], null, ct)).Trim());
             var commit = (await RunGitAsync(repo, ["rev-parse", "--verify", "HEAD^{commit}"], null, ct)).Trim();
@@ -150,7 +151,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         {
             var deployment = await ReleaseAsync(agent, resourceId, operation, image, ct);
             resource = deployment.Target;
-            globalServer = deployment.Server.IsGlobal;
+            globalServer = deployment.Server.IsGlobal || deployment.Server.UsesGlobalConnection;
             target = new(resourceId, operation, ResourceBinding: deployment.Binding, Image: image);
             scope = $"{deployment.Target.Name} · {deployment.Server.Address}:{deployment.Server.Port} · {deployment.Command}";
             if (deployment.Server.Production) resource.Production = true;
@@ -173,7 +174,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         if (existing is not null) return existing;
         var approval = new Approval { AgentId = agent.Id, ConversationId = conversationId, Kind = kind,
             Scope = resource.Production ? $"PRODUCTION · {scope}" : scope, Payload = payload };
-        if (!resource.Production && !resource.IsGlobal && !globalServer)
+        if (!resource.Production && !resource.IsGlobal && !resource.UsesGlobalConnection && !globalServer)
         {
             if (kind == "GitPush")
                 approval.AutoEligible = target.Operation == $"agent/{workspaceId}" && target.Branch == target.Operation &&
@@ -250,7 +251,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
                     p.Id == resource.ProjectId && p.DefaultBranch == target.Branch, ct))
                     throw new InvalidOperationException("The default branch requires administrator approval.");
                 if (Binding(resource) != target.ResourceBinding) throw new InvalidOperationException("The resource changed after approval.");
-                var repo = Path.Combine(paths.Workspace(target.WorkspaceId!), "project");
+                var repo = Path.Combine(paths.Workspace(target.WorkspaceId!), CheckoutFolder(resource));
                 await VerifyRepoAsync(resource, repo, ct);
                 var head = (await RunGitAsync(repo, ["rev-parse", "--verify", "HEAD^{commit}"], null, ct)).Trim();
                 var local = (await RunGitAsync(repo, ["branch", "--show-current"], null, ct)).Trim();
@@ -303,6 +304,17 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
             (resource.ProjectId is null && (!resource.IsGlobal || !ToolAccess.Has(current, ToolAccess.GlobalResources))) ||
             !ToolAccess.AllowsProject(current, resource.ProjectId))
             throw new UnauthorizedAccessException("The agent is not authorized to use this resource or tool.");
+        if (resource.ConnectionSourceId is { } sourceId)
+        {
+            var source = await db.Resources.AsNoTracking().SingleOrDefaultAsync(r => r.Id == sourceId, ct);
+            ResourceRegistration.ValidateConnection(resource, source);
+            if (source!.IsGlobal && kind == ResourceKind.SshServer && !ToolAccess.Has(current, ToolAccess.GlobalResources))
+                throw new UnauthorizedAccessException("Global resources permission is required to operate the linked SSH server.");
+            resource.VaultId = source.VaultId;
+            resource.Username = source.Username;
+            resource.Production |= source.Production;
+            resource.UsesGlobalConnection = source.IsGlobal;
+        }
         return resource;
     }
 
@@ -551,6 +563,14 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
             !string.IsNullOrEmpty(uri.UserInfo + uri.Query + uri.Fragment))
             throw new InvalidOperationException("The Git repository requires an HTTPS URL without credentials.");
         return uri.AbsoluteUri;
+    }
+
+    internal static string CheckoutFolder(Resource resource)
+    {
+        if (resource.CreatedByAgentId is null) return "project";
+        // A changed repository URL must never reuse the previous repository's files or pending edits.
+        var address = SHA256.HashData(Encoding.UTF8.GetBytes(resource.Id + "\n" + GitAddress(resource)));
+        return "project-" + Convert.ToHexStringLower(address.AsSpan(0, 12));
     }
 
     private static string Binding(Resource resource) =>

@@ -23,6 +23,10 @@ public sealed class ContextBudget(IDbContextFactory<PlatformDb> dbs)
         content.AppendLine($"User time zone: {settings.TimeZone}. Current UTC: {DateTime.UtcNow:O}.");
         if (!normal && run.ProjectId is null && ToolAccess.Has(agent, ToolAccess.CreateProjects))
             content.AppendLine("For an explicit request to create a project, call project_create with its requested name. Ask for the name if it is missing.");
+        if (!normal && ToolAccess.Has(agent, ToolAccess.CreateResources))
+            content.AppendLine("Use resource_create to register a project resource. To copy from a saved connection, use resource_search " +
+                "and pass its ID as sourceId with the destination address. Use resource_update with the new project's resource ID to edit it later. " +
+                "For Git, work in the path returned by git_workspace prepare. Never ask for credentials in chat.");
         if (run.ProjectId is { } project)
         {
             var name = await db.Projects.AsNoTracking().Where(p => p.Id == project).Select(p => p.Name).SingleOrDefaultAsync(ct);
@@ -48,6 +52,10 @@ public sealed class ContextBudget(IDbContextFactory<PlatformDb> dbs)
             var roster = specialists.Where(a => run.ProjectId is null || ToolAccess.Split(a.AllowedProjects).Contains(run.ProjectId))
                 .Select(a => new { id = a.Id, title = a.Title }).ToArray();
             content.AppendLine("Current eligible specialists (directory data): " + JsonSerializer.Serialize(roster));
+            var resourceCreators = specialists.Where(a => roster.Any(r => r.id == a.Id) &&
+                ToolAccess.Split(a.AllowedTools).Contains(ToolAccess.CreateResources)).Select(a => a.Id).ToArray();
+            if (resourceCreators.Length > 0)
+                content.AppendLine("Eligible to register project resources: " + JsonSerializer.Serialize(resourceCreators));
             if (run.ProjectId is not null && roster.Length == 0)
                 content.AppendLine("No active specialist has access to this project. For a request that needs one, explain that the owner can grant Project permissions in Agents.");
             if (run.ProjectId is not null)

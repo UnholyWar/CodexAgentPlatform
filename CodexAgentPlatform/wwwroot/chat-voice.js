@@ -1,11 +1,26 @@
 import { animateOrb } from "./voice-orb.js";
 
 const calls = new WeakMap();
+const preparedAudio = new WeakMap();
 
-export async function start(dialog, server) {
+export function bindAudio(trigger, dialog) {
+    // Mobile browsers can require resume() inside the actual tap, before Blazor's server round trip.
+    trigger.addEventListener("click", () => {
+        if (calls.has(dialog) || preparedAudio.has(dialog)) return;
+        const AudioContext = window.AudioContext ?? window.webkitAudioContext;
+        if (!AudioContext) return;
+        const context = new AudioContext();
+        preparedAudio.set(dialog, context);
+        void context.resume().catch(() => {});
+    });
+}
+
+export async function start(dialog, server, captureUrl) {
+    const context = preparedAudio.get(dialog);
+    preparedAudio.delete(dialog);
     stop(dialog);
     const call = { server, listeners: new AbortController(), playback: new AbortController(), queue: Promise.resolve(),
-        player: dialog.querySelector(".voice-recording"),
+        audioContext: context, captureUrl,
         play: dialog.querySelector(".voice-play"), playbackError: dialog.querySelector(".voice-playback-error"),
         speakingAgent: dialog.querySelector(".voice-speaking-agent") };
     calls.set(dialog, call);
@@ -33,6 +48,14 @@ export async function start(dialog, server) {
             await fail("Voice calls require a browser with microphone access on HTTPS or localhost.");
             return;
         }
+        if (!context?.audioWorklet) {
+            await fail("This browser cannot play voice calls. Open the chat in a browser with Web Audio support.");
+            return;
+        }
+        const updateSound = () => { call.play.hidden = context.state === "running"; };
+        call.play.addEventListener("click", () => { void context.resume().catch(updateSound); }, { signal });
+        context.addEventListener("statechange", updateSound, { signal });
+        updateSound();
 
         const stream = await navigator.mediaDevices.getUserMedia({
             audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
@@ -46,10 +69,6 @@ export async function start(dialog, server) {
         call.peer = peer;
         const channel = peer.createDataChannel("oai-events");
         channel.addEventListener("close", () => { if (current()) void fail("The voice session closed."); }, { signal });
-        call.play.addEventListener("click", () => {
-            if (call.audioContext && call.audioContext.state !== "running") void call.audioContext.resume().catch(() => {});
-            if (call.player.hasAttribute("src")) void call.player.play().catch(() => {});
-        }, { signal });
         for (const track of stream.getAudioTracks()) {
             peer.addTrack(track, stream);
             track.addEventListener("ended", () => void fail("The microphone disconnected."), { signal });
@@ -114,148 +133,146 @@ function gatherIce(peer, signal) {
 
 export function speak(dialog, id, name) {
     const call = calls.get(dialog);
-    if (!call) return;
+    if (!call) return false;
     const { signal } = call.playback;
     call.queue = call.queue.then(async () => {
-        if (signal.aborted) return;
+        if (signal.aborted) return true;
         call.playbackError.hidden = true;
+        call.speakingAgent.textContent = `Preparing audio for ${name}…`;
+        call.speakingAgent.hidden = false;
         try {
             const clip = await recordReply(call, id, signal);
             await playReply(dialog, call, clip, name, signal);
+            return true;
         } catch (error) {
+            showSpeaking(dialog, call);
             if (!signal.aborted) {
                 call.playbackError.textContent = error.message || "Could not play the selected ChatGPT voice. See the written reply in chat.";
                 call.playbackError.hidden = false;
             }
+            return signal.aborted;
         }
     });
     return call.queue;
 }
 
 async function recordReply(call, id, signal) {
-    const AudioContext = window.AudioContext ?? window.webkitAudioContext;
-    if (!AudioContext || !window.MediaRecorder) throw new Error("This browser cannot play ChatGPT voice replies. See the written reply in chat.");
-    call.audioContext ??= new AudioContext();
-    if (call.audioContext.state !== "running") {
-        call.play.hidden = false;
-        await untilAborted(call.audioContext.resume(), signal);
-        call.play.hidden = true;
-    }
-    signal.throwIfAborted();
+    const context = call.audioContext;
+    await untilAborted(context.resume(), signal);
+    call.captureModule ??= context.audioWorklet.addModule(call.captureUrl).catch(error => {
+        call.captureModule = null;
+        throw error;
+    });
+    await untilAborted(call.captureModule, signal);
     const peer = new RTCPeerConnection();
-    const source = call.audioContext.createConstantSource();
-    const input = call.audioContext.createMediaStreamDestination();
-    let output, recorder, remote, analyser, recorded, silent, meter, remotePlayer;
-    let sourceStarted = false;
+    const silentInput = context.createMediaStreamDestination();
+    const silence = context.createConstantSource();
+    silence.offset.value = 0;
+    silence.connect(silentInput);
+    silence.start();
+    let output, remotePlayer, remote, capture;
     let playbackClosed = false;
-    let lastSpeechAt = 0;
     try {
-        // The renderer receives only silence here. The microphone stays on the transcription peer.
-        source.offset.value = 0;
-        source.connect(input);
-        source.start();
-        sourceStarted = true;
-        for (const track of input.stream.getAudioTracks()) peer.addTrack(track, input.stream);
+        // Negotiate a full-duplex RTC session but send silence. The microphone stays on the transcription peer.
+        for (const track of silentInput.stream.getAudioTracks()) peer.addTrack(track, silentInput.stream);
         const channel = peer.createDataChannel("oai-events");
         peer.addEventListener("track", event => {
             output = event.streams[0] ?? new MediaStream([event.track]);
         }, { signal });
-
         await peer.setLocalDescription(await peer.createOffer());
         await gatherIce(peer, signal);
         const answer = await untilAborted(call.server.invokeMethodAsync("ConnectVoicePlaybackAsync", id, peer.localDescription.sdp), signal);
         if (!answer.sdp) throw new Error(answer.error);
         await peer.setRemoteDescription({ type: "answer", sdp: answer.sdp });
-        const deadline = performance.now() + 12000;
+        const deadline = performance.now() + 15000;
         while (!output || peer.connectionState !== "connected" || channel.readyState !== "open") {
             if (peer.connectionState === "failed" || performance.now() > deadline)
                 throw new Error("The ChatGPT playback connection timed out.");
             await delay(80, signal);
         }
 
-        // Keep the browser's remote track decoding while the recording is assembled off the speaker.
+        // Keep the RTC decoder active. Only the checked sample buffer goes to the speaker.
         remotePlayer = new Audio();
         remotePlayer.muted = true;
         remotePlayer.playsInline = true;
         remotePlayer.srcObject = output;
+        // Some browsers only resolve play() when the first speech packet arrives.
         void remotePlayer.play().catch(() => {});
-        remote = call.audioContext.createMediaStreamSource(output);
-        analyser = call.audioContext.createAnalyser();
-        recorded = call.audioContext.createMediaStreamDestination();
-        silent = call.audioContext.createGain();
-        silent.gain.value = 0;
-        remote.connect(analyser);
-        analyser.connect(recorded);
-        analyser.connect(silent).connect(call.audioContext.destination);
-        const samples = new Uint8Array(analyser.fftSize);
-        meter = setInterval(() => {
-            analyser.getByteTimeDomainData(samples);
-            if (samples.some(sample => Math.abs(sample - 128) > 1)) lastSpeechAt = performance.now();
-        }, 40);
-        recorder = new MediaRecorder(recorded.stream);
-        const chunks = [];
-        const recording = new Promise(resolve => {
-            recorder.addEventListener("dataavailable", event => chunks.push(event.data));
-            recorder.addEventListener("stop", () => resolve(new Blob(chunks, { type: recorder.mimeType })), { once: true });
+        remote = context.createMediaStreamSource(output);
+        capture = new AudioWorkletNode(context, "voice-capture", { channelCount: 1, channelCountMode: "explicit" });
+        let frames = 0, first = -1, last = -1, lastSpeechAt = 0;
+        const blocks = [];
+        const flushed = new Promise(resolve => {
+            capture.port.onmessage = ({ data }) => {
+                if (!data) { resolve(); return; }
+                for (let index = 0; index < data.length; index++) {
+                    if (Math.abs(data[index]) <= 0.002) continue;
+                    if (first < 0) first = frames + index;
+                    last = frames + index;
+                }
+                if (last >= frames) lastSpeechAt = performance.now();
+                frames += data.length;
+                blocks.push(data);
+            };
         });
-        recorder.start();
+        remote.connect(capture).connect(context.destination);
         const verified = await untilAborted(call.server.invokeMethodAsync("RenderVoicePlaybackAsync", id), signal);
-        if (!verified) throw new Error("Could not verify this ChatGPT voice reply. See the written reply in chat.");
-        // Allow the last audio packets to arrive after the provider's transcript.
-        await delay(550, signal);
-        const audioDeadline = performance.now() + 3500;
-        while (performance.now() < audioDeadline && (!lastSpeechAt || performance.now() - lastSpeechAt < 400))
+        if (!verified) throw new Error("ChatGPT could not confirm the spoken reply. See the written reply in chat.");
+        const audioDeadline = performance.now() + 12000;
+        await delay(650, signal);
+        while (performance.now() < audioDeadline && (!lastSpeechAt || performance.now() - lastSpeechAt < 550))
             await delay(100, signal);
-        if (recorder.state !== "inactive") recorder.stop();
-        const clip = await untilAborted(recording, signal);
-        if (!lastSpeechAt || clip.size <= 0) throw new Error("ChatGPT returned no audio for this reply.");
+        capture.port.postMessage("finish");
+        const captured = await Promise.race([flushed.then(() => true), delay(3000, signal).then(() => false)]);
+        if (!captured)
+            throw new Error("The browser could not finish capturing this voice reply.");
+        if (first < 0) throw new Error("ChatGPT returned no audible speech for this reply.");
         const canPlay = await untilAborted(call.server.invokeMethodAsync("CloseVoicePlaybackAsync", id), signal);
         playbackClosed = true;
-        if (!canPlay) throw new Error("Could not verify this ChatGPT voice reply. See the written reply in chat.");
+        if (!canPlay) throw new Error("ChatGPT could not confirm the spoken reply. See the written reply in chat.");
+
+        const padding = Math.round(context.sampleRate * 0.12);
+        const start = Math.max(0, first - padding);
+        const end = Math.min(frames, last + padding + 1);
+        const clip = context.createBuffer(1, end - start, context.sampleRate);
+        let offset = 0;
+        for (const block of blocks) {
+            const from = Math.max(0, start - offset), to = Math.min(block.length, end - offset);
+            if (to > from) clip.copyToChannel(block.subarray(from, to), 0, offset + from - start);
+            offset += block.length;
+        }
         return clip;
     } finally {
-        if (recorder && recorder.state !== "inactive") recorder.stop();
-        clearInterval(meter);
         if (remotePlayer) {
             remotePlayer.pause();
             remotePlayer.srcObject = null;
         }
         remote?.disconnect();
-        analyser?.disconnect();
-        silent?.disconnect();
-        recorded?.stream.getTracks().forEach(track => track.stop());
-        if (sourceStarted) source.stop();
-        source.disconnect();
-        input.stream.getTracks().forEach(track => track.stop());
+        capture?.disconnect();
+        capture?.port.close();
+        silence.stop();
+        silence.disconnect();
+        silentInput.stream.getTracks().forEach(track => track.stop());
         peer.close();
         if (!playbackClosed) void call.server.invokeMethodAsync("CloseVoicePlaybackAsync", id).catch(() => {});
     }
 }
 
 async function playReply(dialog, call, clip, name, signal) {
-    signal.throwIfAborted();
-    const { player, play } = call;
-    const url = URL.createObjectURL(clip);
-    const events = new AbortController();
+    const context = call.audioContext;
+    await untilAborted(context.resume(), signal);
+    const source = context.createBufferSource();
+    source.buffer = clip;
+    source.connect(context.destination);
     try {
-        const finished = new Promise(resolve => {
-            player.addEventListener("playing", () => {
-                play.hidden = true;
-                showSpeaking(dialog, call, name);
-            }, { signal: events.signal });
-            player.addEventListener("ended", () => resolve(true), { signal: events.signal });
-            player.addEventListener("error", () => resolve(false), { signal: events.signal });
-        });
-        player.src = url;
-        void player.play().catch(() => { if (!signal.aborted) play.hidden = false; });
-        if (!await untilAborted(finished, signal)) throw new Error("Could not play this ChatGPT recording.");
+        const ended = new Promise(resolve => { source.onended = resolve; });
+        source.start();
+        showSpeaking(dialog, call, name);
+        await untilAborted(ended, signal);
     } finally {
-        events.abort();
-        player.pause();
-        player.removeAttribute("src");
-        player.load();
-        URL.revokeObjectURL(url);
-        play.hidden = true;
+        source.onended = null;
+        source.stop();
+        source.disconnect();
         showSpeaking(dialog, call);
     }
 }
@@ -292,7 +309,7 @@ export function interrupt(dialog) {
     if (!call) return;
     call.playback.abort();
     call.playback = new AbortController();
-    call.play.hidden = true;
+    call.play.hidden = call.audioContext?.state === "running";
     call.playbackError.hidden = true;
     showSpeaking(dialog, call);
 }
@@ -302,11 +319,17 @@ export function mute(dialog, muted) {
 }
 
 export function stop(dialog) {
+    const prepared = preparedAudio.get(dialog);
+    if (prepared) {
+        preparedAudio.delete(dialog);
+        void prepared.close().catch(() => {});
+    }
     const call = calls.get(dialog);
     if (!call) return;
     interrupt(dialog);
     calls.delete(dialog);
     call.listeners.abort();
+    call.play.hidden = true;
     call.observer?.disconnect();
     clearTimeout(call.connectTimer);
     clearTimeout(call.disconnectTimer);

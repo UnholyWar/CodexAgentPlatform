@@ -6,7 +6,7 @@
 @inject IJSRuntime JS
 
 <button type="button" class="icon-button voice-trigger" aria-label="Start voice call" title="Start voice call"
-        aria-haspopup="dialog" disabled="@starting" @onclick="OpenAsync">
+        aria-haspopup="dialog" @ref="trigger" disabled="@(starting || !audioBound)" @onclick="OpenAsync">
     <Icon Name="voice" />
 </button>
 <dialog class="voice-dialog" aria-labelledby="voice-title" @ref="dialog" @onclose="EndAsync">
@@ -33,14 +33,17 @@
                 </div>
             </div>
         </div>
-        <p class="voice-speaking-agent" aria-hidden="true" hidden></p>
+        <p class="voice-speaking-agent" role="status" hidden></p>
         <p class="voice-status @(connected && !muted ? "voice-status-hidden" : null)" role="status">@status</p>
         @if (error is not null) { <p class="voice-error" role="alert">@error</p> }
         <p class="voice-error voice-playback-error" role="status" hidden></p>
-        <audio class="voice-recording" playsinline preload="auto" hidden></audio>
     </div>
     <footer class="voice-controls">
-        <button type="button" class="button voice-play" hidden>Play reply</button>
+        <button type="button" class="button voice-play" hidden>Enable sound</button>
+        @if (retryReply is not null)
+        {
+            <button type="button" class="button" @onclick="RetryReplyAsync">Retry audio</button>
+        }
         <button type="button" class="icon-button voice-mute" aria-label="Mute microphone" aria-pressed="@(muted ? "true" : "false")"
                 disabled="@(!connected)" @onclick="ToggleMuteAsync">
             <Icon Name="microphone" /><span>@(muted ? "Unmute" : "Mute")</span>
@@ -60,19 +63,35 @@
     [Parameter] public EventCallback<string> ConversationOpened { get; set; }
     [Parameter] public EventCallback SpeakerChanged { get; set; }
 
-    private ElementReference dialog;
+    private ElementReference dialog, trigger;
     private DotNetObjectReference<ChatVoice>? reference;
     private IJSObjectReference? module;
     private ChatVoiceCall? call;
     private readonly Dictionary<string, CodexVoicePlayback> playbacks = [];
+    private VoiceReply? retryReply;
+    private long playbackVersion;
     private string? callConversationId, previousConversationId;
-    private bool starting, connected, muted, disposed;
+    private bool starting, connected, muted, disposed, audioBound;
     private string status = "Connecting…";
     private string? error, speakerName;
 
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+        try
+        {
+            module = await JS.InvokeAsync<IJSObjectReference>("import", "./" + Assets["chat-voice.js"]);
+            if (disposed) { await module.DisposeAsync(); return; }
+            await module.InvokeVoidAsync("bindAudio", trigger, dialog);
+            audioBound = true;
+            StateHasChanged();
+        }
+        catch (JSDisconnectedException) { }
+    }
+
     private async Task OpenAsync()
     {
-        if (starting || call is not null || disposed) return;
+        if (module is null || starting || call is not null || disposed) return;
         starting = true;
         connected = muted = false;
         error = null;
@@ -80,8 +99,6 @@
         status = "Connecting…";
         try
         {
-            module ??= await JS.InvokeAsync<IJSObjectReference>("import", "./" + Assets["chat-voice.js"]);
-            if (disposed) return;
             reference ??= DotNetObjectReference.Create(this);
             var current = new ChatVoiceCall(Codex, Chats, Worker, Log, ConversationId, ProjectId, SelectedAgent, AutoApprove, PinProject);
             call = current;
@@ -102,7 +119,7 @@
             });
             current.UserSpoke += () => _ = VoicePlaybackAsync(current, null);
             current.ReplyReady += reply => _ = VoicePlaybackAsync(current, reply);
-            await module.InvokeVoidAsync("start", dialog, reference);
+            await module.InvokeVoidAsync("start", dialog, reference, "./" + Assets["voice-capture.js"]);
         }
         catch (JSDisconnectedException) { await ReleaseCallAsync(); }
         catch (JSException)
@@ -118,6 +135,8 @@
         InvokeAsync(async () =>
         {
             if (call != current || disposed || module is null) return;
+            var version = ++playbackVersion;
+            if (retryReply is not null) { retryReply = null; StateHasChanged(); }
             try
             {
                 if (reply is null)
@@ -130,12 +149,23 @@
                 if (playbacks.Count >= 8) return;
                 var id = Guid.NewGuid().ToString("N");
                 playbacks.Add(id, new(Codex, reply));
-                try { await module.InvokeVoidAsync("speak", TimeSpan.FromMinutes(2), dialog, id, reply.Speaker.Name); }
+                try
+                {
+                    var played = await module.InvokeAsync<bool>("speak", CancellationToken.None, [dialog, id, reply.Speaker.Name]);
+                    if (!played && call == current && version == playbackVersion && !disposed)
+                    {
+                        retryReply = reply;
+                        StateHasChanged();
+                    }
+                }
                 finally { await CloseVoicePlaybackAsync(id); }
             }
             catch (JSDisconnectedException) { }
             catch (JSException ex) { Log.LogWarning(ex, "ChatGPT voice playback failed."); }
         });
+
+    private Task RetryReplyAsync() => call is { } current && retryReply is { } reply
+        ? VoicePlaybackAsync(current, reply) : Task.CompletedTask;
 
     [JSInvokable]
     public async Task<PlaybackOffer> ConnectVoicePlaybackAsync(string id, string offer)
@@ -257,6 +287,7 @@
     {
         var previous = call;
         call = null;
+        retryReply = null;
         await ReleasePlaybacksAsync();
         if (previous is not null) await previous.DisposeAsync();
     }

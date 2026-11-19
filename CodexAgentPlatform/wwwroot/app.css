@@ -148,6 +148,13 @@ summary { cursor: pointer; }
 .markdown { overflow-wrap: anywhere; }
 .markdown > * + * { margin-top: .56rem; }
 .markdown ul { margin-bottom: 0; padding-left: 1.35rem; }
+.markdown-table { width: fit-content; max-width: 100%; overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }
+.markdown-table table { width: max-content; min-width: 100%; border-collapse: collapse; font-size: .9em; line-height: 1.45; }
+.markdown-table :is(th, td) { max-width: 38ch; padding: .42rem .75rem; text-align: left; vertical-align: top; font-variant-numeric: tabular-nums; }
+.markdown-table th { background: var(--subtle); font-weight: 650; }
+.markdown-table tbody tr { border-top: 1px solid var(--line); }
+.markdown-table .align-center { text-align: center; }
+.markdown-table .align-right { text-align: right; }
 .markdown pre { background: var(--code); color: var(--code-text); overflow-x: auto; white-space: pre; padding: .95rem; }
 .markdown :not(pre) > code { background: var(--subtle); border-radius: 4px; padding: .05em .2em; }
 .thinking { display: flex; align-items: center; gap: .45rem; color: var(--muted); }

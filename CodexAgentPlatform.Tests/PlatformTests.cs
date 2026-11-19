@@ -235,6 +235,39 @@ public sealed class PlatformTests
     }
 
     [Fact]
+    public void MarkdownRendersSpacedChatTablesWithInlineFormatting()
+    {
+        var html = SafeMarkdown.Render("""
+            \| Tür | Çalışan birim | Container |
+
+            \|---|---:|---:|
+
+            \| Docker Compose | 1 proje (`one|two`) | 1 |
+
+            \| **Toplam** | **9** | **11** |
+
+            Swarm count verified.
+            """, compactCode: true);
+        Assert.Contains("<table><thead><tr><th scope=\"col\"", html);
+        Assert.Contains("<td class=\"align-right\">1 proje (<code>one|two</code>)</td>", html);
+        Assert.Contains("<td><strong>Toplam</strong></td><td class=\"align-right\"><strong>9</strong></td>", html);
+        Assert.EndsWith("</tbody></table></div><p>Swarm count verified.</p>", html);
+    }
+
+    [Fact]
+    public void MarkdownTablesKeepLiteralPipesEscapeHtmlAndLeaveCodeAndProseAlone()
+    {
+        var html = SafeMarkdown.Render("""
+            Name | Info
+            :---: | ---
+            A\|B | <em>Keep literal</em>
+            """);
+        Assert.Contains("<td class=\"align-center\">A|B</td><td>&lt;em&gt;Keep literal&lt;/em&gt;</td>", html);
+        Assert.DoesNotContain("<table>", SafeMarkdown.Render("A | B\n-----\nJust prose."));
+        Assert.DoesNotContain("<table>", SafeMarkdown.Render("```\n| A | B |\n|---|---|\n```"));
+    }
+
+    [Fact]
     public void MarkdownAlwaysEncodesUntrustedHtmlAndRejectsUnsafeLinks()
     {
         var html = SafeMarkdown.Render("<img src=x onerror=alert(1)>\n[link](javascript:alert)\n[docs](https://example.org/docs)");

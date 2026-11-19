@@ -36,6 +36,19 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
         new("resource_search", ToolAccess.ProjectResources, "Find resources by name within your granted scope. Set scope to global for the global inventory.", [], ["query", "scope"]),
         new("project_create", ToolAccess.CreateProjects, "Create a platform project and give the creating agent access to it. The default branch is main unless specified.", ["name"], ["defaultBranch"]),
         new("resource_get", ToolAccess.ProjectResources, "Read metadata of an authorized resource.", ["id"], []),
+        new("resource_create", ToolAccess.CreateResources,
+            "Register a platform resource in the current project, or provide projectId (ID or exact name). " +
+            "Use scope=global only for an explicit global request. For a new resource provide kind and address. " +
+            "Kinds: GitRepository, SshServer, ApiConnection, LocalWorkspace, Environment, DeploymentTarget, ExternalService. " +
+            "Use resource_search then sourceId to copy a visible resource, optionally changing the repository URL. " +
+            "A saved HTTPS Git credential is linked by the server. For SSH use an existing SSH source. " +
+            "DeploymentTarget requires sshServerId or a source target. Never provide keys or tokens.",
+            ["name"], ["kind", "address", "scope", "projectId", "sourceId", "sshServerId", "production"]),
+        new("resource_update", ToolAccess.CreateResources,
+            "Edit the name or address/path of a project resource you created, using its project resource ID. " +
+            "Pass sourceId to use another visible connection of the same type, or sshServerId for a deployment target. " +
+            "Specify projectId when the destination differs from the active project.",
+            ["id"], ["name", "address", "projectId", "sourceId", "sshServerId"]),
         new("git_workspace", "git", "Use prepare to check out the registered repository. Use list or read for committed files at HEAD, passing a relative directory or file path as argument. Supports status, diff, fetch, pull, branch and commit. Pass nextOffset as offset for paged output.", ["id", "operation"], ["argument", "offset"]),
         new("git_request_push", "git", "Request explicit owner approval for a non-force push of the current commit.", ["id"], ["destinationBranch"]),
         new("ssh_inspect", "ssh", "Inspect test, health, docker-status, docker-services, linux-services, docker-logs or sftp-read. For more live command output pass nextOffset as offset.", ["id", "operation"], ["offset"]),
@@ -82,7 +95,8 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
         inputSchema = new
         {
             type = "object",
-            properties = tool.Required.Concat(tool.Optional).ToDictionary(x => x, x => new { type = x == "offset" ? "integer" : "string" }),
+            properties = tool.Required.Concat(tool.Optional).ToDictionary(x => x, x => new { type = x switch
+                { "offset" => "integer", "production" => "boolean", _ => "string" } }),
             required = tool.Required,
             additionalProperties = false
         }
@@ -104,6 +118,10 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
 
         if (name == GrantToolName)
             return await AgentPermissionGrants.ProposeAsync(db, run, args.String("agent")!, args.String("kind")!, args.String("permission")!, ct);
+        if (name == "resource_create")
+            return await ResourceRegistration.CreateAsync(db, run, args, ct);
+        if (name == "resource_update")
+            return await ResourceRegistration.UpdateAsync(db, run, args, ct);
 
         var id = args.String("id");
         var project = args.String("projectId") ?? run.ProjectId;
@@ -173,7 +191,9 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
                         throw new UnauthorizedAccessException("The Global resources permission is required.");
                     visible = await operations.VisibleResourcesAsync(agent, args.String("query"), ct, run.ProjectId, globalOnly);
                 }
-                return visible.Select(x => new { x.Id, x.Name, Kind = x.Kind.ToString(), x.ProjectId, x.IsGlobal, x.Address, x.Production }).ToArray();
+                return visible.Select(x => new { x.Id, x.Name, Kind = x.Kind.ToString(), x.ProjectId, x.IsGlobal, x.Address, x.Production,
+                    hasSavedConnection = x.VaultId != null || x.ConnectionSourceId != null,
+                    canEdit = !x.IsGlobal && x.CreatedByAgentId == agent.Id && ToolAccess.Has(agent, ToolAccess.CreateResources) }).ToArray();
             case "git_workspace":
                 if (!ToolAccess.Has(agent, "workspace")) throw new UnauthorizedAccessException("Workspace permission is required.");
                 await RequireResourceProjectAsync(db, id!, run, ct);

@@ -155,6 +155,13 @@ public sealed class Resource
     public string? HostFingerprint { get; set; }
     public string? SftpFile { get; set; }
     public string? SshServerId { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? ConnectionSourceId { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string? CreatedByAgentId { get; set; }
+    [System.ComponentModel.DataAnnotations.Schema.NotMapped]
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
+    public bool UsesGlobalConnection { get; set; }
     public int Port { get; set; } = 22;
     public string? VaultId { get; set; }
     public bool Production { get; set; }

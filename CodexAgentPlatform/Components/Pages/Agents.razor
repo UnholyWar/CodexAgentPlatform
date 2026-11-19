@@ -55,7 +55,7 @@
                     <legend>Tool permissions</legend>
                     @foreach (var tool in ToolAccess.Permissions)
                     {
-                        <label class="check"><input type="checkbox" checked="@allowedTools.Contains(tool.Key)"
+                        <label class="check" title="@(tool.Key == ToolAccess.CreateResources ? "Create resources and edit project resources created by this agent." : null)"><input type="checkbox" checked="@allowedTools.Contains(tool.Key)"
                             @onchange="e => Toggle(allowedTools, tool.Key, e)" /> @tool.Value</label>
                     }
                 </fieldset>

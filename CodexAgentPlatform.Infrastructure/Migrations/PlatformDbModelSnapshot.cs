@@ -444,6 +444,12 @@ namespace CodexAgentPlatform.Infrastructure.Migrations
                         .IsRequired()
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("ConnectionSourceId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CreatedByAgentId")
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("HostFingerprint")
                         .HasColumnType("TEXT");
 
@@ -479,6 +485,8 @@ namespace CodexAgentPlatform.Infrastructure.Migrations
                         .HasColumnType("TEXT");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("ConnectionSourceId");
 
                     b.HasIndex("ProjectId");
 
@@ -646,6 +654,14 @@ namespace CodexAgentPlatform.Infrastructure.Migrations
                         .IsUnique();
 
                     b.ToTable("Users");
+                });
+
+            modelBuilder.Entity("CodexAgentPlatform.Application.Resource", b =>
+                {
+                    b.HasOne("CodexAgentPlatform.Application.Resource", null)
+                        .WithMany()
+                        .HasForeignKey("ConnectionSourceId")
+                        .OnDelete(DeleteBehavior.Restrict);
                 });
 #pragma warning restore 612, 618
         }
