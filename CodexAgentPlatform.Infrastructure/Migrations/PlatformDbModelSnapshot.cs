@@ -155,6 +155,8 @@ namespace CodexAgentPlatform.Infrastructure.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("ContinuationRunId");
+
                     b.ToTable("Approvals");
                 });
 
@@ -193,6 +195,9 @@ namespace CodexAgentPlatform.Infrastructure.Migrations
                         .HasColumnType("INTEGER");
 
                     b.Property<string>("ProjectId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ResumesRunId")
                         .HasColumnType("TEXT");
 
                     b.Property<int>("Status")

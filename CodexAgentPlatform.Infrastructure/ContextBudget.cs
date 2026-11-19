@@ -21,6 +21,7 @@ public sealed class ContextBudget(IDbContextFactory<PlatformDb> dbs)
             r.ConversationId == run.ConversationId && r.UserMessageId == run.UserMessageId && r.AgentId == PlatformChat.Id, ct);
         var content = new StringBuilder();
         content.AppendLine($"User time zone: {settings.TimeZone}. Current UTC: {DateTime.UtcNow:O}.");
+        await ApprovalContinuations.AddContextAsync(db, run, content, ct);
         if (!normal && run.ProjectId is null && ToolAccess.Has(agent, ToolAccess.CreateProjects))
             content.AppendLine("For an explicit request to create a project, call project_create with its requested name. Ask for the name if it is missing.");
         if (!normal && ToolAccess.Has(agent, ToolAccess.CreateResources))
@@ -34,6 +35,7 @@ public sealed class ContextBudget(IDbContextFactory<PlatformDb> dbs)
         if (!normal && ToolAccess.Has(agent, "ssh"))
             content.AppendLine("For a requested terminal job on a registered SSH host, use ssh_request_command. Combine the related commands " +
                 "into one reviewable Bash script, use non-interactive commands, and keep credentials out of the script. " +
+                "For a container smoke test, include a bounded readiness wait and failure diagnostics in that same script. " +
                 "Report the request as pending until ssh_command_result confirms the outcome.");
         if (run.ProjectId is { } project)
         {

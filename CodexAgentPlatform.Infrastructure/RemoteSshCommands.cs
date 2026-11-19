@@ -37,7 +37,7 @@ public sealed partial class Operations
         if (existing != null) return existing;
         var scope = $"SSH · {host.Name} · {host.Username}@{host.Address}:{host.Port}";
         var approval = new Approval { Kind = SshCommandApproval, Scope = host.Production ? $"PRODUCTION · {scope}" : scope,
-            AgentId = agent.Id, ConversationId = run.ConversationId, Payload = payload };
+            AgentId = agent.Id, ConversationId = run.ConversationId, Payload = payload, ContinuationRunId = run.Id };
         db.Approvals.Add(approval);
         db.Events.Add(new Activity { AgentId = agent.Id, ConversationId = run.ConversationId, WorkId = run.WorkId,
             ProjectId = run.ProjectId ?? host.ProjectId, Kind = "ApprovalRequested", Detail = approval.Scope });

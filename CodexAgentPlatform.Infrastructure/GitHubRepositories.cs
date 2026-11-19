@@ -82,7 +82,7 @@ public sealed partial class Operations
         var approval = new Approval
         {
             AgentId = agent.Id, ConversationId = run.ConversationId, Kind = GitHubRepositoryApproval,
-            Scope = scope, Payload = JsonSerializer.Serialize(target)
+            Scope = scope, Payload = JsonSerializer.Serialize(target), ContinuationRunId = run.Id
         };
         db.Approvals.Add(approval);
         db.Events.Add(new Activity { AgentId = agent.Id, ConversationId = run.ConversationId, ProjectId = project.Id,

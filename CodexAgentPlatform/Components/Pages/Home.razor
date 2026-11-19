@@ -87,6 +87,11 @@
                 {
                     <a class="approval-callout" href="/approvals"><Icon Name="approve" /><strong>@pending operations awaiting approval</strong><Icon Name="chevron" /></a>
                 }
+                else if (snapshot.Run is { Status: WorkStatus.WaitingForApproval } waiting &&
+                    snapshot.Approvals.Any(a => a.ContinuationRunId == waiting.Id && a.Status is "Approved" or "Executing"))
+                {
+                    <p class="notice" role="status">Approved operation in progress. The agent will continue when it finishes.</p>
+                }
                 @if (snapshot.Events.Count > 0 || snapshot.Approvals.Count > 0)
                 {
                     <ChatActivity @key="Id" Events="snapshot.Events" Approvals="snapshot.Approvals" Zone="zone" />
@@ -149,7 +154,7 @@
                     aria-checked="@(AutoApprove ? "true" : "false")" disabled="@savingApproval" @onclick="ToggleApprovalAsync">
                 <span><Icon Name="approve" /><strong>Auto-approval</strong></span><span class="switch-track" aria-hidden="true"></span>
             </button>
-            <p id="approval-help" class="muted">In this chat, the agent can push to its own development branch. Docker restarts and deployments matching operations you previously approved and completed are also approved automatically. Production operations, global resources, and rollbacks require manual approval.</p>
+            <p id="approval-help" class="muted">Auto-approval covers eligible development-branch pushes and previously approved Docker restarts or Swarm deployments. Creating GitHub repositories, pushing to the default branch, SSH scripts, production and global operations, and rollbacks require manual approval. The agent continues automatically after the approved operation finishes.</p>
             @if (approvalError is not null) { <p class="notice error" role="alert">@approvalError</p> }
         </div>
     </dialog>

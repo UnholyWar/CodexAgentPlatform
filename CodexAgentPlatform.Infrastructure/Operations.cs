@@ -131,7 +131,8 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
     }
 
     public async Task<Approval> RequestAsync(Agent agent, string conversationId, string resourceId, string kind,
-        string operation, string? workspaceId, string? branch, CancellationToken ct, string? image = null, string? workId = null)
+        string operation, string? workspaceId, string? branch, CancellationToken ct, string? image = null, string? workId = null,
+        string? continuationRunId = null)
     {
         OperationTarget target;
         string scope;
@@ -174,7 +175,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
             x.ConversationId == conversationId && x.Payload == payload && x.ExpiresAtUtc > now, ct);
         if (existing is not null) return existing;
         var approval = new Approval { AgentId = agent.Id, ConversationId = conversationId, Kind = kind,
-            Scope = resource.Production ? $"PRODUCTION · {scope}" : scope, Payload = payload };
+            Scope = resource.Production ? $"PRODUCTION · {scope}" : scope, Payload = payload, ContinuationRunId = continuationRunId };
         if (!resource.Production && !resource.IsGlobal && !resource.UsesGlobalConnection && !globalServer)
         {
             if (kind == "GitPush")
@@ -230,7 +231,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         await db.Approvals.Where(x => (x.Status == "Pending" || x.Status == "Approved") && x.ExpiresAtUtc <= now)
             .ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, "Expired"), ct);
         var expiredRequests = await db.Runs.Where(r => r.Status == WorkStatus.WaitingForApproval &&
-            db.Approvals.Any(a => a.ContinuationRunId == r.Id && a.Status == "Expired"))
+            db.Approvals.Any(a => a.ContinuationRunId == r.Id && a.Kind == AgentPermissionGrants.ApprovalKind && a.Status == "Expired"))
             .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, WorkStatus.Cancelled).SetProperty(r => r.UpdatedAtUtc, now)
                 .SetProperty(r => r.Error, "The permission request expired. The task was cancelled."), ct);
         var approval = await db.Approvals.AsNoTracking().Where(x => x.Status == "Approved" && x.Kind != AgentPermissionGrants.ApprovalKind)

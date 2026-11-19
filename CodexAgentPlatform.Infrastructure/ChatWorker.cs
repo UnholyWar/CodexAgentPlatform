@@ -34,10 +34,10 @@ public sealed class ChatWorker(IDbContextFactory<PlatformDb> dbs, ICodexConnecti
         await using var db = await dbs.CreateDbContextAsync(ct);
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         var pending = await db.Runs.Where(x => x.ConversationId == conversation && (x.Status == WorkStatus.Pending ||
-            x.Status == WorkStatus.WaitingForApproval && db.Approvals.Any(a => a.ContinuationRunId == x.Id && a.Status == "Pending")))
+            x.Status == WorkStatus.WaitingForApproval && db.Approvals.Any(a => a.ContinuationRunId == x.Id)))
             .ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, WorkStatus.Paused)
                 .SetProperty(x => x.UpdatedAtUtc, DateTime.UtcNow), ct);
-        await db.Approvals.Where(a => a.ConversationId == conversation && a.Status == "Pending" &&
+        await db.Approvals.Where(a => a.ConversationId == conversation && (a.Status == "Pending" || a.Status == "Approved") &&
             db.Runs.Any(r => r.Id == a.ContinuationRunId && r.Status == WorkStatus.Paused))
             .ExecuteUpdateAsync(s => s.SetProperty(a => a.Status, "Declined").SetProperty(a => a.Result, "The task was paused."), ct);
         await tx.CommitAsync(ct);
@@ -116,6 +116,8 @@ public sealed class ChatWorker(IDbContextFactory<PlatformDb> dbs, ICodexConnecti
     private async Task<ChatRun?> ClaimAsync(CancellationToken ct)
     {
         await using var db = await dbs.CreateDbContextAsync(ct);
+        if (await ApprovalContinuations.QueueReadyAsync(db, ct) is { } conversation)
+            updates.Publish(conversation);
         var occupied = active.Values.Select(x => x.Run.Workspace!).ToArray();
         var run = await db.Runs.AsNoTracking().Where(x => x.Status == WorkStatus.Pending &&
             x.Workspace != null && !Enumerable.Contains(occupied, x.Workspace)).OrderBy(x => x.CreatedAtUtc).FirstOrDefaultAsync(ct);
@@ -254,11 +256,11 @@ public sealed class ChatWorker(IDbContextFactory<PlatformDb> dbs, ICodexConnecti
                             answer = new { error = ex is InvalidOperationException or ArgumentException or UnauthorizedAccessException
                                 ? TextLimits.Clip(ex.Message, 500) : "The tool operation failed." };
                         }
+                        if (answer is ApprovalReply requested && tool != AgentTools.GrantToolName)
+                            await ApprovalContinuations.AttachAsync(db, requested.Id, run, ct);
                         var serialized = ToolOutput.Serialize(answer);
                         toolCharacters += serialized.Length;
                         await codex.ReplyAsync(id, new { success, contentItems = new[] { new { type = "inputText", text = serialized } } }, ct);
-                        if (answer is ApprovalReply { Status: "Pending" })
-                            await SetRunStatusAsync(run, WorkStatus.WaitingForApproval, ct);
                         updates.Publish(run.ConversationId);
                         if (success && tool == "project_create") updates.Publish("");
                     }
@@ -458,12 +460,6 @@ public sealed class ChatWorker(IDbContextFactory<PlatformDb> dbs, ICodexConnecti
         await db.Agents.Where(x => x.Id == run.AgentId).ExecuteUpdateAsync(s => s.SetProperty(x => x.LastActivityUtc, DateTime.UtcNow), ct);
     }
 
-    private async Task SetRunStatusAsync(ChatRun run, WorkStatus status, CancellationToken ct)
-    {
-        await using var db = await dbs.CreateDbContextAsync(ct);
-        await db.Runs.Where(x => x.Id == run.Id).ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, status), ct);
-    }
-
     private async Task SaveAnswerAsync(ChatRun run, string answer, CancellationToken ct)
     {
         await using var db = await dbs.CreateDbContextAsync(ct);
@@ -493,13 +489,22 @@ public sealed class ChatWorker(IDbContextFactory<PlatformDb> dbs, ICodexConnecti
         await using var db = await dbs.CreateDbContextAsync(ct);
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         var row = await db.Runs.SingleAsync(x => x.Id == run.Id, ct);
+        if (status == WorkStatus.Completed && await db.Approvals.AnyAsync(a =>
+            a.ContinuationRunId == run.Id && a.Kind != AgentPermissionGrants.ApprovalKind, ct))
+        {
+            status = WorkStatus.WaitingForApproval;
+            delegation = null;
+        }
+        if (status == WorkStatus.Paused)
+            await db.Approvals.Where(a => a.ContinuationRunId == run.Id && (a.Status == "Pending" || a.Status == "Approved"))
+                .ExecuteUpdateAsync(s => s.SetProperty(a => a.Status, "Declined").SetProperty(a => a.Result, "The task was paused."), ct);
         row.Status = status;
         row.UpdatedAtUtc = DateTime.UtcNow;
         row.Error = TextLimits.Clip(error, 500);
         var msg = await db.Messages.SingleAsync(x => x.Id == run.AssistantMessageId, ct);
         if (!string.IsNullOrEmpty(answer)) msg.Text = answer;
         var work = run.WorkId is null ? null : await db.Work.SingleOrDefaultAsync(x => x.Id == run.WorkId, ct);
-        if (work?.Status == WorkStatus.Running)
+        if (work?.Status is WorkStatus.Running or WorkStatus.WaitingForApproval)
         {
             var pending = await db.Approvals.AnyAsync(x => x.ConversationId == run.ConversationId && x.Status == "Pending", ct);
             work.Status = status == WorkStatus.Completed ? pending ? WorkStatus.WaitingForApproval : WorkStatus.WaitingForUser : status;

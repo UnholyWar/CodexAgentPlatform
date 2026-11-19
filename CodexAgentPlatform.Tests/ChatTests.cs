@@ -250,6 +250,67 @@ public sealed class ChatTests(ITestOutputHelper output)
         finally { await worker.StopAsync(default); }
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task OperationApprovalOnlyResumesTheSameTaskIfItWasNotDeclined(bool approve)
+    {
+        await using var storage = await TestStorage.CreateAsync();
+        await using var db = storage.CreateDbContext();
+        var devops = await db.Agents.SingleAsync(a => a.Id == "devops");
+        devops.AllowedTools += "," + ToolAccess.GlobalResources;
+        var host = new Resource { Name = "Example host", Address = "host.invalid", Kind = ResourceKind.SshServer, IsGlobal = true };
+        db.Resources.Add(host);
+        await db.SaveChangesAsync();
+        var codex = new FakeCodex { WorkspaceReady = true };
+        var updates = new ChatUpdates();
+        var chats = new ChatStore(storage, updates);
+        using var worker = Worker(storage, codex, updates);
+        codex.NextToolCalls.Enqueue(("ssh_request_operation", new { id = host.Id, operation = "restart-docker" }));
+        await worker.StartAsync(default);
+        try
+        {
+            const string request = "Restart Docker and confirm the result.";
+            var chat = await chats.SendAsync(null, request, devops.Id, null, default, autoApproveNewChat: true);
+            await WaitAsync(async () => (await chats.ReadAsync(chat, 10, default)).Run?.Status == WorkStatus.WaitingForApproval);
+            var waiting = await chats.ReadAsync(chat, 10, default);
+            var approval = Assert.Single(waiting.Approvals);
+            Assert.Equal("Pending", approval.Status);
+            Assert.Equal(waiting.Run!.Id, approval.ContinuationRunId);
+            Assert.Single(codex.TurnRequests);
+            await storage.Startup.InitializeAsync(default);
+            Assert.Equal(WorkStatus.WaitingForApproval, (await chats.ReadAsync(chat, 10, default)).Run?.Status);
+            if (!approve)
+            {
+                var operations = new Operations(storage, storage.Paths, new Vault(storage.Paths, null));
+                await operations.DecideAsync(approval.Id, false, PlatformUser.OwnerId, default);
+                await WaitAsync(async () => (await chats.ReadAsync(chat, 10, default)).Run?.Status == WorkStatus.Cancelled);
+                Assert.Single(await db.Runs.Where(r => r.ConversationId == chat).ToListAsync());
+                Assert.Single(codex.TurnRequests);
+                return;
+            }
+
+            // Simulate an approved job still running on its host, then its recorded final result.
+            await db.Approvals.Where(a => a.Id == approval.Id).ExecuteUpdateAsync(s => s.SetProperty(a => a.Status, "Executing"));
+            Assert.Null(await ApprovalContinuations.QueueReadyAsync(db, default));
+            await db.Approvals.Where(a => a.Id == approval.Id).ExecuteUpdateAsync(s =>
+                s.SetProperty(a => a.Status, "Completed").SetProperty(a => a.Result, "Docker is active."));
+
+            await WaitAsync(async () => (await chats.ReadAsync(chat, 10, default)).Run is
+                { ResumesRunId: not null, Status: WorkStatus.Completed });
+            var finished = await chats.ReadAsync(chat, 10, default);
+            Assert.Equal(waiting.Run.Id, finished.Run!.ResumesRunId);
+            Assert.Equal((waiting.Run.UserMessageId, waiting.Run.Workspace, waiting.Run.AgentId),
+                (finished.Run.UserMessageId, finished.Run.Workspace, finished.Run.AgentId));
+            Assert.Equal(2, codex.TurnRequests.Count);
+            var resumed = codex.TurnRequests[^1].Items("input").Single().String("text");
+            Assert.Contains(request, resumed);
+            Assert.Contains("Docker is active.", resumed);
+            Assert.Single(finished.Messages, m => m.Role == "user");
+        }
+        finally { await worker.StopAsync(default); }
+    }
+
     [Fact]
     public async Task ArchitectKeepsTheConversationAndDeveloperStartsTheSameRequestAfterApproval()
     {

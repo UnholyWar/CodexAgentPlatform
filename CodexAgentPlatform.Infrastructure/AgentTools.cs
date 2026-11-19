@@ -226,7 +226,7 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
                 await RequireResourceProjectAsync(db, id!, run, ct);
                 var approval = await operations.RequestAsync(agent, run.ConversationId, id!,
                     name == "git_request_push" ? "GitPush" : args.String("operation") == "restart-docker" ? "SshChange" : "SshRelease",
-                    args.String("operation") ?? "push", run.Workspace, args.String("destinationBranch"), ct, args.String("image"), run.WorkId);
+                    args.String("operation") ?? "push", run.Workspace, args.String("destinationBranch"), ct, args.String("image"), run.WorkId, run.Id);
                 return new ApprovalReply(approval.Id, approval.Scope, approval.Status, approval.ExpiresAtUtc);
             case "ssh_request_command":
                 await RequireResourceProjectAsync(db, id!, run, ct);

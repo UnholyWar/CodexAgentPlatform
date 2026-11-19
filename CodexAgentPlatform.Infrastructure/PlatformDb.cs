@@ -44,6 +44,7 @@ public sealed class PlatformDb(DbContextOptions<PlatformDb> options) : DbContext
         model.Entity<ChatRun>().HasIndex(x => x.ConversationId).IsUnique()
             .HasFilter("\"Status\" IN (0, 1, 2, 3)");
         model.Entity<WorkItem>().HasIndex(x => x.ConversationId);
+        model.Entity<Approval>().HasIndex(x => x.ContinuationRunId);
         model.Entity<Activity>().HasIndex(x => x.EventOccurredAtUtc);
         model.Entity<Activity>().HasIndex(x => new { x.ConversationId, x.Id });
         model.Entity<Resource>().HasIndex(x => x.ProjectId);
