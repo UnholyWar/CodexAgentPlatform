@@ -4,7 +4,7 @@ using Microsoft.EntityFrameworkCore;
 
 namespace CodexAgentPlatform.Infrastructure;
 
-public sealed record Delegation(string AgentId, string Brief);
+public sealed record Delegation(string AgentId, string Brief, bool TransferConversation = false, string? RequiredPermission = null);
 public sealed record ApprovalReply(string Id, string Scope, string Status, DateTime ExpiresAtUtc);
 
 public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore memory, Operations operations, PlatformPaths paths)
@@ -33,16 +33,16 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
         new("task_finish", "", "Set work status to completed, paused, waiting, failed, or cancelled.", ["status", "step"], ["next"]),
         new("task_delegate", "delegate", "Assign one task to another agent after this turn. List eligible agents using agent_list.", ["agentId", "brief"], []),
         new("agent_list", "delegate", "List agents eligible for a follow-up on this project.", [], []),
-        new("resource_search", "resources", "Find approved project resources by name.", [], ["query"]),
+        new("resource_search", ToolAccess.ProjectResources, "Find resources by name within your granted scope. Set scope to global for the global inventory.", [], ["query", "scope"]),
         new("project_create", ToolAccess.CreateProjects, "Create a platform project and give the creating agent access to it. The default branch is main unless specified.", ["name"], ["defaultBranch"]),
-        new("resource_get", "resources", "Read metadata of an authorized resource.", ["id"], []),
+        new("resource_get", ToolAccess.ProjectResources, "Read metadata of an authorized resource.", ["id"], []),
         new("git_workspace", "git", "Use prepare to check out the registered repository. Use list or read for committed files at HEAD, passing a relative directory or file path as argument. Supports status, diff, fetch, pull, branch and commit. Pass nextOffset as offset for paged output.", ["id", "operation"], ["argument", "offset"]),
         new("git_request_push", "git", "Request explicit owner approval for a non-force push of the current commit.", ["id"], ["destinationBranch"]),
         new("ssh_inspect", "ssh", "Inspect test, health, docker-status, docker-services, linux-services, docker-logs or sftp-read. For more live command output pass nextOffset as offset.", ["id", "operation"], ["offset"]),
         new("ssh_request_operation", "ssh", "Request explicit approval for restart-docker on an SSH server, or deploy/rollback on a registered Swarm target. Deploy requires an image digest.", ["id", "operation"], ["image"])
     ];
 
-    public static IEnumerable<object> Describe(Agent agent, bool projectSelected = false)
+    public static IEnumerable<object> Describe(Agent agent, bool projectSelected = false, bool voice = false)
     {
         var deferred = new List<object> { DescribeFunction(GrantRequest, true) };
         if (agent.Id == PlatformChat.Id)
@@ -51,11 +51,16 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
             yield return ToolNamespace(deferred);
             yield break;
         }
-        foreach (var tool in Registry.Where(tool => tool.Permission.Length == 0 || ToolAccess.Has(agent, tool.Permission)))
+        if (voice)
+            yield return DescribeFunction(new Tool("handoff_to_agent", "",
+                "Transfer this conversation and the caller's current request to a listed teammate when it is outside your scope. " +
+                "Include the tool permission needed for access. Use task_delegate for work you want to assign while keeping the conversation.",
+                ["agentId"], ["permission"]), false);
+        foreach (var tool in Registry.Where(tool => HasToolPermission(agent, tool)))
         {
-            bool onDemand = tool.Permission is "git" or "ssh" or "resources" ||
+            bool onDemand = tool.Permission is "git" or "ssh" or ToolAccess.ProjectResources ||
                 tool.Name is "memory_archive" or "memory_consolidate" or "memory_update" or "memory_create";
-            if (projectSelected && tool.Name is ("resource_search" or "resource_get" or "git_workspace"))
+            if ((projectSelected || voice) && tool.Name is ("resource_search" or "resource_get" or "git_workspace"))
                 onDemand = false;
             var spec = DescribeFunction(tool, onDemand);
             if (onDemand) deferred.Add(spec);
@@ -63,6 +68,10 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
         }
         yield return ToolNamespace(deferred);
     }
+
+    private static bool HasToolPermission(Agent agent, Tool tool) => tool.Permission == ToolAccess.ProjectResources
+        ? ToolAccess.HasResourcePermission(agent)
+        : tool.Permission.Length == 0 || ToolAccess.Has(agent, tool.Permission);
 
     private static object ToolNamespace(List<object> tools) =>
         new { type = "namespace", name = "platform", description = "Platform actions and owner approval requests.", tools };
@@ -87,7 +96,7 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
         if (normal && name != GrantToolName)
             throw new UnauthorizedAccessException("This tool is not available in normal chat.");
         var tool = name == GrantToolName ? GrantRequest : Registry.FirstOrDefault(x => x.Name == name);
-        if (agent.Archived || tool is null || (tool.Permission.Length > 0 && !ToolAccess.Has(agent, tool.Permission))
+        if (agent.Archived || tool is null || !HasToolPermission(agent, tool)
             || (!normal && !ToolAccess.AllowsProject(agent, run.ProjectId)))
             throw new UnauthorizedAccessException("This tool is not permitted.");
         if (args.ValueKind != JsonValueKind.Object || tool.Required.Any(x => string.IsNullOrWhiteSpace(args.String(x))))
@@ -151,11 +160,19 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
                 if (id is not null)
                 {
                     var allowedProjects = ToolAccess.Split(agent.AllowedProjects);
+                    var canReadGlobal = ToolAccess.Has(agent, ToolAccess.GlobalResources);
+                    var canReadProject = ToolAccess.Has(agent, ToolAccess.ProjectResources);
                     visible = await db.Resources.AsNoTracking().Where(x => x.Id == id &&
-                        (x.ProjectId == null ? x.IsGlobal : Enumerable.Contains(allowedProjects, x.ProjectId) &&
+                        (x.ProjectId == null ? canReadGlobal && x.IsGlobal : canReadProject && Enumerable.Contains(allowedProjects, x.ProjectId) &&
                             (run.ProjectId == null || x.ProjectId == run.ProjectId))).ToListAsync(ct);
                 }
-                else visible = await operations.VisibleResourcesAsync(agent, args.String("query"), ct, run.ProjectId);
+                else
+                {
+                    var globalOnly = string.Equals(args.String("scope"), "global", StringComparison.OrdinalIgnoreCase);
+                    if (globalOnly && !ToolAccess.Has(agent, ToolAccess.GlobalResources))
+                        throw new UnauthorizedAccessException("The Global resources permission is required.");
+                    visible = await operations.VisibleResourcesAsync(agent, args.String("query"), ct, run.ProjectId, globalOnly);
+                }
                 return visible.Select(x => new { x.Id, x.Name, Kind = x.Kind.ToString(), x.ProjectId, x.IsGlobal, x.Address, x.Production }).ToArray();
             case "git_workspace":
                 if (!ToolAccess.Has(agent, "workspace")) throw new UnauthorizedAccessException("Workspace permission is required.");

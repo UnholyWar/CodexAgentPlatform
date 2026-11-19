@@ -49,13 +49,18 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         ["restart-docker"] = "systemctl restart docker"
     };
 
-    public async Task<List<Resource>> VisibleResourcesAsync(Agent agent, string? query, CancellationToken ct, string? projectId = null)
+    public async Task<List<Resource>> VisibleResourcesAsync(Agent agent, string? query, CancellationToken ct, string? projectId = null,
+        bool globalOnly = false)
     {
-        if (!ToolAccess.Has(agent, "resources")) return [];
+        var canReadGlobal = ToolAccess.Has(agent, ToolAccess.GlobalResources);
+        var canReadProject = ToolAccess.Has(agent, ToolAccess.ProjectResources);
+        if (!canReadGlobal && (!canReadProject || globalOnly)) return [];
         await using var db = await dbs.CreateDbContextAsync(ct);
         var projects = ToolAccess.Split(agent.AllowedProjects);
-        var resources = db.Resources.AsNoTracking().Where(x => x.ProjectId == null ? x.IsGlobal : Enumerable.Contains(projects, x.ProjectId));
-        if (projectId is not null) resources = resources.Where(r => r.ProjectId == projectId || r.ProjectId == null);
+        var resources = db.Resources.AsNoTracking().Where(x => x.ProjectId == null ? canReadGlobal && x.IsGlobal :
+            canReadProject && Enumerable.Contains(projects, x.ProjectId));
+        if (globalOnly) resources = resources.Where(r => r.ProjectId == null);
+        else if (projectId is not null) resources = resources.Where(r => r.ProjectId == projectId || r.ProjectId == null);
         if (!string.IsNullOrWhiteSpace(query)) resources = resources.Where(x => x.Name.Contains(query));
         return await resources.OrderByDescending(x => projectId != null && x.ProjectId == projectId).ThenBy(x => x.Name).Take(25).ToListAsync(ct);
     }
@@ -294,7 +299,8 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         await using var db = await dbs.CreateDbContextAsync(ct);
         var current = await db.Agents.AsNoTracking().SingleOrDefaultAsync(x => x.Id == agent.Id, ct);
         var resource = await db.Resources.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id && x.Kind == kind, ct);
-        if (current is null || !ToolAccess.Has(current, tool) || resource is null || (resource.ProjectId is null && !resource.IsGlobal) ||
+        if (current is null || !ToolAccess.Has(current, tool) || resource is null ||
+            (resource.ProjectId is null && (!resource.IsGlobal || !ToolAccess.Has(current, ToolAccess.GlobalResources))) ||
             !ToolAccess.AllowsProject(current, resource.ProjectId))
             throw new UnauthorizedAccessException("The agent is not authorized to use this resource or tool.");
         return resource;

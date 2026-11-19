@@ -170,6 +170,7 @@ public sealed class ChatWorker(IDbContextFactory<PlatformDb> dbs, ICodexConnecti
         {
             await using var db = await dbs.CreateDbContextAsync(ct);
             var normal = run.AgentId == PlatformChat.Id;
+            var voice = await ContextBudget.IsVoiceTurnAsync(db, run, ct);
             var agent = normal ? PlatformChat.CreateAgent() : await db.Agents.AsNoTracking().SingleAsync(x => x.Id == run.AgentId, ct);
             if (!normal && !ToolAccess.AllowsProject(agent, run.ProjectId))
                 throw new UnauthorizedAccessException("Agent or project access has been disabled.");
@@ -182,7 +183,7 @@ public sealed class ChatWorker(IDbContextFactory<PlatformDb> dbs, ICodexConnecti
             string activeThreadId;
             try
             {
-                (result, activeThreadId, resumed) = await OpenThreadAsync(db, run, agent, workspace, workspaceReady, ct);
+                (result, activeThreadId, resumed) = await OpenThreadAsync(db, run, agent, workspace, workspaceReady, voice, ct);
             }
             catch (CodexRpcException ex) when (workspaceReady &&
                 ex.Message.Contains("failed to load AGENTS.md instructions", StringComparison.OrdinalIgnoreCase) &&
@@ -194,7 +195,7 @@ public sealed class ChatWorker(IDbContextFactory<PlatformDb> dbs, ICodexConnecti
                     "Bubblewrap could not create the required Linux namespace in this container. Workspace and terminal access are unavailable for this response.",
                     null, ct);
                 updates.Publish(run.ConversationId);
-                (result, activeThreadId, resumed) = await OpenThreadAsync(db, run, agent, workspace, workspaceReady, ct);
+                (result, activeThreadId, resumed) = await OpenThreadAsync(db, run, agent, workspace, workspaceReady, voice, ct);
             }
             run.ThreadId = activeThreadId;
             run.Model = result.String("model") ?? run.Model;
@@ -202,7 +203,7 @@ public sealed class ChatWorker(IDbContextFactory<PlatformDb> dbs, ICodexConnecti
             routes[activeThreadId] = running;
             if (!codex.Connected) throw new IOException("The Codex connection closed.");
             var prompt = await db.Messages.Where(x => x.Id == run.UserMessageId).Select(x => x.Text).SingleAsync(ct);
-            var turnContext = await context.BuildForTurnAsync(run, agent, resumed, ct);
+            var turnContext = await context.BuildForTurnAsync(run, agent, resumed, ct, voice);
             var references = turnContext.Text;
             historyCharacters = turnContext.HistoryCharacters;
             if (windowsSandboxUnavailable)
@@ -237,7 +238,8 @@ public sealed class ChatWorker(IDbContextFactory<PlatformDb> dbs, ICodexConnecti
                         object? answer;
                         try
                         {
-                            answer = normal && tool != AgentTools.GrantToolName ? await RequestHandoffAsync(db, tool, data.Get("arguments"), run, ct)
+                            answer = normal && tool != AgentTools.GrantToolName || voice && tool == "handoff_to_agent"
+                                ? await RequestHandoffAsync(db, tool, data.Get("arguments"), run, voice && !normal, ct)
                                 : await tools.RunAsync(tool, data.Get("arguments"), run, ct);
                             if (answer is Delegation delegated)
                             {
@@ -375,10 +377,10 @@ public sealed class ChatWorker(IDbContextFactory<PlatformDb> dbs, ICodexConnecti
     }
 
     private async Task<(JsonElement Result, string ThreadId, bool Resumed)> OpenThreadAsync(
-        PlatformDb db, ChatRun run, Agent agent, string workspace, bool workspaceReady, CancellationToken ct)
+        PlatformDb db, ChatRun run, Agent agent, string workspace, bool workspaceReady, bool voice, CancellationToken ct)
     {
         // The App Server accepts dynamic tools only at thread/start, not on resume.
-        var toolset = AgentTools.Describe(agent, run.ProjectId is not null).ToArray();
+        var toolset = AgentTools.Describe(agent, run.ProjectId is not null, voice).ToArray();
         var fingerprint = Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(toolset)));
         var workspaceKey = (workspaceReady ? run.Workspace : run.Workspace + ":chat") + ":" + fingerprint;
         var stored = await db.Threads.SingleOrDefaultAsync(x => x.ConversationId == run.ConversationId &&
@@ -433,15 +435,19 @@ public sealed class ChatWorker(IDbContextFactory<PlatformDb> dbs, ICodexConnecti
 
     private static string PermissionProfile(bool workspaceReady) => workspaceReady ? "platform_work" : "platform_chat";
 
-    private static async Task<Delegation> RequestHandoffAsync(PlatformDb db, string tool, JsonElement args, ChatRun run, CancellationToken ct)
+    private static async Task<Delegation> RequestHandoffAsync(PlatformDb db, string tool, JsonElement args, ChatRun run,
+        bool transferConversation, CancellationToken ct)
     {
         if (tool != "handoff_to_agent" || run.DelegationDepth != 0)
-            throw new UnauthorizedAccessException("Only a specialist handoff is available in normal chat.");
+            throw new UnauthorizedAccessException("A further conversation transfer is not available for this turn.");
         var id = args.ValueKind == JsonValueKind.Object ? args.String("agentId") : null;
         var target = await db.Agents.AsNoTracking().SingleOrDefaultAsync(a => a.Id == id && !a.Archived, ct);
-        if (target is null || target.Id == PlatformChat.Id || !ToolAccess.AllowsProject(target, run.ProjectId))
+        var permission = transferConversation && args.ValueKind == JsonValueKind.Object ? args.String("permission")?.Trim() : null;
+        if (target is null || target.Id == PlatformChat.Id || target.Id == run.AgentId ||
+            !ToolAccess.AllowsProject(target, run.ProjectId) ||
+            !string.IsNullOrEmpty(permission) && (!ToolAccess.Permissions.ContainsKey(permission) || !ToolAccess.Has(target, permission)))
             throw new UnauthorizedAccessException("The selected specialist is not available for this project.");
-        return new Delegation(target.Id, "");
+        return new Delegation(target.Id, "", transferConversation, permission);
     }
 
     private async Task SaveIdentityAsync(ChatRun run, CancellationToken ct)
@@ -540,13 +546,17 @@ public sealed class ChatWorker(IDbContextFactory<PlatformDb> dbs, ICodexConnecti
         else if (delegation is not null)
         {
             var agent = await db.Agents.AsNoTracking().SingleOrDefaultAsync(x => x.Id == delegation.AgentId, ct);
-            var handoff = run.AgentId == PlatformChat.Id;
-            if (agent is not null && agent.Id != PlatformChat.Id && ToolAccess.AllowsProject(agent, run.ProjectId))
+            var handoff = run.AgentId == PlatformChat.Id || delegation.TransferConversation;
+            if (agent is not null && agent.Id != PlatformChat.Id && ToolAccess.AllowsProject(agent, run.ProjectId) &&
+                (string.IsNullOrEmpty(delegation.RequiredPermission) || ToolAccess.Has(agent, delegation.RequiredPermission)))
             {
                 Message? brief = null;
                 if (handoff)
                 {
                     msg.Text = $"{agent.Name} took over.";
+                    if (delegation.TransferConversation)
+                        await db.Conversations.Where(c => c.Id == run.ConversationId && c.CoordinatorAgentId == run.AgentId)
+                            .ExecuteUpdateAsync(s => s.SetProperty(c => c.CoordinatorAgentId, agent.Id), ct);
                 }
                 else
                 {
@@ -554,7 +564,8 @@ public sealed class ChatWorker(IDbContextFactory<PlatformDb> dbs, ICodexConnecti
                     db.Messages.Add(brief);
                 }
                 await db.SaveChangesAsync(ct);
-                await QueueHandoffAsync(db, run, agent, run.ProjectId, brief?.Id ?? run.UserMessageId, handoff ? 0 : 1, false, ct);
+                await QueueHandoffAsync(db, run, agent, run.ProjectId, brief?.Id ?? run.UserMessageId,
+                    run.AgentId == PlatformChat.Id ? 0 : 1, false, ct);
             }
             else if (handoff)
             {

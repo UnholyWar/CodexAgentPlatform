@@ -55,8 +55,6 @@
     [Parameter] public string? ProjectId { get; set; }
     [Parameter] public bool PinProject { get; set; }
     [Parameter] public string? SelectedAgent { get; set; }
-    [Parameter] public string? VoiceAgentId { get; set; }
-    [Parameter] public string? VoiceAgentName { get; set; }
     [Parameter] public bool AutoApprove { get; set; }
     [Parameter] public EventCallback<string> ConversationOpened { get; set; }
     [Parameter] public EventCallback SpeakerChanged { get; set; }
@@ -76,14 +74,14 @@
         starting = true;
         connected = muted = false;
         error = null;
-        speakerName = VoiceAgentName;
+        speakerName = null;
         status = "Connecting…";
         try
         {
             module ??= await JS.InvokeAsync<IJSObjectReference>("import", "./" + Assets["chat-voice.js"]);
             if (disposed) return;
             reference ??= DotNetObjectReference.Create(this);
-            var current = new ChatVoiceCall(Codex, Chats, Worker, Log, ConversationId, ProjectId, SelectedAgent, AutoApprove, PinProject, VoiceAgentId);
+            var current = new ChatVoiceCall(Codex, Chats, Worker, Log, ConversationId, ProjectId, SelectedAgent, AutoApprove, PinProject);
             call = current;
             callConversationId = ConversationId;
             current.ConversationOpened += id => _ = InvokeAsync(async () =>
@@ -136,7 +134,16 @@
     {
         var current = call;
         if (current is null) return null;
-        try { return await current.StartAsync(offer); }
+        try
+        {
+            var answer = await current.StartAsync(offer);
+            if (call == current)
+            {
+                speakerName = current.Speaker.Name;
+                StateHasChanged();
+            }
+            return answer;
+        }
         catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or CodexRpcException
             or TimeoutException or OperationCanceledException or IOException)
         {

@@ -168,9 +168,22 @@ public sealed class PlatformTests
         db.Resources.AddRange(global, project, new Resource { Name = "Eski atanmamış kaynak" });
         await db.SaveChangesAsync();
         var devops = await db.Agents.SingleAsync(a => a.Id == "devops");
-        Assert.Equal(global.Id, Assert.Single(await ops.VisibleResourcesAsync(devops, null, default)).Id);
         var run = new ChatRun { AgentId = devops.Id, ConversationId = "chat" };
         var args = System.Text.Json.JsonSerializer.SerializeToElement(new { id = global.Id, operation = "restart-docker" });
+        var globalSearch = System.Text.Json.JsonSerializer.SerializeToElement(new { scope = "global" });
+        var globalGet = System.Text.Json.JsonSerializer.SerializeToElement(new { id = global.Id });
+        devops.AllowedProjects = "private";
+        await db.SaveChangesAsync();
+        Assert.Equal(project.Id, Assert.Single(await ops.VisibleResourcesAsync(devops, null, default)).Id);
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => tools.RunAsync("resource_search", globalSearch, run, default));
+        Assert.Equal("[]", System.Text.Json.JsonSerializer.Serialize(await tools.RunAsync("resource_get", globalGet, run, default)));
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => tools.RunAsync("ssh_request_operation", args, run, default));
+
+        devops.AllowedTools = $"ssh,{ToolAccess.GlobalResources}";
+        await db.SaveChangesAsync();
+        Assert.Equal(global.Id, Assert.Single(await ops.VisibleResourcesAsync(devops, null, default)).Id);
+        Assert.Contains(global.Id, System.Text.Json.JsonSerializer.Serialize(await tools.RunAsync("resource_search", globalSearch, run, default)));
+        Assert.Contains(global.Id, System.Text.Json.JsonSerializer.Serialize(await tools.RunAsync("resource_get", globalGet, run, default)));
         var approval = Assert.IsType<ApprovalReply>(await tools.RunAsync("ssh_request_operation", args, run, default));
         Assert.Equal("Pending", approval.Status);
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => tools.RunAsync("ssh_request_operation",

@@ -614,6 +614,8 @@ public sealed class ChatTests(ITestOutputHelper output)
             await WaitAsync(() => Task.FromResult(replies.Count == 2));
             var snapshot = await chats.ReadAsync(conversation, 10, default);
             Assert.Equal("qa", snapshot.Run?.AgentId);
+            Assert.Equal("qa", snapshot.CoordinatorAgentId);
+            Assert.Equal("qa", voice.Speaker.Id);
             Assert.Equal(project.Id, snapshot.Run?.ProjectId);
             Assert.All(snapshot.Messages.Where(m => m.Role == "user"), m => Assert.Equal(project.Id, m.VoiceProjectId));
             Assert.Collection(codex.ToolReplies, r => Assert.False(r.True("success")), r => Assert.True(r.True("success")));
@@ -731,7 +733,7 @@ public sealed class ChatTests(ITestOutputHelper output)
             User("Merhaba");
             await WaitAsync(() => Task.FromResult(replies.Count == 6));
             var snapshot = await chats.ReadAsync(id, 30, default);
-            Assert.Equal(new[] { "architect", "developer" }, switches.ToArray());
+            Assert.Equal(new[] { "developer" }, switches.ToArray());
             Assert.Equal("developer", replies.Last().Speaker.Id);
             Assert.Equal("developer", snapshot.CoordinatorAgentId);
             Assert.Equal("developer", snapshot.Run?.AgentId);
@@ -746,8 +748,80 @@ public sealed class ChatTests(ITestOutputHelper output)
 
             User("Please switch to normal chat.");
             await WaitAsync(() => Task.FromResult(replies.Count == 7));
-            Assert.Equal(PlatformChat.Id, replies.Last().Speaker.Id);
-            Assert.Equal(PlatformChat.Id, (await chats.ReadAsync(id, 30, default)).CoordinatorAgentId);
+            Assert.Equal("architect", replies.Last().Speaker.Id);
+            Assert.Equal("architect", (await chats.ReadAsync(id, 30, default)).CoordinatorAgentId);
+
+            void User(string text) => codex.Emit("thread/realtime/transcript/done", new { threadId = "t1", role = "user", text });
+        }
+        finally { await worker.StopAsync(default); }
+    }
+
+    [Fact]
+    public async Task VoiceStartsWithArchitectAndTransfersGlobalInventoryToAnAuthorizedTeammate()
+    {
+        await using var storage = await TestStorage.CreateAsync();
+        await using var db = storage.CreateDbContext();
+        var project = new Project { Name = "Project scope" };
+        db.Projects.Add(project);
+        db.Resources.AddRange(
+            new Resource { Name = "Shared infrastructure", IsGlobal = true, Address = "private.example", Kind = ResourceKind.SshServer },
+            new Resource { Name = "Project-only repository", ProjectId = project.Id, Kind = ResourceKind.GitRepository });
+        await db.SaveChangesAsync();
+
+        var codex = new FakeCodex();
+        var updates = new ChatUpdates();
+        var chats = new ChatStore(storage, updates);
+        using var worker = Worker(storage, codex, updates);
+        await worker.StartAsync(default);
+        try
+        {
+            await using var voice = new ChatVoiceCall(codex, chats, worker, NullLogger<ChatVoiceCall>.Instance,
+                conversationId: null, projectId: null, selectedAgent: PlatformChat.Id, autoApprove: false);
+            var opened = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var replies = new System.Collections.Concurrent.ConcurrentQueue<VoiceReply>();
+            voice.ConversationOpened += id => opened.SetResult(id);
+            voice.ReplyReady += replies.Enqueue;
+            await voice.StartAsync("v=0 fake offer");
+            Assert.Equal("architect", voice.Speaker.Id);
+            User("Global kaynaklarıma erişebiliyor musun?");
+            var id = await opened.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await WaitAsync(() => Task.FromResult(replies.Count == 1));
+            Assert.Contains("Global resources", Assert.Single(replies).Text);
+            Assert.DoesNotContain("Shared infrastructure", Assert.Single(replies).Text);
+
+            var architect = await db.Agents.SingleAsync(a => a.Id == "architect");
+            architect.AllowedTools += "," + ToolAccess.GlobalResources;
+            await db.SaveChangesAsync();
+            User("Global kaynakları şu. Global kaynaklara erişebiliyor musun?");
+            codex.Emit("thread/realtime/transcript/done", new { threadId = "t1", role = "assistant", text = "Unverified native voice reply." });
+            await WaitAsync(() => Task.FromResult(replies.Count == 2));
+            var reply = replies.Last();
+            Assert.Equal("architect", reply.Speaker.Id);
+            Assert.Contains("Shared infrastructure", reply.Text);
+            Assert.DoesNotContain("Project-only repository", reply.Text);
+            Assert.DoesNotContain("private.example", reply.Text);
+
+            architect.AllowedTools = "memory,resources,delegate";
+            (await db.Agents.SingleAsync(a => a.Id == "developer")).AllowedTools = ToolAccess.GlobalResources;
+            await db.SaveChangesAsync();
+            User("Neler var bir baksana benim global kaynaklarımda");
+            await WaitAsync(() => Task.FromResult(replies.Count == 3));
+            Assert.Equal("developer", replies.Last().Speaker.Id);
+            Assert.Equal("developer", voice.Speaker.Id);
+            Assert.Empty(codex.TurnRequests);
+            User("Peki, devam edelim.");
+            await WaitAsync(() => Task.FromResult(replies.Count == 4));
+            var snapshot = await chats.ReadAsync(id, 20, default);
+            Assert.Equal("developer", snapshot.Run?.AgentId);
+            Assert.Equal("developer", snapshot.CoordinatorAgentId);
+            Assert.All(snapshot.Messages.Where(m => m.Role == "assistant"), m => Assert.NotEqual(PlatformChat.Id, m.AgentId));
+            Assert.DoesNotContain(snapshot.Messages, m => m.Text == "Unverified native voice reply.");
+            Assert.Contains("Shared infrastructure", Assert.Single(codex.TurnRequests).Get("input")[0].String("text"));
+
+            var typedId = await chats.SendAsync(null, "What global resources can you see?", PlatformChat.Id, null, default);
+            var typed = Assert.Single((await chats.ReadAsync(typedId, 10, default)).Messages, m => m.Role == "assistant");
+            Assert.Equal("developer", typed.AgentId);
+            Assert.Contains("Shared infrastructure", typed.Text);
 
             void User(string text) => codex.Emit("thread/realtime/transcript/done", new { threadId = "t1", role = "user", text });
         }

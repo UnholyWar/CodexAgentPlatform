@@ -119,7 +119,6 @@
                 }
             </div>
             <ChatVoice ConversationId="@Id" ProjectId="@EffectiveProject" PinProject="@(projectId == "")" SelectedAgent="@(mentionedAgent?.Id ?? selectedAgent ?? snapshot.CoordinatorAgentId)"
-                       VoiceAgentId="@(mentionedAgent?.Id ?? ReplyAgentId)" VoiceAgentName="@AgentName(mentionedAgent?.Id ?? ReplyAgentId)"
                        SpeakerChanged="RefreshVoiceSpeakerAsync"
                        AutoApprove="@AutoApprove" ConversationOpened="OpenVoiceConversation" />
             @if (IsActive && !ChatStore.IsPauseRequest(draft))

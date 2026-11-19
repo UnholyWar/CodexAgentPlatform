@@ -29,6 +29,23 @@ internal static partial class ProjectRouting
 
     internal static bool RequestsArchitect(string text) => ArchitectRequest().IsMatch(text.Trim());
 
+    internal static bool GlobalResourceInventory(string text) =>
+        GlobalResources().IsMatch(text) && InventoryQuestion().IsMatch(text) && !ResourceOperation().IsMatch(text);
+
+    internal static bool IsTurkish(string text) => TurkishWords().IsMatch(text);
+
+    [GeneratedRegex(@"\b(?:global|küresel)\s+(?:kaynak\p{L}*|resources?\b)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex GlobalResources();
+
+    [GeneratedRegex(@"\b(?:list|show|what|which|can you (?:see|access|read)|eriş\p{L}*|görebil\p{L}*|oku\p{L}*|listele\p{L}*|hangi|neler|bak\p{L}*)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex InventoryQuestion();
+
+    [GeneratedRegex(@"\b(?:ssh|docker|test|health|git|deploy\p{L}*|restart\p{L}*|delete\p{L}*|remove\p{L}*|update\p{L}*|create\p{L}*|sil\p{L}*|güncelle\p{L}*|değiştir\p{L}*|ekle\p{L}*|oluştur\p{L}*|bağlan\p{L}*)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex ResourceOperation();
+
+    [GeneratedRegex(@"[çğıöşüİÇĞÖŞÜ]|\b(?:merhaba|kaynak\p{L}*|bana|kim|neler|hangi|var|bak\p{L}*)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex TurkishWords();
+
     internal static (string? Target, bool Identity, bool TaskStatus, bool Turkish) VoiceControl(string text)
     {
         var input = text.Trim().TrimEnd('.', '!', '?', '…');

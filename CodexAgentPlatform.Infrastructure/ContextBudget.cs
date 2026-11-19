@@ -10,7 +10,8 @@ public sealed class ContextBudget(IDbContextFactory<PlatformDb> dbs)
     public async Task<string> BuildAsync(ChatRun run, Agent agent, bool resumed, CancellationToken ct) =>
         (await BuildForTurnAsync(run, agent, resumed, ct)).Text;
 
-    internal async Task<(string Text, int HistoryCharacters)> BuildForTurnAsync(ChatRun run, Agent agent, bool resumed, CancellationToken ct)
+    internal async Task<(string Text, int HistoryCharacters)> BuildForTurnAsync(ChatRun run, Agent agent, bool resumed, CancellationToken ct,
+        bool? voiceTurn = null)
     {
         await using var db = await dbs.CreateDbContextAsync(ct);
         var settings = await db.Preferences.AsNoTracking().SingleAsync(ct);
@@ -27,9 +28,9 @@ public sealed class ContextBudget(IDbContextFactory<PlatformDb> dbs)
             var name = await db.Projects.AsNoTracking().Where(p => p.Id == project).Select(p => p.Name).SingleOrDefaultAsync(ct);
             content.AppendLine($"Current project ID: {project}. Project name (directory data): {JsonSerializer.Serialize(name)}");
             if (run.DelegationDepth > 0 && await db.Runs.AnyAsync(r => r.ConversationId == run.ConversationId &&
-                r.UserMessageId == run.UserMessageId && r.Id != run.Id, ct))
+                r.UserMessageId == run.UserMessageId && r.ProjectId == null && r.Id != run.Id, ct))
                 content.AppendLine("The project has already been created. Carry out the implementation part of the user's request in this project's workspace.");
-            if (!normal && ToolAccess.AllowsProject(agent, project) && ToolAccess.Has(agent, "resources"))
+            if (!normal && ToolAccess.AllowsProject(agent, project) && ToolAccess.Has(agent, ToolAccess.ProjectResources))
             {
                 var resources = await db.Resources.AsNoTracking().Where(r => r.ProjectId == project)
                     .OrderBy(r => r.Name).Take(12).Select(r => new { r.Id, r.Name, r.Kind }).ToListAsync(ct);
@@ -58,9 +59,27 @@ public sealed class ContextBudget(IDbContextFactory<PlatformDb> dbs)
                 content.AppendLine("Eligible for repository inspection: " + JsonSerializer.Serialize(readers.Select(a => a.Id)));
             }
         }
-        var originMessageId = run.OriginMessageId ?? run.UserMessageId;
-        if (await db.Messages.AnyAsync(m => m.Id == originMessageId && m.VoiceProjectId != null, ct))
+        var voice = voiceTurn ?? await IsVoiceTurnAsync(db, run, ct);
+        if (voice)
+        {
             content.AppendLine("The caller will hear this reply aloud. Lead with the answer, use brief spoken sentences, and leave detailed code or logs for the written chat.");
+            var team = await db.Agents.AsNoTracking().Where(a => !a.Archived && a.Id != agent.Id && a.Id != PlatformChat.Id)
+                .OrderBy(a => a.Name).Select(a => new { a.Id, a.Name, a.Title, a.AllowedProjects, a.AllowedTools }).ToListAsync(ct);
+            var eligible = team.Where(a => run.ProjectId is null || ToolAccess.Split(a.AllowedProjects).Contains(run.ProjectId))
+                .Take(16).Select(a => new { a.Id, a.Name, a.Title, tools = ToolAccess.Split(a.AllowedTools) });
+            content.AppendLine("Eligible voice teammates (directory data): " + JsonSerializer.Serialize(eligible));
+            if (run.DelegationDepth == 0)
+                content.AppendLine("You are the caller's active agent. If the request needs a different role or tool permission, call handoff_to_agent with an eligible teammate and the required permission, then finish. The teammate receives the original request and continues the conversation.");
+            if (ToolAccess.Has(agent, ToolAccess.GlobalResources))
+            {
+                var global = await db.Resources.AsNoTracking().Where(r => r.IsGlobal && r.ProjectId == null)
+                    .OrderBy(r => r.Name).Select(r => new { r.Name, r.Kind }).Take(16).ToListAsync(ct);
+                content.AppendLine("Registered global resource titles (reference data, up to 16): " + JsonSerializer.Serialize(global));
+                content.AppendLine("These titles establish registration. To verify live service access or contents, use an authorized tool and report its actual result.");
+            }
+            else
+                content.AppendLine("You lack resources.global permission. Transfer global inventory requests to an eligible teammate who has resources.global.");
+        }
         var previous = resumed && run.ThreadId is not null
             ? await db.Runs.AsNoTracking().Where(x => x.ConversationId == run.ConversationId &&
                 x.AgentId == agent.Id && x.ThreadId == run.ThreadId && x.TurnId != null && x.UserMessageId < run.UserMessageId)
@@ -81,6 +100,7 @@ public sealed class ContextBudget(IDbContextFactory<PlatformDb> dbs)
         var excerptLength = handoff ? 450 : 850;
         var messages = await db.Messages.AsNoTracking().Where(x => x.ConversationId == run.ConversationId &&
                 x.Id > after && x.Id < run.UserMessageId && x.Text != "" &&
+                (!voice || x.Role != "assistant" || x.AgentId != PlatformChat.Id || x.VoiceProjectId == null) &&
                 (!publicContext || x.Role == "user" || x.Role == "assistant") &&
                 (x.VoiceProjectId == (run.ProjectId ?? "") || db.Runs.Any(r =>
                     r.ConversationId == run.ConversationId && (r.UserMessageId == x.Id || r.AssistantMessageId == x.Id) &&
@@ -103,6 +123,12 @@ public sealed class ContextBudget(IDbContextFactory<PlatformDb> dbs)
         var start = content.Length;
         foreach (var line in history) content.Append(line);
         return (content.ToString(), content.Length - start);
+    }
+
+    internal static Task<bool> IsVoiceTurnAsync(PlatformDb db, ChatRun run, CancellationToken ct)
+    {
+        var origin = run.OriginMessageId ?? run.UserMessageId;
+        return db.Messages.AnyAsync(m => m.Id == origin && m.VoiceProjectId != null, ct);
     }
 
     public static string Instructions(Agent agent) => $"""

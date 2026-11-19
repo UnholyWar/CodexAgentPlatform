@@ -3,15 +3,20 @@ namespace CodexAgentPlatform.Application;
 public static class ToolAccess
 {
     public const string CreateProjects = "projects.create";
+    public const string ProjectResources = "resources";
+    public const string GlobalResources = "resources.global";
 
     public static IReadOnlyDictionary<string, string> Permissions { get; } = new Dictionary<string, string>
     {
-        ["memory"] = "Memory", ["resources"] = "Project resources", ["workspace"] = "Workspace and terminal",
+        ["memory"] = "Memory", [ProjectResources] = "Project resources", [GlobalResources] = "Global resources",
+        ["workspace"] = "Workspace and terminal",
         ["git"] = "Git", ["ssh"] = "SSH", ["delegate"] = "Delegation", [CreateProjects] = "Create projects"
     }.AsReadOnly();
 
     public static bool Has(Agent agent, string permission) => !agent.Archived &&
         Split(agent.AllowedTools).Contains(permission, StringComparer.Ordinal);
+
+    public static bool HasResourcePermission(Agent agent) => Has(agent, ProjectResources) || Has(agent, GlobalResources);
 
     public static bool AllowsProject(Agent agent, string? project) => !agent.Archived &&
         (project is null || Split(agent.AllowedProjects).Contains(project, StringComparer.Ordinal));

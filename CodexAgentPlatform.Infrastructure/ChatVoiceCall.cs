@@ -5,17 +5,13 @@ using Microsoft.Extensions.Logging;
 
 namespace CodexAgentPlatform.Infrastructure;
 
-public sealed record VoiceSpeaker(string Id, string Name, string? Voice)
-{
-    public static VoiceSpeaker Normal { get; } = new(PlatformChat.Id, PlatformChat.Name, null);
-}
+public sealed record VoiceSpeaker(string Id, string Name, string? Voice);
 
 public sealed record VoiceReply(VoiceSpeaker Speaker, string Text);
 
 public sealed partial class ChatVoiceCall(
     ICodexConnection codex, ChatStore chats, ChatWorker worker, ILogger<ChatVoiceCall> log,
-    string? conversationId, string? projectId, string? selectedAgent, bool autoApprove, bool pinProject = false,
-    string? voiceAgentId = null) : IAsyncDisposable
+    string? conversationId, string? projectId, string? selectedAgent, bool autoApprove, bool pinProject = false) : IAsyncDisposable
 {
     private readonly CancellationTokenSource lifetime = new();
     private readonly Channel<CodexEvent> inbox = Channel.CreateBounded<CodexEvent>(64);
@@ -27,7 +23,8 @@ public sealed partial class ChatVoiceCall(
     private Task<string>? startup;
     private Task? events;
     private Task? work;
-    private VoiceSpeaker activeSpeaker = VoiceSpeaker.Normal;
+    private VoiceSpeaker activeSpeaker = null!;
+    private bool firstUserMessage = true;
     // Realtime may deliver either or both representations of an utterance, in either order.
     private readonly List<(string Key, bool FromHandoff, DateTime ReceivedAt)> unpaired = [];
     private int workGeneration;
@@ -38,6 +35,7 @@ public sealed partial class ChatVoiceCall(
     public event Action<VoiceReply>? ReplyReady;
     public event Action? UserSpoke;
     public event Action<string>? Failed;
+    public VoiceSpeaker Speaker => activeSpeaker;
 
     public Task<string> StartAsync(string offer)
     {
@@ -58,7 +56,7 @@ public sealed partial class ChatVoiceCall(
         if (account.Get("account").String("type") != "chatgpt")
             throw new InvalidOperationException("Sign in with ChatGPT in Codex settings before starting a voice call.");
 
-        activeSpeaker = await chats.VoiceSpeakerAsync(selectedAgent ?? voiceAgentId, ct);
+        activeSpeaker = await chats.VoiceEntryAsync(selectedAgent, ct);
         codex.Received += Receive;
         var thread = await codex.CallAsync("thread/start", new
         {
@@ -135,7 +133,9 @@ public sealed partial class ChatVoiceCall(
 
     private async Task<Message> SaveAsync(string text, CancellationToken ct)
     {
-        var message = await chats.SaveVoiceUserAsync(conversationId, currentProjectId, text, autoApprove, ct);
+        var message = await chats.SaveVoiceUserAsync(conversationId, currentProjectId, text, autoApprove,
+            firstUserMessage ? activeSpeaker.Id : null, ct);
+        firstUserMessage = false;
         if (conversationId is null)
         {
             conversationId = message.ConversationId;
@@ -162,19 +162,21 @@ public sealed partial class ChatVoiceCall(
         unpaired.Add((key, fromHandoff, now));
         UserSpoke?.Invoke();
         var user = await SaveAsync(text, ct);
-        var control = await chats.VoiceControlAsync(user, activeSpeaker, ct);
+        (VoiceSpeaker? Changed, VoiceReply? Reply) control;
+        await submission.WaitAsync(ct);
+        try
+        {
+            control = await chats.VoiceControlAsync(user, activeSpeaker, ct);
+            if (control.Changed is { } speaker) SetSpeaker(speaker);
+        }
+        finally { submission.Release(); }
         if (control.Reply is { } reply)
         {
-            if (control.Changed is { } speaker)
-            {
-                activeSpeaker = speaker;
-                selectedAgent = speaker.Id;
-                SpeakerChanged?.Invoke(speaker);
-            }
             ReplyReady?.Invoke(reply);
             return;
         }
-        var named = ProjectRouting.Intent(text).Create ? [] : await chats.FindSpokenProjectsAsync(text, ct);
+        var named = ProjectRouting.Intent(text).Create || ProjectRouting.GlobalResourceInventory(text)
+            ? [] : await chats.FindSpokenProjectsAsync(text, ct);
         if (named.Length > 1)
         {
             await ReplyAsync(user, activeSpeaker, $"Which project should we use, {named[0].Name} or {named[1].Name}?", ct);
@@ -199,10 +201,10 @@ public sealed partial class ChatVoiceCall(
             await ReplyAsync(user, activeSpeaker, "I requested that the current task stop.", ct);
             return;
         }
-        work = RunTurnAsync(work, user, selectedAgent, activeSpeaker, workGeneration, ct);
+        work = RunTurnAsync(work, user, workGeneration, ct);
     }
 
-    private async Task RunTurnAsync(Task? previous, Message user, string? agent, VoiceSpeaker speaker, int generation, CancellationToken ct)
+    private async Task RunTurnAsync(Task? previous, Message user, int generation, CancellationToken ct)
     {
         try
         {
@@ -212,7 +214,8 @@ public sealed partial class ChatVoiceCall(
             try
             {
                 if (Volatile.Read(ref workGeneration) != generation) return;
-                clarification = await chats.SubmitVoiceAsync(user, agent, ct);
+                clarification = await chats.SubmitVoiceAsync(user, activeSpeaker.Id, ct);
+                if (clarification is not null) SetSpeaker(clarification.Speaker);
             }
             finally { submission.Release(); }
             if (clarification is not null) ReplyReady?.Invoke(clarification);
@@ -221,7 +224,7 @@ public sealed partial class ChatVoiceCall(
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
         catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or UnauthorizedAccessException)
         {
-            await ReplyAsync(user, speaker, ex.Message, ct);
+            await ReplyAsync(user, activeSpeaker, ex.Message, ct);
         }
         catch (Exception ex)
         {
@@ -245,9 +248,15 @@ public sealed partial class ChatVoiceCall(
                     await ReplyAsync(user, activeSpeaker, "Open the chat to select the work item or project.", ct);
                     return;
                 }
+                if (result.Value.ConversationAgentId is { } coordinator && coordinator != activeSpeaker.Id)
+                {
+                    var previous = activeSpeaker;
+                    var next = await chats.VoiceSpeakerAsync(coordinator, ct);
+                    if (activeSpeaker == previous && next is not null) SetSpeaker(next);
+                }
                 if (result.Value.PendingApproval && !approvalAnnounced)
                 {
-                    var agent = await chats.VoiceSpeakerAsync(result.Value.AgentId, ct);
+                    var agent = await chats.VoiceSpeakerAsync(result.Value.AgentId, ct) ?? activeSpeaker;
                     ReplyReady?.Invoke(new(agent, "This task is waiting for your approval in the chat."));
                     approvalAnnounced = true;
                 }
@@ -255,7 +264,7 @@ public sealed partial class ChatVoiceCall(
                 if (!pinProject && result.Value.ProjectId is { } projectId) currentProjectId = projectId;
                 if (!result.Value.PendingApproval)
                 {
-                    var agent = await chats.VoiceSpeakerAsync(result.Value.AgentId, ct);
+                    var agent = await chats.VoiceSpeakerAsync(result.Value.AgentId, ct) ?? activeSpeaker;
                     var text = result.Value.Text;
                     ReplyReady?.Invoke(new(agent, text.Length > 0 ? text : $"Task status: {result.Value.Status}."));
                 }
@@ -264,6 +273,13 @@ public sealed partial class ChatVoiceCall(
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
         catch (Exception ex) { log.LogWarning(ex, "Could not relay the agent's result to voice."); }
+    }
+
+    private void SetSpeaker(VoiceSpeaker speaker)
+    {
+        var changed = activeSpeaker.Id != speaker.Id;
+        activeSpeaker = speaker;
+        if (changed) SpeakerChanged?.Invoke(speaker);
     }
 
     private async Task ReplyAsync(Message user, VoiceSpeaker speaker, string text, CancellationToken ct)
