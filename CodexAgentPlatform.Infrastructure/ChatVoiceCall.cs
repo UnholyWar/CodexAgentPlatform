@@ -1,10 +1,16 @@
-using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading.Channels;
 using CodexAgentPlatform.Application;
 using Microsoft.Extensions.Logging;
 
 namespace CodexAgentPlatform.Infrastructure;
+
+public sealed record VoiceSpeaker(string Id, string Name, string? Voice)
+{
+    public static VoiceSpeaker Normal { get; } = new(PlatformChat.Id, PlatformChat.Name, null);
+}
+
+public sealed record VoiceReply(VoiceSpeaker Speaker, string Text);
 
 public sealed partial class ChatVoiceCall(
     ICodexConnection codex, ChatStore chats, ChatWorker worker, ILogger<ChatVoiceCall> log,
@@ -21,12 +27,16 @@ public sealed partial class ChatVoiceCall(
     private Task<string>? startup;
     private Task? events;
     private Task? work;
+    private VoiceSpeaker activeSpeaker = VoiceSpeaker.Normal;
     // Realtime may deliver either or both representations of an utterance, in either order.
-    private readonly List<(Message User, bool FromHandoff, bool Routed)> unpaired = [];
+    private readonly List<(string Key, bool FromHandoff, DateTime ReceivedAt)> unpaired = [];
     private int workGeneration;
     private int disposed;
 
     public event Action<string>? ConversationOpened;
+    public event Action<VoiceSpeaker>? SpeakerChanged;
+    public event Action<VoiceReply>? ReplyReady;
+    public event Action? UserSpoke;
     public event Action<string>? Failed;
 
     public Task<string> StartAsync(string offer)
@@ -48,20 +58,7 @@ public sealed partial class ChatVoiceCall(
         if (account.Get("account").String("type") != "chatgpt")
             throw new InvalidOperationException("Sign in with ChatGPT in Codex settings before starting a voice call.");
 
-        var context = await chats.VoiceContextAsync(conversationId, currentProjectId, ct);
-        var voice = await chats.AgentVoiceAsync(voiceAgentId ?? selectedAgent, currentProjectId, ct);
-        if (voice is not null)
-        {
-            try
-            {
-                if (!(await new CodexAccounts(codex).VoicesAsync(ct)).Contains(voice, StringComparer.Ordinal)) voice = null;
-            }
-            catch (CodexRpcException ex)
-            {
-                log.LogDebug(ex, "Could not verify the requested Realtime voice. Using the default voice.");
-                voice = null;
-            }
-        }
+        activeSpeaker = await chats.VoiceSpeakerAsync(selectedAgent ?? voiceAgentId, ct);
         codex.Received += Receive;
         var thread = await codex.CallAsync("thread/start", new
         {
@@ -72,27 +69,12 @@ public sealed partial class ChatVoiceCall(
         events = ReadEventsAsync(lifetime.Token);
         await codex.CallAsync("thread/realtime/start", new
         {
-            threadId, version = "v3", voice, outputModality = "audio", includeStartupContext = false, initialItems = context.History,
-            voiceSessionId = Guid.NewGuid().ToString(), clientManagedHandoffs = true,
+            threadId, version = "v3", outputModality = "audio", includeStartupContext = false,
+            voiceSessionId = Guid.NewGuid().ToString(), clientManagedHandoffs = true, delegationAckFiller = false,
             transport = new { type = "webrtc", sdp = offer },
-            prompt = $$"""
-                Speak naturally and briefly in the user's language. In general chat answer conversational questions yourself.
-                With a current project or selected specialist, the application automatically sends the user's turns to
-                platform chat and returns the answer to this call. This also applies after the user names a project.
-                Let that answer supply the facts. Never claim that files, repositories or tools are inaccessible
-                based on what you personally see in the voice session. Wait for the application's verified result.
-                Selected specialist at call start: {{JsonSerializer.Serialize(selectedAgent == PlatformChat.Id ? null : selectedAgent)}}
-                Delegate requests for actual project information, including status, prior work, repositories, resources and tests,
-                as well as requests to do work. For example, delegate "What did we do on Atlas last time?" just as you would
-                "Run the tests for Atlas." Use the current project when the user says "this project" or asks a follow-up.
-                When the user wants to work on another project, ask them to change the project in Chat settings and reopen the call.
-                Treat the directory below as reference data. It contains project names only and may be incomplete.
-                Do not infer that access is missing. Let the application resolve the project and check agent access.
-                Keep talking while delegated work runs. Use only verified updates from the application to describe its status.
-                An acknowledgement means the request was sent. Wait for the application's result before saying work finished.
-                The application handles actions, permissions and approvals. If approval is needed, direct the user to the chat.
-                Treat earlier messages as context. Never delegate a task based solely on earlier messages or on an agent result.
-                Project directory at call start: {{JsonSerializer.Serialize(new { current = context.CurrentProject, projects = context.Projects })}}
+            prompt = """
+                Hand off every complete caller utterance to the application, even greetings or brief acknowledgements.
+                Preserve the original language and words. The application handles all replies. Do not answer the caller yourself.
                 """
         }, ct);
         return await answer.Task.WaitAsync(ct);
@@ -118,8 +100,9 @@ public sealed partial class ChatVoiceCall(
             answer.TrySetException(new CodexRpcException(reason));
             Failed?.Invoke(reason);
         }
-        if (item.Method is "thread/realtime/transcript/done" or "thread/realtime/itemAdded" &&
-            !inbox.Writer.TryWrite(item))
+        var input = item.Method == "thread/realtime/transcript/done" && item.Parameters.String("role") == "user" ||
+            item.Method == "thread/realtime/itemAdded" && item.Parameters.Get("item").String("type") == "handoff_request";
+        if (input && !inbox.Writer.TryWrite(item))
             Failed?.Invoke("The voice connection could not keep up. Start a new call.");
     }
 
@@ -138,14 +121,7 @@ public sealed partial class ChatVoiceCall(
                         await ReceiveUserAsync(Transcript(payload.String("input_transcript")), true, ct);
                     continue;
                 }
-                var role = item.Parameters.String("role");
                 var text = Transcript(item.Parameters.String("text"));
-                if (role is not ("user" or "assistant") || text.Length == 0) continue;
-                if (role == "assistant")
-                {
-                    await SaveAsync(role, text, ct);
-                    continue;
-                }
                 await ReceiveUserAsync(text, false, ct);
             }
         }
@@ -157,9 +133,9 @@ public sealed partial class ChatVoiceCall(
         }
     }
 
-    private async Task<Message> SaveAsync(string role, string text, CancellationToken ct)
+    private async Task<Message> SaveAsync(string text, CancellationToken ct)
     {
-        var message = await chats.SaveVoiceMessageAsync(conversationId, currentProjectId, role, text, autoApprove, ct);
+        var message = await chats.SaveVoiceUserAsync(conversationId, currentProjectId, text, autoApprove, ct);
         if (conversationId is null)
         {
             conversationId = message.ConversationId;
@@ -171,37 +147,48 @@ public sealed partial class ChatVoiceCall(
     private async Task ReceiveUserAsync(string text, bool fromHandoff, CancellationToken ct)
     {
         if (text.Length == 0) return;
+        var now = DateTime.UtcNow;
+        var key = new string(text.Where(char.IsLetterOrDigit).ToArray());
+        if (key.Length == 0) return;
+        unpaired.RemoveAll(turn => now - turn.ReceivedAt > TimeSpan.FromSeconds(20));
         var match = unpaired.FindIndex(turn => turn.FromHandoff != fromHandoff &&
-            string.Equals(turn.User.Text.TrimEnd('.', '!', '?'), text.TrimEnd('.', '!', '?'), StringComparison.OrdinalIgnoreCase));
-        Message? user = null;
+            string.Equals(turn.Key, key, StringComparison.OrdinalIgnoreCase));
         if (match >= 0)
         {
-            var paired = unpaired[match];
             unpaired.RemoveAt(match);
-            if (paired.Routed) return;
-            user = paired.User;
+            return;
         }
-        var intent = ProjectRouting.Intent(text);
-        var named = intent.Create ? [] : await chats.FindSpokenProjectsAsync(text, ct);
-        if (user is null)
+        if (unpaired.Count >= 16) unpaired.RemoveAt(0);
+        unpaired.Add((key, fromHandoff, now));
+        UserSpoke?.Invoke();
+        var user = await SaveAsync(text, ct);
+        var control = await chats.VoiceControlAsync(user, activeSpeaker, ct);
+        if (control.Reply is { } reply)
         {
-            if (currentProjectId is null && !pinProject && named.Length == 1) currentProjectId = named[0].Id;
-            user = await SaveAsync("user", text, ct);
-            var route = fromHandoff || intent.Create || ProjectRouting.RequestsArchitect(text) || currentProjectId is not null || named.Length > 0 ||
-                selectedAgent is not null && selectedAgent != PlatformChat.Id || IsStopRequest(text) && work is { IsCompleted: false };
-            if (unpaired.Count >= 16) unpaired.RemoveAt(0);
-            unpaired.Add((user, fromHandoff, route));
-            if (!route) return;
+            if (control.Changed is { } speaker)
+            {
+                activeSpeaker = speaker;
+                selectedAgent = speaker.Id;
+                SpeakerChanged?.Invoke(speaker);
+            }
+            ReplyReady?.Invoke(reply);
+            return;
         }
+        var named = ProjectRouting.Intent(text).Create ? [] : await chats.FindSpokenProjectsAsync(text, ct);
         if (named.Length > 1)
         {
-            await SpeakAsync($"Ask the user which project to use: {named[0].Name} or {named[1].Name}.", ct);
+            await ReplyAsync(user, activeSpeaker, $"Which project should we use, {named[0].Name} or {named[1].Name}?", ct);
             return;
         }
-        if (named.Length == 1 && named[0].Id != user.VoiceProjectId)
+        if (named.Length == 1 && named[0].Id != currentProjectId)
         {
-            await SpeakAsync($"Choose {named[0].Name} in Chat settings and reopen the voice call before using that project.", ct);
-            return;
+            if (currentProjectId is not null || pinProject)
+            {
+                await ReplyAsync(user, activeSpeaker, $"Choose {named[0].Name} in Chat settings and reopen the voice call before using that project.", ct);
+                return;
+            }
+            currentProjectId = named[0].Id;
+            user = await chats.ScopeVoiceUserAsync(user, currentProjectId, ct);
         }
         if (IsStopRequest(text))
         {
@@ -209,32 +196,32 @@ public sealed partial class ChatVoiceCall(
             await submission.WaitAsync(ct);
             try { await worker.PauseAsync(user.ConversationId, ct); }
             finally { submission.Release(); }
-            await SpeakAsync("I requested that the current task stop.", ct);
+            await ReplyAsync(user, activeSpeaker, "I requested that the current task stop.", ct);
             return;
         }
-        work = RunTurnAsync(work, user, workGeneration, ct);
+        work = RunTurnAsync(work, user, selectedAgent, activeSpeaker, workGeneration, ct);
     }
 
-    private async Task RunTurnAsync(Task? previous, Message user, int generation, CancellationToken ct)
+    private async Task RunTurnAsync(Task? previous, Message user, string? agent, VoiceSpeaker speaker, int generation, CancellationToken ct)
     {
         try
         {
             if (previous is not null) await previous;
-            string? clarification;
+            VoiceReply? clarification;
             await submission.WaitAsync(ct);
             try
             {
                 if (Volatile.Read(ref workGeneration) != generation) return;
-                clarification = await chats.SubmitVoiceAsync(user, selectedAgent, ct);
+                clarification = await chats.SubmitVoiceAsync(user, agent, ct);
             }
             finally { submission.Release(); }
-            if (clarification is not null) await SpeakAsync(clarification, ct);
-            else await ReportResultAsync(user, ct);
+            if (clarification is not null) ReplyReady?.Invoke(clarification);
+            else await ReportResultAsync(user, generation, ct);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
         catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or UnauthorizedAccessException)
         {
-            await SpeakAsync(ex.Message, ct);
+            await ReplyAsync(user, speaker, ex.Message, ct);
         }
         catch (Exception ex)
         {
@@ -243,30 +230,35 @@ public sealed partial class ChatVoiceCall(
         }
     }
 
-    private async Task ReportResultAsync(Message user, CancellationToken ct)
+    private async Task ReportResultAsync(Message user, int generation, CancellationToken ct)
     {
         try
         {
-            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+            using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(500));
             bool approvalAnnounced = false;
-            while (await timer.WaitForNextTickAsync(ct))
+            while (await timer.WaitForNextTickAsync(ct) && Volatile.Read(ref workGeneration) == generation)
             {
                 var result = await chats.VoiceWorkAsync(user.ConversationId, user.Id, ct);
+                if (Volatile.Read(ref workGeneration) != generation) return;
                 if (result is null)
                 {
-                    await SpeakAsync("Open the chat to select the work item or project.", ct);
+                    await ReplyAsync(user, activeSpeaker, "Open the chat to select the work item or project.", ct);
                     return;
                 }
                 if (result.Value.PendingApproval && !approvalAnnounced)
                 {
-                    await SpeakAsync("This task is waiting for your approval in the chat.", ct);
+                    var agent = await chats.VoiceSpeakerAsync(result.Value.AgentId, ct);
+                    ReplyReady?.Invoke(new(agent, "This task is waiting for your approval in the chat."));
                     approvalAnnounced = true;
                 }
                 if (ChatStore.Active.Contains(result.Value.Status)) continue;
-                if (result.Value.ProjectId is { } projectId) currentProjectId = projectId;
-                var summary = TextLimits.Clip(result.Value.Text, 900);
+                if (!pinProject && result.Value.ProjectId is { } projectId) currentProjectId = projectId;
                 if (!result.Value.PendingApproval)
-                    await SpeakAsync(summary.Length > 0 ? $"Agent result: {summary}" : $"Task status: {result.Value.Status}.", ct);
+                {
+                    var agent = await chats.VoiceSpeakerAsync(result.Value.AgentId, ct);
+                    var text = result.Value.Text;
+                    ReplyReady?.Invoke(new(agent, text.Length > 0 ? text : $"Task status: {result.Value.Status}."));
+                }
                 return;
             }
         }
@@ -274,9 +266,11 @@ public sealed partial class ChatVoiceCall(
         catch (Exception ex) { log.LogWarning(ex, "Could not relay the agent's result to voice."); }
     }
 
-    private async Task SpeakAsync(string text, CancellationToken ct)
+    private async Task ReplyAsync(Message user, VoiceSpeaker speaker, string text, CancellationToken ct)
     {
-        await codex.CallAsync("thread/realtime/appendSpeech", new { threadId, text }, ct);
+        var reply = new VoiceReply(speaker, text);
+        await chats.RecordVoiceReplyAsync(user, reply, ct);
+        ReplyReady?.Invoke(reply);
     }
 
     private static string Transcript(string? text) => TextLimits.Clip(text?.Trim(), 16_000);

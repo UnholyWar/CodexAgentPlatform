@@ -63,10 +63,10 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
         bool autoApproveNewChat = false, long? voiceMessageId = null) =>
         (await SubmitAsync(chatId, text, selectedAgent, projectId, ct, autoApproveNewChat, voiceMessageId)).ChatId;
 
-    internal async Task<string?> SubmitVoiceAsync(Message user, string? selectedAgent, CancellationToken ct) =>
+    internal async Task<VoiceReply?> SubmitVoiceAsync(Message user, string? selectedAgent, CancellationToken ct) =>
         (await SubmitAsync(user.ConversationId, user.Text, selectedAgent, user.VoiceProjectId, ct, voiceMessageId: user.Id)).Reply;
 
-    private async Task<(string ChatId, string? Reply)> SubmitAsync(string? chatId, string text, string? selectedAgent, string? projectId, CancellationToken ct,
+    private async Task<(string ChatId, VoiceReply? Reply)> SubmitAsync(string? chatId, string text, string? selectedAgent, string? projectId, CancellationToken ct,
         bool autoApproveNewChat = false, long? voiceMessageId = null)
     {
         text = text.Trim();
@@ -82,7 +82,7 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
             throw new InvalidOperationException("A response is already being prepared in this chat.");
         var agents = await db.Agents.AsNoTracking().Where(x => !x.Archived)
             .Select(a => new Agent { Id = a.Id, Name = a.Name, Title = a.Title, AllowedProjects = a.AllowedProjects,
-                AllowedTools = a.AllowedTools, Model = a.Model, Effort = a.Effort })
+                AllowedTools = a.AllowedTools, Model = a.Model, Effort = a.Effort, Voice = a.Voice })
             .ToListAsync(ct);
         var settings = await db.Preferences.SingleAsync(ct);
         var normal = PlatformChat.CreateAgent();
@@ -92,8 +92,8 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
                 ?? throw new InvalidOperationException("The selected agent is no longer available.");
         if (ProjectRouting.RequestsArchitect(text))
             explicitAgent = agents.Find(a => a.Id == "architect") ?? throw new InvalidOperationException("Architect is not available.");
-        if (explicitAgent?.Id == "architect") chat.CoordinatorAgentId = explicitAgent.Id;
-        else if (explicitAgent?.Id == PlatformChat.Id) chat.CoordinatorAgentId = null;
+        if (explicitAgent?.Id == "architect" && voiceMessageId is null) chat.CoordinatorAgentId = explicitAgent.Id;
+        else if (explicitAgent?.Id == PlatformChat.Id && voiceMessageId is null) chat.CoordinatorAgentId = null;
         var last = chatId is null ? null : await db.Runs.AsNoTracking().Where(x => x.ConversationId == chat.Id)
             .OrderByDescending(x => x.AssistantMessageId).Select(x => new { x.AgentId, x.ProjectId, x.CreatedAtUtc }).FirstOrDefaultAsync(ct);
         var currentProject = chatId is null ? null :
@@ -117,14 +117,16 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
         }
         var previousAgent = last is not null && last.ProjectId == projectId
             ? agents.Find(a => a.Id == last.AgentId && ToolAccess.AllowsProject(a, projectId)) : null;
-        var coordinator = agents.Find(a => a.Id == chat.CoordinatorAgentId && ToolAccess.AllowsProject(a, projectId));
+        var coordinator = chat.CoordinatorAgentId == PlatformChat.Id ? normal :
+            agents.Find(a => a.Id == chat.CoordinatorAgentId && ToolAccess.AllowsProject(a, projectId));
         var agent = explicitAgent ?? coordinator ?? previousAgent;
         (string Kind, string Permission)? requiredGrant = null;
         var handoff = false;
         if (automatic && intent.Create && (explicitAgent?.Id == "architect" ? explicitAgent : ProjectRouting.Creator(agents)) is { } creator)
         {
             agent = creator;
-            if (creator.Id == "architect") chat.CoordinatorAgentId = creator.Id;
+            if (creator.Id == "architect" && (voiceMessageId is null || chat.CoordinatorAgentId is null))
+                chat.CoordinatorAgentId = creator.Id;
             handoff = true;
             if (!ToolAccess.Has(creator, ToolAccess.CreateProjects))
                 requiredGrant = ("tool", ToolAccess.CreateProjects);
@@ -215,7 +217,7 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
         return await chats.OrderByDescending(x => x.UpdatedAtUtc).Take(70).ToListAsync(ct);
     }
 
-    internal async Task<Message> SaveVoiceMessageAsync(string? conversationId, string? projectId, string role, string text,
+    internal async Task<Message> SaveVoiceUserAsync(string? conversationId, string? projectId, string text,
         bool autoApprove, CancellationToken ct)
     {
         await using var db = await dbs.CreateDbContextAsync(ct);
@@ -223,13 +225,12 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
         if (projectId is not null && !await db.Projects.AnyAsync(p => p.Id == projectId, ct))
             throw new InvalidOperationException("The project selected for this call no longer exists.");
         var chat = conversationId is null
-            ? new Conversation { Title = role == "user" ? TextLimits.Clip(text.Replace('\n', ' '), 65) : "Voice conversation",
+            ? new Conversation { Title = TextLimits.Clip(text.Replace('\n', ' '), 65),
                 AutoApprove = autoApprove }
             : await db.Conversations.SingleAsync(c => c.Id == conversationId, ct);
         if (conversationId is null) db.Conversations.Add(chat);
         chat.UpdatedAtUtc = DateTime.UtcNow;
-        var message = new Message { ConversationId = chat.Id, Role = role, Text = text,
-            VoiceProjectId = projectId ?? "", AgentId = role == "assistant" ? PlatformChat.Id : null };
+        var message = new Message { ConversationId = chat.Id, Role = "user", Text = text, VoiceProjectId = projectId ?? "" };
         db.Messages.Add(message);
         await db.SaveChangesAsync(ct);
         await transaction.CommitAsync(ct);
@@ -242,6 +243,16 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
         if (IsAccessRequest(text)) return [];
         await using var db = await dbs.CreateDbContextAsync(ct);
         return await FindNamedProjectsAsync(db, text, spoken: true, ct);
+    }
+
+    internal async Task<Message> ScopeVoiceUserAsync(Message user, string projectId, CancellationToken ct)
+    {
+        await using var db = await dbs.CreateDbContextAsync(ct);
+        await db.Messages.Where(m => m.Id == user.Id)
+            .ExecuteUpdateAsync(s => s.SetProperty(m => m.VoiceProjectId, projectId), ct);
+        user.VoiceProjectId = projectId;
+        updates.Publish(user.ConversationId);
+        return user;
     }
 
     private static async Task<ProjectReference[]> FindNamedProjectsAsync(PlatformDb db, string text, bool spoken, CancellationToken ct)
@@ -258,44 +269,109 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
         }).Take(2).ToArray();
     }
 
-    internal async Task<(object[] History, string[] Projects, string? CurrentProject)> VoiceContextAsync(
-        string? conversationId, string? projectId, CancellationToken ct)
+    internal async Task<VoiceSpeaker> VoiceSpeakerAsync(string? agentId, CancellationToken ct)
     {
+        if (agentId is null or PlatformChat.Id) return VoiceSpeaker.Normal;
         await using var db = await dbs.CreateDbContextAsync(ct);
-        var projects = await db.Projects.AsNoTracking().OrderBy(p => p.Name).Select(p => p.Name).Take(32).ToArrayAsync(ct);
-        var current = projectId is null ? null : await db.Projects.AsNoTracking().Where(p => p.Id == projectId)
-            .Select(p => p.Name).SingleOrDefaultAsync(ct);
-        if (conversationId is null) return ([], projects, current);
-        var messages = await db.Messages.AsNoTracking().Where(m => m.ConversationId == conversationId && m.Text != "" &&
-            (m.Role == "user" || m.Role == "assistant") &&
-            (m.VoiceProjectId == (projectId ?? "") || db.Runs.Any(r => r.ConversationId == conversationId && r.ProjectId == projectId &&
-                (r.UserMessageId == m.Id || r.AssistantMessageId == m.Id))))
-            .OrderByDescending(m => m.Id).Take(12).Select(m => new { role = m.Role, text = m.Text.Substring(0, 600) }).ToListAsync(ct);
-        messages.Reverse();
-        return (messages.ToArray(), projects, current);
+        return await db.Agents.AsNoTracking().Where(a => a.Id == agentId)
+            .Select(a => new VoiceSpeaker(a.Id, a.Name, a.Voice)).SingleOrDefaultAsync(ct) ?? VoiceSpeaker.Normal;
     }
 
-    internal async Task<string?> AgentVoiceAsync(string? agentId, string? projectId, CancellationToken ct)
+    internal async Task<(VoiceSpeaker? Changed, VoiceReply? Reply)> VoiceControlAsync(
+        Message user, VoiceSpeaker current, CancellationToken ct)
     {
-        if (agentId is null || agentId == PlatformChat.Id) return null;
+        var command = ProjectRouting.VoiceControl(user.Text);
+        if (!command.Identity && !command.TaskStatus && command.Target is null) return default;
         await using var db = await dbs.CreateDbContextAsync(ct);
-        var agent = await db.Agents.AsNoTracking().SingleOrDefaultAsync(a => a.Id == agentId && !a.Archived, ct);
-        return agent is not null && ToolAccess.AllowsProject(agent, projectId) ? agent.Voice : null;
+        VoiceSpeaker? changed = null;
+        string answer;
+        if (command.Target is { } target)
+        {
+            var agents = await db.Agents.AsNoTracking()
+                .Select(a => new Agent { Id = a.Id, Name = a.Name, Title = a.Title, Voice = a.Voice, Archived = a.Archived })
+                .ToListAsync(ct);
+            agents.Add(PlatformChat.CreateAgent());
+            var agent = ProjectRouting.VoiceTarget(agents, target);
+            if (agent is null) return default;
+            if (agent.Archived)
+                answer = command.Turkish ? $"{agent.Name} şu anda görüşmeye açık değil." : $"{agent.Name} is currently unavailable.";
+            else
+            {
+                changed = new(agent.Id, agent.Name, agent.Voice);
+                answer = command.Turkish ? $"Merhaba, ben {agent.Name}. Nasıl yardımcı olabilirim?"
+                    : $"Hi, I'm {agent.Name}. How can I help?";
+            }
+        }
+        else if (command.TaskStatus)
+            answer = await VoiceTaskStatusAsync(db, user, command.Turkish, ct);
+        else
+            answer = command.Turkish ? $"Şu anda {current.Name} ile görüşüyorsun." : $"You're speaking with {current.Name}.";
+
+        var chat = await db.Conversations.SingleAsync(c => c.Id == user.ConversationId, ct);
+        if (changed is not null) chat.CoordinatorAgentId = changed.Id;
+        var reply = new VoiceReply(changed ?? current, answer);
+        AddVoiceReply(db, user, reply);
+        await db.SaveChangesAsync(ct);
+        updates.Publish(user.ConversationId);
+        return (changed, reply);
     }
 
-    internal async Task<(WorkStatus Status, string Text, bool PendingApproval, string? ProjectId)?> VoiceWorkAsync(
+    private static async Task<string> VoiceTaskStatusAsync(PlatformDb db, Message user, bool turkish, CancellationToken ct)
+    {
+        var task = await db.Runs.AsNoTracking().Where(r => r.ConversationId == user.ConversationId &&
+                (r.WorkId != null || r.OriginMessageId != null || Enumerable.Contains(Active, r.Status)))
+            .OrderByDescending(r => r.AssistantMessageId)
+            .Select(r => new { r.AgentId, r.Status,
+                PendingApproval = db.Approvals.Any(a => a.ConversationId == r.ConversationId && a.AgentId == r.AgentId &&
+                    a.Status == "Pending" && a.ExpiresAtUtc > DateTime.UtcNow && a.CreatedAtUtc >= r.CreatedAtUtc),
+                Name = db.Agents.Where(a => a.Id == r.AgentId).Select(a => a.Name).FirstOrDefault() })
+            .FirstOrDefaultAsync(ct);
+        if (task is null) return turkish ? "Bu görüşmede takip edilen bir görev yok." : "There is no tracked task in this conversation.";
+        var name = task.Name ?? task.AgentId;
+        return (task.PendingApproval ? WorkStatus.WaitingForApproval : task.Status, turkish) switch
+        {
+            (WorkStatus.Pending, true) => $"{name} görevi devraldı. Görev sırada.",
+            (WorkStatus.Running, true) => $"{name} görev üzerinde çalışıyor.",
+            (WorkStatus.WaitingForApproval, true) => $"{name} devam edebilmek için sohbet ekranında onayını bekliyor.",
+            (WorkStatus.WaitingForUser, true) => $"{name} devam etmek için yanıtını bekliyor.",
+            (WorkStatus.Completed, true) => $"{name} görevle ilgili yanıtını sohbet ekranına yazdı.",
+            (_, true) => $"{name} şu anda bu görev üzerinde çalışmıyor. Ayrıntılar sohbet ekranında.",
+            (WorkStatus.Pending, false) => $"{name} has the task. It is queued.",
+            (WorkStatus.Running, false) => $"{name} is working on the task.",
+            (WorkStatus.WaitingForApproval, false) => $"{name} is waiting for your approval in chat.",
+            (WorkStatus.WaitingForUser, false) => $"{name} is waiting for your reply.",
+            (WorkStatus.Completed, false) => $"{name} posted the result in chat.",
+            _ => $"{name} is no longer working on the task. See the chat for details."
+        };
+    }
+
+    internal async Task RecordVoiceReplyAsync(Message user, VoiceReply reply, CancellationToken ct)
+    {
+        await using var db = await dbs.CreateDbContextAsync(ct);
+        AddVoiceReply(db, user, reply);
+        await db.SaveChangesAsync(ct);
+        updates.Publish(user.ConversationId);
+    }
+
+    private static void AddVoiceReply(PlatformDb db, Message user, VoiceReply reply) =>
+        db.Messages.Add(new Message { ConversationId = user.ConversationId, Role = "assistant", AgentId = reply.Speaker.Id,
+            Text = reply.Text, VoiceProjectId = reply.Speaker.Id == PlatformChat.Id ? null : user.VoiceProjectId });
+
+    internal async Task<(WorkStatus Status, string Text, bool PendingApproval, string? ProjectId, string AgentId)?> VoiceWorkAsync(
         string conversationId, long messageId, CancellationToken ct)
     {
         await using var db = await dbs.CreateDbContextAsync(ct);
-        var result = await db.Runs.AsNoTracking().Where(r => r.ConversationId == conversationId && r.UserMessageId == messageId)
+        var result = await db.Runs.AsNoTracking().Where(r => r.ConversationId == conversationId &&
+                (r.UserMessageId == messageId || r.OriginMessageId == messageId))
             .OrderByDescending(r => r.AssistantMessageId)
-            .Select(r => new { r.Status, r.Error, r.ProjectId, r.CreatedAtUtc, Text = db.Messages.Where(m => m.Id == r.AssistantMessageId).Select(m => m.Text).FirstOrDefault(),
+            .Select(r => new { r.Status, r.Error, r.ProjectId, r.CreatedAtUtc, r.AgentId, Text = db.Messages.Where(m => m.Id == r.AssistantMessageId).Select(m => m.Text).FirstOrDefault(),
                 PendingApproval = db.Approvals.Any(a => a.ConversationId == conversationId && a.AgentId == r.AgentId &&
                     a.Status == "Pending" && a.ExpiresAtUtc > DateTime.UtcNow && a.CreatedAtUtc >= r.CreatedAtUtc) })
             .FirstOrDefaultAsync(ct);
         if (result is null) return null;
         var projectId = await ProjectRouting.CreatedProjectAsync(db, conversationId, result.CreatedAtUtc, ct) ?? result.ProjectId;
-        return (result.Status, result.Status == WorkStatus.Completed ? result.Text ?? "" : result.Error ?? "", result.PendingApproval, projectId);
+        return (result.Status, result.Status == WorkStatus.Completed ? result.Text ?? "" : result.Error ?? "",
+            result.PendingApproval, projectId, result.AgentId);
     }
 
     public async Task<ChatSnapshot> ReadAsync(string id, int messageLimit, CancellationToken ct)
@@ -377,7 +453,7 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
         input.Trim().TrimEnd('.', '!').ToLowerInvariant() is
             "devam" or "devam et" or "kaldığımız yerden devam et" or "continue" or "resume";
 
-    private async Task<(string ChatId, string? Reply)> SaveExchangeAsync(PlatformDb db, Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction tx,
+    private async Task<(string ChatId, VoiceReply? Reply)> SaveExchangeAsync(PlatformDb db, Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction tx,
         Conversation chat, string? chatId, Agent agent, string input, string answer, long? voiceMessageId, CancellationToken ct)
     {
         if (chatId is null) db.Conversations.Add(chat);
@@ -387,6 +463,6 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
         updates.Publish(chat.Id);
-        return (chat.Id, answer);
+        return (chat.Id, new(new(agent.Id, agent.Name, agent.Voice), answer));
     }
 }

@@ -3,6 +3,7 @@
 @inject IDbContextFactory<PlatformDb> Dbs
 @inject CodexAccounts Accounts
 @inject PlatformPaths Paths
+@inject IJSRuntime JS
 
 <PageTitle>Agents · Codex Agent Platform</PageTitle>
 <section class="admin-page">
@@ -35,14 +36,14 @@
                 @if (modelError is not null) { <p class="notice error" role="alert">@modelError</p> }
                 <label>Voice
                     <select @bind="edit.Voice" disabled="@loadingVoices">
-                        <option value="">Default voice</option>
-                        @if (edit.Voice is { Length: > 0 } savedVoice && !voices.Contains(savedVoice))
+                        <option value="">Automatic device voice</option>
+                        @if (edit.Voice is { Length: > 0 } savedVoice && !voices.Any(voice => voice.Id == savedVoice))
                         {
-                            <option value="@savedVoice">@VoiceLabel(savedVoice)</option>
+                            <option value="@savedVoice">@savedVoice (unavailable on this device)</option>
                         }
                         @foreach (var voice in voices)
                         {
-                            <option value="@voice">@VoiceLabel(voice)</option>
+                            <option value="@voice.Id">@voice.Name (@voice.Language)</option>
                         }
                     </select>
                 </label>
@@ -86,7 +87,8 @@
     private List<Project> projects = [];
     private Dictionary<string, long> stats = [];
     private List<CodexModel> models = [];
-    private string[] voices = [];
+    private sealed record DeviceVoice(string Id, string Name, string Language);
+    private DeviceVoice[] voices = [];
     private Agent? edit;
     private bool isNew, busy, loadingVoices, focusOnRender, focusAddOnRender;
     private string? error, modelError, voiceError, notice;
@@ -168,17 +170,17 @@
         voiceError = null;
         try
         {
-            voices = await Accounts.VoicesAsync(default);
-            if (voices.Length == 0) voiceError = "Codex returned no voice options.";
+            await using var device = await JS.InvokeAsync<IJSObjectReference>("import", "./" + Assets["device-voices.js"]);
+            voices = await device.InvokeAsync<DeviceVoice[]>("deviceVoices");
+            if (voices.Length == 0) voiceError = "Install a text-to-speech voice on this device to hear calls.";
         }
-        catch (Exception ex) when (ex is CodexRpcException or IOException or InvalidOperationException or TimeoutException or OperationCanceledException)
+        catch (JSException)
         {
-            voiceError = "Could not load voice options from Codex.";
+            voiceError = "Could not load the device voice options.";
         }
         finally { loadingVoices = false; }
     }
 
-    private static string VoiceLabel(string voice) => char.ToUpperInvariant(voice[0]) + voice[1..];
     private async Task LoadModelsAsync()
     {
         if (busy) return;
@@ -210,8 +212,8 @@
             row.Model = draft.Model;
             row.Effort = draft.Effort;
             var voice = string.IsNullOrEmpty(draft.Voice) ? null : draft.Voice;
-            if (voice is not null && voice != row.Voice && !voices.Contains(voice))
-                throw new ArgumentException("Select a voice from the Codex voice list.");
+            if (voice is not null && voice != row.Voice && !voices.Any(option => option.Id == voice))
+                throw new ArgumentException("Select a voice from the device voice list.");
             row.Voice = voice;
             row.Archived = draft.Archived;
             var addedProjects = allowedProjects.Except(ToolAccess.Split(draft.AllowedProjects)).ToArray();

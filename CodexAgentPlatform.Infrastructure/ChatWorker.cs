@@ -585,7 +585,8 @@ public sealed class ChatWorker(IDbContextFactory<PlatformDb> dbs, ICodexConnecti
         var next = new ChatRun { AgentId = target.Id, ConversationId = source.ConversationId, ProjectId = projectId,
             Workspace = workspace ?? Guid.NewGuid().ToString("N"), DelegationDepth = depth,
             Status = needsAccess ? WorkStatus.WaitingForApproval : WorkStatus.Pending,
-            UserMessageId = messageId, AssistantMessageId = response.Id,
+            UserMessageId = messageId, OriginMessageId = source.OriginMessageId ?? source.UserMessageId,
+            AssistantMessageId = response.Id,
             Model = target.Model ?? settings.Model, Effort = target.Effort ?? (target.Model is null ? settings.Effort : null) };
         db.Runs.Add(next);
         db.Events.Add(new Activity { ConversationId = source.ConversationId, AgentId = target.Id, ProjectId = projectId,

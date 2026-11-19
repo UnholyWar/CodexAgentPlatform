@@ -59,7 +59,7 @@
                         <div class="avatar" aria-hidden="true"><Icon Name="@(message.Role == "user" ? "person" : "agent")" /></div>
                         <div class="message-main">
                             <div class="message-meta">
-                                <strong>@(message.Role == "user" ? "You" : message.VoiceProjectId is not null ? "Voice assistant" : AgentName(message.AgentId))</strong>
+                                <strong>@MessageAuthor(message)</strong>
                                 <time datetime="@message.CreatedAtUtc.ToString("O")">@LocalTime(message.CreatedAtUtc)</time>
                             </div>
                             @if (message.Text.Length == 0)
@@ -120,6 +120,7 @@
             </div>
             <ChatVoice ConversationId="@Id" ProjectId="@EffectiveProject" PinProject="@(projectId == "")" SelectedAgent="@(mentionedAgent?.Id ?? selectedAgent ?? snapshot.CoordinatorAgentId)"
                        VoiceAgentId="@(mentionedAgent?.Id ?? ReplyAgentId)" VoiceAgentName="@AgentName(mentionedAgent?.Id ?? ReplyAgentId)"
+                       SpeakerChanged="RefreshVoiceSpeakerAsync"
                        AutoApprove="@AutoApprove" ConversationOpened="OpenVoiceConversation" />
             @if (IsActive && !ChatStore.IsPauseRequest(draft))
             {
@@ -348,6 +349,13 @@
         if (Id is null) Navigation.NavigateTo($"/chat/{id}", replace: true);
     }
 
+    private async Task RefreshVoiceSpeakerAsync()
+    {
+        selectedAgent = null;
+        mentionedAgent = null;
+        await RefreshAsync();
+    }
+
     private async Task LoadOlderAsync()
     {
         limit = Math.Min(limit + 60, 500);
@@ -391,6 +399,8 @@
     }
 
     private string AgentName(string? id) => id == PlatformChat.Id ? PlatformChat.Name : agents.Find(a => a.Id == id)?.Name ?? "Codex";
+    private string MessageAuthor(Message message) => message.Role == "user" ? "You" :
+        message.VoiceProjectId is not null && message.AgentId == PlatformChat.Id ? "Voice assistant" : AgentName(message.AgentId);
     private static string RunStatus(WorkStatus status) => status switch
     {
         WorkStatus.WaitingForApproval => "Waiting for your approval",

@@ -352,8 +352,10 @@ button.list-row:hover, a.list-row:hover { background: var(--subtle); border-radi
 }
 .voice-dialog .voice-end:hover:enabled { background: #8f3a5a; border-color: #e392ae; }
 .voice-center { display: grid; justify-items: center; gap: .45rem; padding: .15rem .9rem .35rem; text-align: center; }
+.voice-status, .voice-speaking-agent { grid-column: 1; grid-row: 2; }
 .voice-status { color: #c7bed4; font-size: .83rem; }
-.voice-status-hidden { clip-path: inset(50%); }
+.voice-speaking-agent { color: #e7d4fd; font-size: .85rem; }
+.voice-status-hidden, .voice-dialog[data-speaking=true] .voice-status { clip-path: inset(50%); }
 .voice-error { color: #ffb7c7; max-width: 36ch; font-size: .88rem; }
 .voice-stage {
     position: relative; isolation: isolate; display: grid; place-items: center;

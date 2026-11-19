@@ -31,7 +31,7 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
         new("task_get_current", "", "Read structured context about the current work.", [], []),
         new("task_progress", "", "Record one verified step and the next step. Set event to CodeModified, TestExecuted or ResearchCompleted when appropriate.", ["step"], ["next", "event", "branch", "commit"]),
         new("task_finish", "", "Set work status to completed, paused, waiting, failed, or cancelled.", ["status", "step"], ["next"]),
-        new("task_delegate", "delegate", "Ask another agent for one follow-up after this turn. List agents using agent_list.", ["agentId", "brief"], []),
+        new("task_delegate", "delegate", "Assign one task to another agent after this turn. List eligible agents using agent_list.", ["agentId", "brief"], []),
         new("agent_list", "delegate", "List agents eligible for a follow-up on this project.", [], []),
         new("resource_search", "resources", "Find approved project resources by name.", [], ["query"]),
         new("project_create", ToolAccess.CreateProjects, "Create a platform project and give the creating agent access to it. The default branch is main unless specified.", ["name"], ["defaultBranch"]),
@@ -181,7 +181,9 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
                 var target = await db.Agents.AsNoTracking().SingleOrDefaultAsync(x => x.Id == args.String("agentId"), ct);
                 if (target is null || target.Id == agent.Id || !ToolAccess.AllowsProject(target, run.ProjectId))
                     throw new UnauthorizedAccessException("The target agent is not available.");
-                return new Delegation(target.Id, TextLimits.Clip(args.String("brief"), 2000));
+                var brief = TextLimits.Clip(args.String("brief")?.Trim(), 2000);
+                if (brief.Length == 0) throw new ArgumentException("Provide a task brief for the receiving agent.");
+                return new Delegation(target.Id, brief);
             default:
                 return await WorkAsync(db, name, args, run, ct);
         }

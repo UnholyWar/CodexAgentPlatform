@@ -531,7 +531,7 @@ public sealed class ChatTests(ITestOutputHelper output)
         await using var storage = await TestStorage.CreateAsync();
         await using (var db = storage.CreateDbContext())
         {
-            (await db.Agents.SingleAsync(a => a.Id == "qa")).Voice = "maple";
+            (await db.Agents.SingleAsync(a => a.Id == "qa")).Voice = "Test device voice";
             await db.SaveChangesAsync();
         }
         var codex = new FakeCodex();
@@ -545,9 +545,10 @@ public sealed class ChatTests(ITestOutputHelper output)
                 conversationId: null, projectId: null, selectedAgent: "qa", autoApprove: false))
             {
                 var opened = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+                var replies = new System.Collections.Concurrent.ConcurrentQueue<VoiceReply>();
                 voice.ConversationOpened += id => opened.SetResult(id);
+                voice.ReplyReady += replies.Enqueue;
                 Assert.Equal("v=0 fake answer", await voice.StartAsync("v=0 fake offer"));
-                Assert.Equal("maple", codex.VoiceUsed);
                 const string text = "Please run the regression tests.";
                 var request = new { type = "handoff_request", item_id = "handoff-1", input_transcript = text };
                 codex.Emit("thread/realtime/itemAdded", new { threadId = "t1", item = request });
@@ -555,7 +556,10 @@ public sealed class ChatTests(ITestOutputHelper output)
                 codex.Emit("thread/realtime/itemAdded", new { threadId = "t1", item = request });
 
                 var id = await opened.Task.WaitAsync(TimeSpan.FromSeconds(5));
-                await WaitAsync(() => Task.FromResult(codex.SpokenResults.Contains("Agent result: Test yanıtı")));
+                await WaitAsync(() => Task.FromResult(!replies.IsEmpty));
+                var reply = Assert.Single(replies);
+                Assert.Equal("Test yanıtı", reply.Text);
+                Assert.Equal("Test device voice", reply.Speaker.Voice);
                 var snapshot = await chats.ReadAsync(id, 10, default);
                 var user = Assert.Single(snapshot.Messages, m => m.Role == "user");
                 Assert.Equal(text, user.Text);
@@ -591,21 +595,23 @@ public sealed class ChatTests(ITestOutputHelper output)
             await using var voice = new ChatVoiceCall(codex, chats, worker, NullLogger<ChatVoiceCall>.Instance,
                 conversationId: null, projectId: null, selectedAgent: null, autoApprove: false);
             var opened = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var replies = new System.Collections.Concurrent.ConcurrentQueue<VoiceReply>();
             voice.ConversationOpened += id => opened.SetResult(id);
+            voice.ReplyReady += replies.Enqueue;
             await voice.StartAsync("v=0 fake offer");
-            Assert.Contains(project.Name, codex.VoicePrompt);
+            Assert.DoesNotContain(project.Name, codex.VoicePrompt);
 
             codex.Emit("thread/realtime/transcript/done", new { threadId = "t1", role = "user",
                 text = "Atlas Portal projesi hakkında konuşalım." });
             var conversation = await opened.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            await WaitAsync(() => Task.FromResult(codex.SpokenResults.Count == 1));
+            await WaitAsync(() => Task.FromResult(replies.Count == 1));
             codex.NextToolCalls.Enqueue(("handoff_to_agent", new { agentId = "developer" }));
             codex.NextToolCalls.Enqueue(("handoff_to_agent", new { agentId = "qa" }));
             const string followUp = "Bu projede hangi testleri çalıştırdık?";
             codex.Emit("thread/realtime/itemAdded", new { threadId = "t1",
                 item = new { type = "handoff_request", item_id = "follow-up", input_transcript = followUp } });
 
-            await WaitAsync(() => Task.FromResult(codex.SpokenResults.Count == 2));
+            await WaitAsync(() => Task.FromResult(replies.Count == 2));
             var snapshot = await chats.ReadAsync(conversation, 10, default);
             Assert.Equal("qa", snapshot.Run?.AgentId);
             Assert.Equal(project.Id, snapshot.Run?.ProjectId);
@@ -638,13 +644,15 @@ public sealed class ChatTests(ITestOutputHelper output)
             await using var voice = new ChatVoiceCall(codex, chats, worker, NullLogger<ChatVoiceCall>.Instance,
                 conversationId: null, projectId: project.Id, selectedAgent: null, autoApprove: false);
             var opened = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var replies = new System.Collections.Concurrent.ConcurrentQueue<VoiceReply>();
             voice.ConversationOpened += id => opened.SetResult(id);
+            voice.ReplyReady += replies.Enqueue;
             await voice.StartAsync("v=0 fake offer");
             codex.NextToolCalls.Enqueue(("resource_get", new { id = repo.Id }));
             const string question = "Seçili projenin içinde hangi repo var?";
             codex.Emit("thread/realtime/transcript/done", new { threadId = "t1", role = "user", text = question });
             var conversation = await opened.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            await WaitAsync(() => Task.FromResult(codex.SpokenResults.Count == 1));
+            await WaitAsync(() => Task.FromResult(replies.Count == 1));
             var prompt = Assert.Single(codex.TurnRequests).Get("input")[0].String("text");
             Assert.Contains(repo.Name, prompt);
             Assert.DoesNotContain("Unrelated resource", prompt);
@@ -658,11 +666,90 @@ public sealed class ChatTests(ITestOutputHelper output)
             (await db.Agents.SingleAsync(a => a.Id == "qa")).AllowedProjects = project.Id;
             await db.SaveChangesAsync();
             codex.Emit("thread/realtime/transcript/done", new { threadId = "t1", role = "user", text = "Peki varsayılan dalı nedir?" });
-            await WaitAsync(() => Task.FromResult(codex.SpokenResults.Count == 2));
+            await WaitAsync(() => Task.FromResult(replies.Count == 2));
             var runs = await db.Runs.AsNoTracking().Where(r => r.ConversationId == conversation).ToListAsync();
             Assert.Equal(2, runs.Count);
             Assert.All(runs, r => { Assert.Equal("developer", r.AgentId); Assert.Equal(project.Id, r.ProjectId); });
             Assert.Equal(2, await db.Messages.CountAsync(m => m.ConversationId == conversation && m.Role == "user"));
+        }
+        finally { await worker.StopAsync(default); }
+    }
+
+    [Fact]
+    public async Task VoiceSwitchKeepsOneConversationPartnerWhileADelegatedTaskReturnsItsOwnResult()
+    {
+        await using var storage = await TestStorage.CreateAsync();
+        var codex = new FakeCodex();
+        var updates = new ChatUpdates();
+        var chats = new ChatStore(storage, updates);
+        using var worker = Worker(storage, codex, updates);
+        await worker.StartAsync(default);
+        try
+        {
+            await using var voice = new ChatVoiceCall(codex, chats, worker, NullLogger<ChatVoiceCall>.Instance,
+                conversationId: null, projectId: null, selectedAgent: null, autoApprove: false);
+            var opened = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var replies = new System.Collections.Concurrent.ConcurrentQueue<VoiceReply>();
+            var switches = new System.Collections.Concurrent.ConcurrentQueue<string>();
+            voice.ConversationOpened += id => opened.SetResult(id);
+            voice.ReplyReady += replies.Enqueue;
+            voice.SpeakerChanged += speaker => switches.Enqueue(speaker.Id);
+            var voiceFailure = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            voice.Failed += reason => voiceFailure.TrySetResult(reason);
+            await voice.StartAsync("v=0 fake offer");
+
+            const string architect = "Mimarla görüşmek istiyorum";
+            User(architect);
+            codex.Emit("thread/realtime/itemAdded", new { threadId = "t1",
+                item = new { type = "handoff_request", item_id = "first", input_transcript = architect + "." } });
+            codex.Emit("thread/realtime/transcript/done", new { threadId = "t1", role = "assistant",
+                text = "Tabii, mimarla görüşmek için randevu mu istiyorsun?" });
+            var id = await opened.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await WaitAsync(() => Task.FromResult(replies.Count == 1));
+            Assert.Equal("architect", replies.Last().Speaker.Id);
+
+            codex.NextToolCalls.Enqueue(("task_delegate", new { agentId = "developer", brief = "Review the solution." }));
+            User("Developer'a kodu inceleme görevini ver.");
+            await WaitAsync(() => Task.FromResult(replies.Count == 2));
+            Assert.Equal("developer", replies.Last().Speaker.Id);
+            Assert.Equal("Test yanıtı", replies.Last().Text);
+            Assert.Equal("architect", (await chats.ReadAsync(id, 30, default)).CoordinatorAgentId);
+
+            User("Yok hangi ajanla görüşüyorum ben? Hangi ajanla görüşüyorum?");
+            await WaitAsync(() => Task.FromResult(replies.Count == 3));
+            Assert.Equal("architect", replies.Last().Speaker.Id);
+            User("Görevi kim devraldı?");
+            await WaitAsync(() => Task.FromResult(replies.Count == 4 || voiceFailure.Task.IsCompleted));
+            if (voiceFailure.Task.IsCompleted) Assert.Fail(await voiceFailure.Task);
+            Assert.Equal("architect", replies.Last().Speaker.Id);
+            Assert.Contains("Developer", replies.Last().Text);
+
+            User("Bunu Developer ajanına geçiş yapabilir miyiz şimdi?");
+            await WaitAsync(() => Task.FromResult(replies.Count == 5));
+            Assert.Equal("developer", replies.Last().Speaker.Id);
+
+            User("Merhaba");
+            await WaitAsync(() => Task.FromResult(replies.Count == 6));
+            var snapshot = await chats.ReadAsync(id, 30, default);
+            Assert.Equal(new[] { "architect", "developer" }, switches.ToArray());
+            Assert.Equal("developer", replies.Last().Speaker.Id);
+            Assert.Equal("developer", snapshot.CoordinatorAgentId);
+            Assert.Equal("developer", snapshot.Run?.AgentId);
+            Assert.Equal(6, snapshot.Messages.Count(m => m.Role == "user"));
+            Assert.DoesNotContain(snapshot.Messages, m => m.Text.Contains("randevu"));
+            Assert.DoesNotContain("thread/realtime/appendSpeech", codex.Methods);
+
+            await using var db = storage.CreateDbContext();
+            var delegated = await db.Runs.SingleAsync(r => r.DelegationDepth == 1);
+            Assert.Equal(snapshot.Messages.Single(m => m.Role == "user" && m.Text.Contains("görevini")).Id, delegated.OriginMessageId);
+            Assert.NotEqual(delegated.OriginMessageId, delegated.UserMessageId);
+
+            User("Please switch to normal chat.");
+            await WaitAsync(() => Task.FromResult(replies.Count == 7));
+            Assert.Equal(PlatformChat.Id, replies.Last().Speaker.Id);
+            Assert.Equal(PlatformChat.Id, (await chats.ReadAsync(id, 30, default)).CoordinatorAgentId);
+
+            void User(string text) => codex.Emit("thread/realtime/transcript/done", new { threadId = "t1", role = "user", text });
         }
         finally { await worker.StopAsync(default); }
     }
@@ -701,10 +788,8 @@ public sealed class ChatTests(ITestOutputHelper output)
         public List<JsonElement> TurnRequests { get; } = [];
         public Queue<(string Name, object Arguments)> NextToolCalls { get; } = [];
         public List<JsonElement> ToolReplies { get; } = [];
-        public System.Collections.Concurrent.ConcurrentQueue<string> SpokenResults { get; } = new();
         public string? TurnModel { get; private set; }
         public string? VoicePrompt { get; private set; }
-        public string? VoiceUsed { get; private set; }
         private int count;
         public event Action<CodexEvent>? Received;
         public void Emit(string method, object parameters) => Received?.Invoke(new CodexEvent(method, Args(parameters)));
@@ -728,11 +813,8 @@ public sealed class ChatTests(ITestOutputHelper output)
             {
                 var request = Args(parameters!);
                 VoicePrompt = request.String("prompt");
-                VoiceUsed = request.String("voice");
                 Emit("thread/realtime/sdp", new { threadId = request.String("threadId"), sdp = "v=0 fake answer" });
             }
-            if (method == "thread/realtime/appendSpeech")
-                SpokenResults.Enqueue(Args(parameters!).String("text")!);
             if (method == "windowsSandbox/readiness" && (WorkspaceReady || DenyWorkspaceNamespace))
                 return Task.FromResult(Args(new { status = "ready" }));
             if (method is "thread/start" or "thread/resume")

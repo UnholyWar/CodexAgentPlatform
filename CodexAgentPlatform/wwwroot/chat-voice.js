@@ -1,10 +1,13 @@
 import { animateOrb } from "./voice-orb.js";
+import { deviceVoices, voiceForReply } from "./device-voices.js";
 
 const calls = new WeakMap();
 
-export async function start(dialog, speaker, server) {
+export async function start(dialog, server) {
     stop(dialog);
-    const call = { speaker, listeners: new AbortController() };
+    const call = { listeners: new AbortController(), replies: [], voices: deviceVoices(),
+        play: dialog.querySelector(".voice-play"), playbackError: dialog.querySelector(".voice-playback-error"),
+        speakingAgent: dialog.querySelector(".voice-speaking-agent") };
     calls.set(dialog, call);
     const current = () => calls.get(dialog) === call;
     const { signal } = call.listeners;
@@ -42,20 +45,13 @@ export async function start(dialog, speaker, server) {
         const peer = new RTCPeerConnection();
         call.peer = peer;
         const channel = peer.createDataChannel("oai-events");
-        const play = dialog.querySelector(".voice-play");
         channel.addEventListener("close", () => { if (current()) void fail("The voice session closed."); }, { signal });
-        play.addEventListener("click", () => {
-            speaker.play().then(() => { play.hidden = true; }).catch(() => {});
-        }, { signal });
+        call.play.addEventListener("click", () => playNext(dialog, call), { signal });
         for (const track of stream.getAudioTracks()) {
             peer.addTrack(track, stream);
             track.addEventListener("ended", () => void fail("The microphone disconnected."), { signal });
         }
-        peer.addEventListener("track", event => {
-            speaker.srcObject = event.streams[0] ?? new MediaStream([event.track]);
-            speaker.play().catch(() => { if (current()) play.hidden = false; });
-            monitorSpeaking(dialog, call, event.receiver);
-        }, { signal });
+        // The peer supplies microphone transcription. Its independent audio output is never attached to a player.
         peer.addEventListener("connectionstatechange", () => {
             if (!current()) return;
             clearTimeout(call.disconnectTimer);
@@ -113,45 +109,86 @@ function gatherIce(peer, signal) {
     });
 }
 
-function monitorSpeaking(dialog, call, receiver) {
-    let previousAudio, previousTime;
-    let expansion = 0;
-    async function sample() {
-        if (calls.get(dialog) !== call || call.receiver !== receiver) return;
-        let level = 0;
-        try {
-            const report = await receiver.getStats();
-            const remote = Array.from(report.values()).find(row =>
-                row.type === "inbound-rtp" && (row.kind ?? row.mediaType) === "audio");
-            const time = performance.now();
-            if (remote?.packetsReceived === undefined || remote.packetsReceived !== previousAudio?.packetsReceived)
-                level = remote?.audioLevel ?? 0;
-            if (previousAudio && remote) {
-                const energy = (remote.totalAudioEnergy ?? 0) - (previousAudio.totalAudioEnergy ?? 0);
-                const duration = (remote.totalSamplesDuration ?? 0) - (previousAudio.totalSamplesDuration ?? 0);
-                const seconds = duration > 0 ? duration : (time - previousTime) / 1000;
-                if (seconds > 0 && energy > 0) level = Math.max(level, Math.sqrt(energy / seconds));
-            }
-            previousAudio = remote;
-            previousTime = time;
-            for (const source of receiver.getSynchronizationSources?.() ?? []) {
-                if (time - source.timestamp < 250) level = Math.max(level, source.audioLevel ?? 0);
-            }
-        } catch {
-            // A stats report can be unavailable while the peer is closing.
-        }
-        if (calls.get(dialog) !== call || call.receiver !== receiver) return;
+export async function speak(dialog, reply) {
+    const call = calls.get(dialog);
+    if (!call) return;
+    const text = reply.text.replace(/```[^]*?```/g, " ").replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+        .replace(/^\s*#{1,6}\s+/gm, "").replace(/[*`]/g, "").trim();
+    if (!text) return;
+    const parts = text.slice(0, 6000).match(/.{1,220}(?:\s|$)|.{1,220}/gs);
+    call.replies.push({ speaker: reply.speaker, text, parts, next: 0 });
+    await call.voices;
+    if (calls.get(dialog) !== call || !call.play.hidden) return;
+    playNext(dialog, call);
+}
 
-        const target = level > .008 ? .035 + .105 * Math.sqrt(Math.min(1, level / .19)) : 0;
-        // Respond to speech promptly and ease back through brief pauses between words.
-        expansion += (target - expansion) * (target > expansion ? .55 : .19);
-        dialog.style.setProperty("--voice-speech-scale", (1 + expansion).toFixed(3));
-        dialog.dataset.speaking = String(expansion > .025);
-        call.levelTimer = setTimeout(sample, 100);
+function playNext(dialog, call) {
+    const reply = call.replies[0];
+    if (!reply || call.utterance) return;
+    const engine = window.speechSynthesis;
+    const { voice, language } = voiceForReply(reply.speaker, reply.text);
+    call.play.hidden = true;
+    call.playbackError.hidden = true;
+    if (!voice || !engine || !window.SpeechSynthesisUtterance) {
+        call.replies.shift();
+        call.playbackError.textContent = `Install a device voice for ${language.toUpperCase()} to hear replies. The reply is available in chat.`;
+        call.playbackError.hidden = false;
+        if (call.replies.length) playNext(dialog, call);
+        return;
     }
-    clearTimeout(call.levelTimer);
-    call.receiver = receiver;
-    void sample();
+    const utterance = new SpeechSynthesisUtterance(reply.parts[reply.next]);
+    utterance.voice = voice;
+    utterance.lang = voice.lang;
+    call.utterance = utterance;
+    const current = () => calls.get(dialog) === call && call.utterance === utterance;
+    const finish = () => {
+        clearTimeout(call.speechTimer);
+        call.utterance = null;
+        showSpeaking(dialog, call);
+    };
+    const retry = () => {
+        if (!current()) return;
+        finish();
+        engine.cancel();
+        call.play.hidden = false;
+    };
+    utterance.onstart = () => {
+        if (!current()) return;
+        clearTimeout(call.speechTimer);
+        showSpeaking(dialog, call, reply.speaker.name);
+    };
+    utterance.onend = () => {
+        if (!current()) return;
+        finish();
+        if (++reply.next === reply.parts.length) call.replies.shift();
+        playNext(dialog, call);
+    };
+    utterance.onerror = retry;
+    call.speechTimer = setTimeout(retry, 2500);
+    engine.speak(utterance);
+}
+
+function showSpeaking(dialog, call, name = null) {
+    const speaking = name !== null;
+    dialog.dataset.speaking = String(speaking);
+    dialog.style.setProperty("--voice-speech-scale", speaking ? "1.13" : "1");
+    if (call.speakingAgent) {
+        call.speakingAgent.textContent = name ? `${name} is speaking` : "";
+        call.speakingAgent.hidden = !speaking;
+    }
+}
+
+export function interrupt(dialog) {
+    const call = calls.get(dialog);
+    if (!call) return;
+    clearTimeout(call.speechTimer);
+    const playing = call.utterance;
+    call.utterance = null;
+    call.replies.length = 0;
+    call.play.hidden = true;
+    call.playbackError.hidden = true;
+    if (playing) window.speechSynthesis.cancel();
+    showSpeaking(dialog, call);
 }
 
 export function mute(dialog, muted) {
@@ -161,16 +198,14 @@ export function mute(dialog, muted) {
 export function stop(dialog) {
     const call = calls.get(dialog);
     if (!call) return;
+    interrupt(dialog);
     calls.delete(dialog);
     call.listeners.abort();
     call.observer?.disconnect();
     clearTimeout(call.connectTimer);
     clearTimeout(call.disconnectTimer);
-    clearTimeout(call.levelTimer);
     call.stream?.getTracks().forEach(track => track.stop());
     call.peer?.close();
-    call.speaker.srcObject = null;
-    dialog.querySelector(".voice-play").hidden = true;
     dialog.removeAttribute("data-connected");
     delete dialog.dataset.speaking;
     dialog.style.removeProperty("--voice-speech-scale");

@@ -189,6 +189,9 @@ namespace CodexAgentPlatform.Infrastructure.Migrations
                     b.Property<string>("Model")
                         .HasColumnType("TEXT");
 
+                    b.Property<long?>("OriginMessageId")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("ProjectId")
                         .HasColumnType("TEXT");
 

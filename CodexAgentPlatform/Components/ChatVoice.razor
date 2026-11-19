@@ -13,7 +13,7 @@
     <header class="voice-header">
         <div>
             <h2 id="voice-title">Voice call</h2>
-            @if (speakerName is not null) { <small>@speakerName</small> }
+            @if (speakerName is not null) { <small>Talking to @speakerName</small> }
         </div>
         <button type="button" class="icon-button" aria-label="Close voice call" title="Close voice call" @onclick="CloseAsync">
             <Icon Name="close" />
@@ -33,12 +33,13 @@
                 </div>
             </div>
         </div>
+        <p class="voice-speaking-agent" aria-hidden="true" hidden></p>
         <p class="voice-status @(connected && !muted ? "voice-status-hidden" : null)" role="status">@status</p>
         @if (error is not null) { <p class="voice-error" role="alert">@error</p> }
-        <audio autoplay playsinline @ref="speaker"></audio>
+        <p class="voice-error voice-playback-error" role="status" hidden></p>
     </div>
     <footer class="voice-controls">
-        <button type="button" class="button voice-play" hidden>Play audio</button>
+        <button type="button" class="button voice-play" hidden>Play reply</button>
         <button type="button" class="icon-button voice-mute" aria-label="Mute microphone" aria-pressed="@(muted ? "true" : "false")"
                 disabled="@(!connected)" @onclick="ToggleMuteAsync">
             <Icon Name="microphone" /><span>@(muted ? "Unmute" : "Mute")</span>
@@ -58,8 +59,9 @@
     [Parameter] public string? VoiceAgentName { get; set; }
     [Parameter] public bool AutoApprove { get; set; }
     [Parameter] public EventCallback<string> ConversationOpened { get; set; }
+    [Parameter] public EventCallback SpeakerChanged { get; set; }
 
-    private ElementReference dialog, speaker;
+    private ElementReference dialog;
     private DotNetObjectReference<ChatVoice>? reference;
     private IJSObjectReference? module;
     private ChatVoiceCall? call;
@@ -91,7 +93,16 @@
                 await ConversationOpened.InvokeAsync(id);
             });
             current.Failed += reason => _ = InvokeAsync(() => ShowErrorAsync(current, reason));
-            await module.InvokeVoidAsync("start", dialog, speaker, reference);
+            current.SpeakerChanged += speaker => _ = InvokeAsync(async () =>
+            {
+                if (call != current || disposed) return;
+                speakerName = speaker.Name;
+                StateHasChanged();
+                await SpeakerChanged.InvokeAsync();
+            });
+            current.UserSpoke += () => _ = VoicePlaybackAsync(current, "interrupt");
+            current.ReplyReady += reply => _ = VoicePlaybackAsync(current, "speak", reply);
+            await module.InvokeVoidAsync("start", dialog, reference);
         }
         catch (JSDisconnectedException) { await ReleaseCallAsync(); }
         catch (JSException)
@@ -102,6 +113,15 @@
         }
         finally { starting = false; }
     }
+
+    private Task VoicePlaybackAsync(ChatVoiceCall current, string method, VoiceReply? reply = null) =>
+        InvokeAsync(async () =>
+        {
+            if (call != current || disposed || module is null) return;
+            try { await module.InvokeVoidAsync(method, dialog, reply); }
+            catch (JSDisconnectedException) { }
+            catch (JSException ex) { Log.LogWarning(ex, "Device voice playback failed."); }
+        });
 
     protected override async Task OnParametersSetAsync()
     {

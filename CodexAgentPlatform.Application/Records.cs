@@ -85,6 +85,8 @@ public sealed class ChatRun
     public string ConversationId { get; set; } = "";
     public string AgentId { get; set; } = "";
     public long UserMessageId { get; set; }
+    // A delegated run can read an agent's brief while still belonging to the original user turn.
+    public long? OriginMessageId { get; set; }
     public long AssistantMessageId { get; set; }
     public string? WorkId { get; set; }
     public string? ProjectId { get; set; }

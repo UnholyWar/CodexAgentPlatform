@@ -29,6 +29,48 @@ internal static partial class ProjectRouting
 
     internal static bool RequestsArchitect(string text) => ArchitectRequest().IsMatch(text.Trim());
 
+    internal static (string? Target, bool Identity, bool TaskStatus, bool Turkish) VoiceControl(string text)
+    {
+        var input = text.Trim().TrimEnd('.', '!', '?', '…');
+        var english = EnglishVoiceControl().Match(input);
+        if (english.Success) return (Target(english), english.Groups["identity"].Success, english.Groups["status"].Success, false);
+        var spoken = input.ToLower(CultureInfo.GetCultureInfo("tr-TR"));
+        var turkish = TurkishVoiceControl().Match(spoken);
+        if (!turkish.Success)
+        {
+            var sentences = spoken.Split(['.', '!', '?'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (sentences.Length > 1 && sentences.All(sentence => TurkishVoiceControl().Match(sentence).Groups["identity"].Success))
+                return (null, true, false, true);
+        }
+        return (Target(turkish), turkish.Groups["identity"].Success, turkish.Groups["status"].Success, true);
+
+        static string? Target(Match match) => match.Groups["agent"].Success ? match.Groups["agent"].Value.Trim() : null;
+    }
+
+    internal static Agent? VoiceTarget(IReadOnlyList<Agent> agents, string target)
+    {
+        var culture = CultureInfo.GetCultureInfo("tr-TR");
+        target = target.TrimStart('@').ToLower(culture);
+        return Find(target) ?? Find(SpokenAgentRole().Replace(target, "")) ??
+            Find(TurkishAgentSuffix().Replace(target, ""));
+
+        Agent? Find(string name)
+        {
+            var alias = name switch
+            {
+                "mimar" or "yazılım mimarı" => "architect",
+                "geliştirici" or "yazılımcı" or "yazılım geliştiricisi" => "developer",
+                "normal sohbet" or "genel sohbet" => PlatformChat.Id,
+                _ => name
+            };
+            var named = agents.Where(a => string.Equals(a.Id, alias, StringComparison.OrdinalIgnoreCase) ||
+                a.Name.ToLower(culture) == alias).Take(2).ToArray();
+            if (named.Length != 0) return named.Length == 1 ? named[0] : null;
+            var titled = agents.Where(a => a.Title.ToLower(culture) == name).Take(2).ToArray();
+            return titled.Length == 1 ? titled[0] : null;
+        }
+    }
+
     internal static Task<string?> CreatedProjectAsync(PlatformDb db, string conversation, DateTime? since, CancellationToken ct) =>
         db.Events.AsNoTracking().Where(e => e.ConversationId == conversation && e.Kind == "ProjectCreated" &&
                 (since == null || e.EventOccurredAtUtc >= since) && db.Projects.Any(p => p.Id == e.ProjectId))
@@ -62,4 +104,17 @@ internal static partial class ProjectRouting
 
     [GeneratedRegex(@"^(?:ben\s+)?(?:mimarla|mimar ile|architect ile|architect'le)\s+(?:görüşmek|konuşmak)\s+istiyorum\b|^(?:i want to|let me) (?:talk|speak) (?:to|with) (?:the )?architect\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex ArchitectRequest();
+
+    [GeneratedRegex(@"^(?:please\s+)?(?:(?<status>who is (?:working on|handling) the task|what(?:'s| is) the task status|how is the task going)|(?<identity>(?:who|which agent)\s+(?:am i (?:talking|speaking) (?:to|with)|is speaking|is on the call)|who are you|what(?:'s| is) your name)|(?:(?:switch|transfer)(?: me)? to|(?:i want to |i would like to |let me )?(?:talk|speak) (?:to|with)|connect me (?:to|with))\s+(?:the )?(?<agent>.+?)(?: (?:now|please))?)$",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex EnglishVoiceControl();
+
+    [GeneratedRegex(@"^(?:yok[, ]+)?(?:(?<status>(?:görev|iş) ne durumda|(?:görevi|işi) (?:kim yapıyor|kim devraldı)|görev(?:in)? durumu ne)|(?<identity>(?:şu an )?(?:hangi ajanla (?:görüşüyorum|konuşuyorum)(?: ben)?|kimle (?:görüşüyorum|konuşuyorum)|karşımda kim var|sen kimsin|sen hangi ajansın|hangi ajan konuşuyor|devraldı mı(?: şu an)?))|(?:(?:ben|beni|bunu|şimdi)\s+)?(?<agent>[^.!?]+?)\s+(?:ile\s+)?(?:(?:görüşmek|konuşmak) istiyorum|bağla(?:r mısın)?|(?:geç|dön)(?:elim|ebilir mi(?:sin|yiz))?|geçiş yap(?:alım|abilir mi(?:sin|yiz))?)(?: şimdi)?)$")]
+    private static partial Regex TurkishVoiceControl();
+
+    [GeneratedRegex(@"\s+(?:ajan(?:ı|ına|ıyla|la|a)?|agent)$")]
+    private static partial Regex SpokenAgentRole();
+
+    [GeneratedRegex(@"(?:['’](?:[ae]|y[ae]|l[ae])|[yl]?[ae])$")]
+    private static partial Regex TurkishAgentSuffix();
 }

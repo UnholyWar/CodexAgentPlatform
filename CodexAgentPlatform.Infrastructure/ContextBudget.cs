@@ -58,6 +58,9 @@ public sealed class ContextBudget(IDbContextFactory<PlatformDb> dbs)
                 content.AppendLine("Eligible for repository inspection: " + JsonSerializer.Serialize(readers.Select(a => a.Id)));
             }
         }
+        var originMessageId = run.OriginMessageId ?? run.UserMessageId;
+        if (await db.Messages.AnyAsync(m => m.Id == originMessageId && m.VoiceProjectId != null, ct))
+            content.AppendLine("The caller will hear this reply aloud. Lead with the answer, use brief spoken sentences, and leave detailed code or logs for the written chat.");
         var previous = resumed && run.ThreadId is not null
             ? await db.Runs.AsNoTracking().Where(x => x.ConversationId == run.ConversationId &&
                 x.AgentId == agent.Id && x.ThreadId == run.ThreadId && x.TurnId != null && x.UserMessageId < run.UserMessageId)
@@ -110,7 +113,8 @@ public sealed class ContextBudget(IDbContextFactory<PlatformDb> dbs)
         For a concrete new project activity or a request to continue implementation, call task_begin before
         making changes. Choose mode new for unrelated work and resume for continuing the referenced work.
         When you are coordinating a request, use agent_list and task_delegate to pass work to an eligible specialist.
-        Preserve the user's requirements in the brief and communicate the handoff in the chat.
+        Preserve the user's requirements in the brief. A delegated task keeps you as the user's conversation partner.
+        Confirm what was queued and leave the result to the receiving agent. Do not use task_delegate just to introduce another agent.
         When implementing a new project without a registered repository, write the application in the managed workspace.
         Use task_progress after material steps and task_finish when stopping, waiting, or done.
         For date-based questions, use memory_timeline. For older transcripts, use conversation_search.
