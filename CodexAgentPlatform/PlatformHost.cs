@@ -32,6 +32,13 @@ public static class PlatformHost
         builder.Services.AddSingleton<AgentTools>();
         builder.Services.AddSingleton<ContextBudget>();
         builder.Services.AddSingleton(new Vault(paths, config["Platform:VaultKeyFile"]));
+        builder.Services.AddHttpClient(Operations.GitHubHttpClient, client =>
+            {
+                client.Timeout = TimeSpan.FromSeconds(20);
+                client.MaxResponseContentBufferSize = 1_048_576;
+            })
+            .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false, UseCookies = false })
+            .RedactLoggedHeaders(_ => true);
         builder.Services.AddSingleton<Operations>();
         builder.Services.AddSingleton<ICodexConnection>(sp => new CodexProcess(paths, config["Platform:CodexExecutable"],
             sp.GetRequiredService<ILogger<CodexProcess>>(), allowWindowsDesktopFallback: builder.Environment.IsDevelopment()));

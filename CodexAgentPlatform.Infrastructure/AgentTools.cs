@@ -51,6 +51,11 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
             ["id"], ["name", "address", "projectId", "sourceId", "sshServerId"]),
         new("git_workspace", "git", "Use prepare to check out the registered repository. Use list or read for committed files at HEAD, passing a relative directory or file path as argument. Supports status, diff, fetch, pull, branch and commit. Pass nextOffset as offset for paged output.", ["id", "operation"], ["argument", "offset"]),
         new("git_request_push", "git", "Request explicit owner approval for a non-force push of the current commit.", ["id"], ["destinationBranch"]),
+        new("github_request_create_repository", ToolAccess.CreateGitHubRepositories,
+            "Request owner approval to create a GitHub repository for a platform project using a saved global GitHub connection. " +
+            "Find its ID with resource_search. Provide the personal GitHub account login, repository name and visibility (private or public). " +
+            "Use the active project or pass projectId (ID or exact name). After approval the platform initializes and links the repository.",
+            ["sourceId", "owner", "name", "visibility"], ["projectId"]),
         new("ssh_inspect", "ssh", "Inspect test, health, docker-status, docker-services, linux-services, docker-logs or sftp-read. For more live command output pass nextOffset as offset.", ["id", "operation"], ["offset"]),
         new("ssh_request_operation", "ssh", "Request explicit approval for restart-docker on an SSH server, or deploy/rollback on a registered Swarm target. Deploy requires an image digest.", ["id", "operation"], ["image"])
     ];
@@ -82,9 +87,13 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
         yield return ToolNamespace(deferred);
     }
 
-    private static bool HasToolPermission(Agent agent, Tool tool) => tool.Permission == ToolAccess.ProjectResources
-        ? ToolAccess.HasResourcePermission(agent)
-        : tool.Permission.Length == 0 || ToolAccess.Has(agent, tool.Permission);
+    private static bool HasToolPermission(Agent agent, Tool tool) => tool.Permission switch
+    {
+        ToolAccess.ProjectResources => ToolAccess.HasResourcePermission(agent),
+        ToolAccess.CreateGitHubRepositories => ToolAccess.Has(agent, tool.Permission) && ToolAccess.Has(agent, ToolAccess.GlobalResources),
+        "" => true,
+        _ => ToolAccess.Has(agent, tool.Permission)
+    };
 
     private static object ToolNamespace(List<object> tools) =>
         new { type = "namespace", name = "platform", description = "Platform actions and owner approval requests.", tools };
@@ -122,6 +131,11 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
             return await ResourceRegistration.CreateAsync(db, run, args, ct);
         if (name == "resource_update")
             return await ResourceRegistration.UpdateAsync(db, run, args, ct);
+        if (name == "github_request_create_repository")
+        {
+            var approval = await operations.RequestGitHubRepositoryAsync(run, args, ct);
+            return new ApprovalReply(approval.Id, approval.Scope, approval.Status, approval.ExpiresAtUtc);
+        }
 
         var id = args.String("id");
         var project = args.String("projectId") ?? run.ProjectId;

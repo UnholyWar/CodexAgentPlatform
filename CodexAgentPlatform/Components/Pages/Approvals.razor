@@ -13,7 +13,7 @@
     @foreach (var row in rows)
     {
         <article class="card fields">
-            <div class="section-head"><h2>@(row.Kind == AgentPermissionGrants.ApprovalKind ? "Agent permission request" : row.Kind)</h2><span class="status">@row.Status</span></div>
+            <div class="section-head"><h2>@Title(row.Kind)</h2><span class="status">@row.Status</span></div>
             <p class="scope">@ApprovalDisplay.Scope(row.Scope)</p>
             @if (row.DecidedBy == CodexAgentPlatform.Infrastructure.Operations.AutomaticDecision) { <small>Automatically approved in this chat.</small> }
             @if (row.Result is { Length: > 0 } result) { <details class="code-fold"><summary>Operation output</summary><pre>@result</pre></details> }
@@ -34,6 +34,12 @@
 @code {
     private List<Approval> rows = [];
     private string? error;
+    private static string Title(string kind) => kind switch
+    {
+        AgentPermissionGrants.ApprovalKind => "Agent permission request",
+        Operations.GitHubRepositoryApproval => "Create GitHub repository",
+        _ => kind
+    };
     protected override async Task OnInitializedAsync() { Updates.Changed += OnUpdate; await LoadAsync(); }
     private async Task LoadAsync()
     {

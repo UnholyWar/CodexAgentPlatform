@@ -6,11 +6,13 @@ public static class ToolAccess
     public const string ProjectResources = "resources";
     public const string GlobalResources = "resources.global";
     public const string CreateResources = "resources.create";
+    public const string CreateGitHubRepositories = "github.repositories.create";
 
     public static IReadOnlyDictionary<string, string> Permissions { get; } = new Dictionary<string, string>
     {
         ["memory"] = "Memory", [ProjectResources] = "Project resources", [GlobalResources] = "Global resources",
-        [CreateResources] = "Create resources", ["workspace"] = "Workspace and terminal",
+        [CreateResources] = "Create resources", [CreateGitHubRepositories] = "Create GitHub repositories",
+        ["workspace"] = "Workspace and terminal",
         ["git"] = "Git", ["ssh"] = "SSH", ["delegate"] = "Delegation", [CreateProjects] = "Create projects"
     }.AsReadOnly();
 

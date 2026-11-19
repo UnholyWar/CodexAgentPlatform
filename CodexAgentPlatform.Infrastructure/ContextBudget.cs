@@ -27,6 +27,10 @@ public sealed class ContextBudget(IDbContextFactory<PlatformDb> dbs)
             content.AppendLine("Use resource_create to register a project resource. To copy from a saved connection, use resource_search " +
                 "and pass its ID as sourceId with the destination address. Use resource_update with the new project's resource ID to edit it later. " +
                 "For Git, work in the path returned by git_workspace prepare. Never ask for credentials in chat.");
+        if (!normal && ToolAccess.Has(agent, ToolAccess.CreateGitHubRepositories) && ToolAccess.Has(agent, ToolAccess.GlobalResources))
+            content.AppendLine("For an explicit request to create a repository on GitHub, find the saved global GitHub connection " +
+                "and call github_request_create_repository. If you just created the platform project, pass its ID. " +
+                "Confirm the name and visibility if unclear. Report a pending approval as pending.");
         if (run.ProjectId is { } project)
         {
             var name = await db.Projects.AsNoTracking().Where(p => p.Id == project).Select(p => p.Name).SingleOrDefaultAsync(ct);
@@ -56,6 +60,11 @@ public sealed class ContextBudget(IDbContextFactory<PlatformDb> dbs)
                 ToolAccess.Split(a.AllowedTools).Contains(ToolAccess.CreateResources)).Select(a => a.Id).ToArray();
             if (resourceCreators.Length > 0)
                 content.AppendLine("Eligible to register project resources: " + JsonSerializer.Serialize(resourceCreators));
+            var gitHubCreators = specialists.Where(a => roster.Any(r => r.id == a.Id) &&
+                ToolAccess.Split(a.AllowedTools).Contains(ToolAccess.CreateGitHubRepositories) &&
+                ToolAccess.Split(a.AllowedTools).Contains(ToolAccess.GlobalResources)).Select(a => a.Id).ToArray();
+            if (gitHubCreators.Length > 0)
+                content.AppendLine("For GitHub repository creation, hand off to an eligible specialist: " + JsonSerializer.Serialize(gitHubCreators));
             if (run.ProjectId is not null && roster.Length == 0)
                 content.AppendLine("No active specialist has access to this project. For a request that needs one, explain that the owner can grant Project permissions in Agents.");
             if (run.ProjectId is not null)

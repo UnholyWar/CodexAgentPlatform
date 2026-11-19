@@ -13,7 +13,8 @@ namespace CodexAgentPlatform.Infrastructure;
 public sealed record OperationTarget(string ResourceId, string Operation, string? WorkspaceId = null,
     string? Branch = null, string? Commit = null, string? ResourceBinding = null, string? Image = null, string? WorkId = null);
 
-public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, PlatformPaths paths, Vault vault)
+public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, PlatformPaths paths, Vault vault,
+    IHttpClientFactory? httpClients = null)
 {
     public const string AutomaticDecision = "owner:auto";
 
@@ -241,58 +242,68 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         db.Attach(approval);
         try
         {
-            var target = JsonSerializer.Deserialize<OperationTarget>(approval.Payload)
-                ?? throw new InvalidOperationException("Invalid approval scope.");
             var agent = await db.Agents.AsNoTracking().SingleAsync(x => x.Id == approval.AgentId, ct);
-            if (approval.Kind == "GitPush")
-            {
-                var resource = await ResolveAsync(agent, target.ResourceId, ResourceKind.GitRepository, "git", ct);
-                if (approval.DecidedBy == AutomaticDecision && await db.Projects.AnyAsync(p =>
-                    p.Id == resource.ProjectId && p.DefaultBranch == target.Branch, ct))
-                    throw new InvalidOperationException("The default branch requires administrator approval.");
-                if (Binding(resource) != target.ResourceBinding) throw new InvalidOperationException("The resource changed after approval.");
-                var repo = Path.Combine(paths.Workspace(target.WorkspaceId!), CheckoutFolder(resource));
-                await VerifyRepoAsync(resource, repo, ct);
-                var head = (await RunGitAsync(repo, ["rev-parse", "--verify", "HEAD^{commit}"], null, ct)).Trim();
-                var local = (await RunGitAsync(repo, ["branch", "--show-current"], null, ct)).Trim();
-                if (head != target.Commit || local != target.Operation || !CommitHash().IsMatch(head))
-                    throw new InvalidOperationException("The commit or branch changed after approval.");
-                approval.Result = TextLimits.Clip(await RunGitAsync(repo,
-                    ["push", "--porcelain", "--no-verify", "--", GitAddress(resource), $"{head}:refs/heads/{SafeBranch(target.Branch)}"], resource, ct), 2000);
-                db.Events.Add(new Activity { AgentId = agent.Id, ConversationId = approval.ConversationId,
-                    ProjectId = resource.ProjectId, WorkId = target.WorkId, Kind = "GitPushed", Detail = approval.Scope });
-            }
-            else if (approval.Kind == "SshRelease")
-            {
-                var deployment = await ReleaseAsync(agent, target.ResourceId, target.Operation, target.Image, ct);
-                if (deployment.Binding != target.ResourceBinding) throw new InvalidOperationException("The deployment resource changed after approval.");
-                approval.Result = JsonSerializer.Serialize(await SshAsync(deployment.Server, target.Operation, ct, deployment.Command));
-                db.Events.Add(new Activity { AgentId = agent.Id, ConversationId = approval.ConversationId,
-                    ProjectId = deployment.Target.ProjectId, WorkId = target.WorkId, Kind = target.Operation == "deploy" ? "DeploymentExecuted" : "RollbackExecuted",
-                    Detail = approval.Scope });
-            }
-            else if (approval.Kind == "SshChange" && target.Operation == "restart-docker")
-            {
-                var resource = await ResolveAsync(agent, target.ResourceId, ResourceKind.SshServer, "ssh", ct);
-                if (Binding(resource) != target.ResourceBinding) throw new InvalidOperationException("The resource changed after approval.");
-                approval.Result = JsonSerializer.Serialize(await SshAsync(resource, target.Operation, ct));
-                db.Events.Add(new Activity { AgentId = agent.Id, ConversationId = approval.ConversationId,
-                    ProjectId = resource.ProjectId, WorkId = target.WorkId, Kind = "SSHExecuted", Detail = approval.Scope });
-            }
-            else throw new InvalidOperationException("This approval type is not supported.");
+            if (approval.Kind == GitHubRepositoryApproval)
+                await ExecuteGitHubRepositoryAsync(db, approval, agent, ct);
+            else
+                await ExecuteExistingOperationAsync(db, approval, agent, ct);
             approval.Status = "Completed";
         }
         catch (OperationCanceledException) { approval.Status = "Interrupted"; }
         catch (Exception ex)
         {
             approval.Status = "Failed";
-            approval.Result = ex is InvalidOperationException ? TextLimits.Clip(ex.Message, 500) : "The operation failed.";
+            approval.Result = TextLimits.Clip(
+                (approval.Kind == GitHubRepositoryApproval && approval.Result is not null ? approval.Result + " " : "") +
+                (ex is InvalidOperationException ? ex.Message : "The operation failed."), 500);
         }
         db.Entry(approval).Property(x => x.Status).IsModified = true;
         db.Events.Add(new Activity { AgentId = approval.AgentId, ConversationId = approval.ConversationId,
             Kind = $"Approval{approval.Status}", Detail = approval.Scope });
         await db.SaveChangesAsync(CancellationToken.None);
         return true;
+    }
+
+    private async Task ExecuteExistingOperationAsync(PlatformDb db, Approval approval, Agent agent, CancellationToken ct)
+    {
+        var target = JsonSerializer.Deserialize<OperationTarget>(approval.Payload)
+            ?? throw new InvalidOperationException("Invalid approval scope.");
+        if (approval.Kind == "GitPush")
+        {
+            var resource = await ResolveAsync(agent, target.ResourceId, ResourceKind.GitRepository, "git", ct);
+            if (approval.DecidedBy == AutomaticDecision && await db.Projects.AnyAsync(p =>
+                p.Id == resource.ProjectId && p.DefaultBranch == target.Branch, ct))
+                throw new InvalidOperationException("The default branch requires administrator approval.");
+            if (Binding(resource) != target.ResourceBinding) throw new InvalidOperationException("The resource changed after approval.");
+            var repo = Path.Combine(paths.Workspace(target.WorkspaceId!), CheckoutFolder(resource));
+            await VerifyRepoAsync(resource, repo, ct);
+            var head = (await RunGitAsync(repo, ["rev-parse", "--verify", "HEAD^{commit}"], null, ct)).Trim();
+            var local = (await RunGitAsync(repo, ["branch", "--show-current"], null, ct)).Trim();
+            if (head != target.Commit || local != target.Operation || !CommitHash().IsMatch(head))
+                throw new InvalidOperationException("The commit or branch changed after approval.");
+            approval.Result = TextLimits.Clip(await RunGitAsync(repo,
+                ["push", "--porcelain", "--no-verify", "--", GitAddress(resource), $"{head}:refs/heads/{SafeBranch(target.Branch)}"], resource, ct), 2000);
+            db.Events.Add(new Activity { AgentId = agent.Id, ConversationId = approval.ConversationId,
+                ProjectId = resource.ProjectId, WorkId = target.WorkId, Kind = "GitPushed", Detail = approval.Scope });
+        }
+        else if (approval.Kind == "SshRelease")
+        {
+            var deployment = await ReleaseAsync(agent, target.ResourceId, target.Operation, target.Image, ct);
+            if (deployment.Binding != target.ResourceBinding) throw new InvalidOperationException("The deployment resource changed after approval.");
+            approval.Result = JsonSerializer.Serialize(await SshAsync(deployment.Server, target.Operation, ct, deployment.Command));
+            db.Events.Add(new Activity { AgentId = agent.Id, ConversationId = approval.ConversationId,
+                ProjectId = deployment.Target.ProjectId, WorkId = target.WorkId, Kind = target.Operation == "deploy" ? "DeploymentExecuted" : "RollbackExecuted",
+                Detail = approval.Scope });
+        }
+        else if (approval.Kind == "SshChange" && target.Operation == "restart-docker")
+        {
+            var resource = await ResolveAsync(agent, target.ResourceId, ResourceKind.SshServer, "ssh", ct);
+            if (Binding(resource) != target.ResourceBinding) throw new InvalidOperationException("The resource changed after approval.");
+            approval.Result = JsonSerializer.Serialize(await SshAsync(resource, target.Operation, ct));
+            db.Events.Add(new Activity { AgentId = agent.Id, ConversationId = approval.ConversationId,
+                ProjectId = resource.ProjectId, WorkId = target.WorkId, Kind = "SSHExecuted", Detail = approval.Scope });
+        }
+        else throw new InvalidOperationException("This approval type is not supported.");
     }
 
     private async Task<Resource> ResolveAsync(Agent agent, string id, ResourceKind kind, string tool, CancellationToken ct)

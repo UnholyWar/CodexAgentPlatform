@@ -144,7 +144,7 @@ public static partial class ResourceRegistration
         }
     }
 
-    private static async Task<string> AuthorizedProjectAsync(PlatformDb db, Agent agent, string requested, CancellationToken ct)
+    internal static async Task<string> AuthorizedProjectAsync(PlatformDb db, Agent agent, string requested, CancellationToken ct)
     {
         var projects = await db.Projects.Where(p => p.Id == requested || p.Name == requested).Select(p => p.Id).Take(2).ToListAsync(ct);
         if (projects.Count != 1 || !ToolAccess.AllowsProject(agent, projects[0]))
