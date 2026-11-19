@@ -3,7 +3,6 @@
 @inject IDbContextFactory<PlatformDb> Dbs
 @inject CodexAccounts Accounts
 @inject PlatformPaths Paths
-@inject IJSRuntime JS
 
 <PageTitle>Agents · Codex Agent Platform</PageTitle>
 <section class="admin-page">
@@ -36,14 +35,14 @@
                 @if (modelError is not null) { <p class="notice error" role="alert">@modelError</p> }
                 <label>Voice
                     <select @bind="edit.Voice" disabled="@loadingVoices">
-                        <option value="">Automatic device voice</option>
-                        @if (edit.Voice is { Length: > 0 } savedVoice && !voices.Any(voice => voice.Id == savedVoice))
+                        <option value="">Default ChatGPT voice</option>
+                        @if (edit.Voice is { Length: > 0 } savedVoice && !voices.Contains(savedVoice))
                         {
-                            <option value="@savedVoice">@savedVoice (unavailable on this device)</option>
+                            <option value="@savedVoice">@savedVoice (unavailable in ChatGPT)</option>
                         }
                         @foreach (var voice in voices)
                         {
-                            <option value="@voice.Id">@voice.Name (@voice.Language)</option>
+                            <option value="@voice">@(char.ToUpperInvariant(voice[0]) + voice[1..])</option>
                         }
                     </select>
                 </label>
@@ -87,8 +86,7 @@
     private List<Project> projects = [];
     private Dictionary<string, long> stats = [];
     private List<CodexModel> models = [];
-    private sealed record DeviceVoice(string Id, string Name, string Language);
-    private DeviceVoice[] voices = [];
+    private string[] voices = [];
     private Agent? edit;
     private bool isNew, busy, loadingVoices, focusOnRender, focusAddOnRender;
     private string? error, modelError, voiceError, notice;
@@ -170,13 +168,12 @@
         voiceError = null;
         try
         {
-            await using var device = await JS.InvokeAsync<IJSObjectReference>("import", "./" + Assets["device-voices.js"]);
-            voices = await device.InvokeAsync<DeviceVoice[]>("deviceVoices");
-            if (voices.Length == 0) voiceError = "Install a text-to-speech voice on this device to hear calls.";
+            voices = await Accounts.VoicesAsync(default);
+            if (voices.Length == 0) voiceError = "ChatGPT returned no voice options.";
         }
-        catch (JSException)
+        catch (Exception ex) when (ex is CodexRpcException or IOException or InvalidOperationException or TimeoutException or OperationCanceledException)
         {
-            voiceError = "Could not load the device voice options.";
+            voiceError = "Could not load the ChatGPT voice options.";
         }
         finally { loadingVoices = false; }
     }
@@ -212,8 +209,8 @@
             row.Model = draft.Model;
             row.Effort = draft.Effort;
             var voice = string.IsNullOrEmpty(draft.Voice) ? null : draft.Voice;
-            if (voice is not null && voice != row.Voice && !voices.Any(option => option.Id == voice))
-                throw new ArgumentException("Select a voice from the device voice list.");
+            if (voice is not null && voice != row.Voice && !voices.Contains(voice))
+                throw new ArgumentException("Select a voice from the ChatGPT voice list.");
             row.Voice = voice;
             row.Archived = draft.Archived;
             var addedProjects = allowedProjects.Except(ToolAccess.Split(draft.AllowedProjects)).ToArray();

@@ -37,6 +37,7 @@
         <p class="voice-status @(connected && !muted ? "voice-status-hidden" : null)" role="status">@status</p>
         @if (error is not null) { <p class="voice-error" role="alert">@error</p> }
         <p class="voice-error voice-playback-error" role="status" hidden></p>
+        <audio class="voice-recording" playsinline preload="auto" hidden></audio>
     </div>
     <footer class="voice-controls">
         <button type="button" class="button voice-play" hidden>Play reply</button>
@@ -63,6 +64,7 @@
     private DotNetObjectReference<ChatVoice>? reference;
     private IJSObjectReference? module;
     private ChatVoiceCall? call;
+    private readonly Dictionary<string, CodexVoicePlayback> playbacks = [];
     private string? callConversationId, previousConversationId;
     private bool starting, connected, muted, disposed;
     private string status = "Connecting…";
@@ -98,8 +100,8 @@
                 StateHasChanged();
                 await SpeakerChanged.InvokeAsync();
             });
-            current.UserSpoke += () => _ = VoicePlaybackAsync(current, "interrupt");
-            current.ReplyReady += reply => _ = VoicePlaybackAsync(current, "speak", reply);
+            current.UserSpoke += () => _ = VoicePlaybackAsync(current, null);
+            current.ReplyReady += reply => _ = VoicePlaybackAsync(current, reply);
             await module.InvokeVoidAsync("start", dialog, reference);
         }
         catch (JSDisconnectedException) { await ReleaseCallAsync(); }
@@ -112,14 +114,64 @@
         finally { starting = false; }
     }
 
-    private Task VoicePlaybackAsync(ChatVoiceCall current, string method, VoiceReply? reply = null) =>
+    private Task VoicePlaybackAsync(ChatVoiceCall current, VoiceReply? reply) =>
         InvokeAsync(async () =>
         {
             if (call != current || disposed || module is null) return;
-            try { await module.InvokeVoidAsync(method, dialog, reply); }
+            try
+            {
+                if (reply is null)
+                {
+                    var stopping = ReleasePlaybacksAsync();
+                    try { await module.InvokeVoidAsync("interrupt", dialog); }
+                    finally { await stopping; }
+                    return;
+                }
+                if (playbacks.Count >= 8) return;
+                var id = Guid.NewGuid().ToString("N");
+                playbacks.Add(id, new(Codex, reply));
+                try { await module.InvokeVoidAsync("speak", TimeSpan.FromMinutes(2), dialog, id, reply.Speaker.Name); }
+                finally { await CloseVoicePlaybackAsync(id); }
+            }
             catch (JSDisconnectedException) { }
-            catch (JSException ex) { Log.LogWarning(ex, "Device voice playback failed."); }
+            catch (JSException ex) { Log.LogWarning(ex, "ChatGPT voice playback failed."); }
         });
+
+    [JSInvokable]
+    public async Task<PlaybackOffer> ConnectVoicePlaybackAsync(string id, string offer)
+    {
+        if (!playbacks.TryGetValue(id, out var playback)) return new(null, "Voice playback was interrupted.");
+        try { return new(await playback.ConnectAsync(offer), null); }
+        catch (InvalidOperationException ex) { return new(null, ex.Message); }
+        catch (Exception ex) when (ex is ArgumentException or CodexRpcException or TimeoutException or OperationCanceledException or IOException)
+        {
+            Log.LogDebug(ex, "Could not open a ChatGPT playback connection.");
+            return new(null, "Could not connect to the selected ChatGPT voice.");
+        }
+    }
+
+    public sealed record PlaybackOffer(string? Sdp, string? Error);
+
+    [JSInvokable]
+    public async Task<bool> RenderVoicePlaybackAsync(string id)
+    {
+        if (!playbacks.TryGetValue(id, out var playback)) return false;
+        try { return await playback.RenderAsync(); }
+        catch (Exception ex) when (ex is CodexRpcException or TimeoutException or OperationCanceledException or IOException)
+        {
+            Log.LogDebug(ex, "Could not render a ChatGPT voice reply.");
+            return false;
+        }
+    }
+
+    [JSInvokable]
+    public async Task<bool> CloseVoicePlaybackAsync(string id)
+    {
+        if (!playbacks.Remove(id, out var playback)) return false;
+        var canPlay = playback.CanPlay;
+        await playback.DisposeAsync();
+        return canPlay;
+    }
 
     protected override async Task OnParametersSetAsync()
     {
@@ -205,7 +257,15 @@
     {
         var previous = call;
         call = null;
+        await ReleasePlaybacksAsync();
         if (previous is not null) await previous.DisposeAsync();
+    }
+
+    private Task ReleasePlaybacksAsync()
+    {
+        var pending = playbacks.Values.ToArray();
+        playbacks.Clear();
+        return Task.WhenAll(pending.Select(playback => playback.DisposeAsync().AsTask()));
     }
 
     public async ValueTask DisposeAsync()

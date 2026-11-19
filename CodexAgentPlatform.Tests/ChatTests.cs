@@ -828,6 +828,39 @@ public sealed class ChatTests(ITestOutputHelper output)
         finally { await worker.StopAsync(default); }
     }
 
+    [Theory]
+    [InlineData("juniper", "Merhaba Architect.", true)]
+    [InlineData("maple", "Here's a different answer.", false)]
+    public async Task VoicePlaybackUsesTheSavedToneAndOnlyAcceptsTheAppReply(string voice, string rendered, bool matches)
+    {
+        var codex = new FakeCodex { RenderedVoice = rendered };
+        await using (var playback = new CodexVoicePlayback(codex,
+            new(new("architect", "Architect", voice), "Merhaba **Architect**.")))
+        {
+            Assert.Equal("v=0 fake answer", await playback.ConnectAsync("v=0 playback offer"));
+            var start = Assert.Single(codex.VoiceRequests);
+            Assert.Equal(voice, start.String("voice"));
+            Assert.Contains("Merhaba Architect.", start.Get("initialItems")[0].String("text"));
+            codex.Emit("thread/realtime/transcript/done", new { threadId = "other-call", role = "assistant", text = "Unrelated reply" });
+            Assert.Equal(matches, await playback.RenderAsync());
+            Assert.Equal(matches, playback.CanPlay);
+            codex.Emit("thread/realtime/transcript/done", new { threadId = "t1", role = "assistant", text = "An extra answer." });
+            Assert.False(playback.CanPlay);
+            Assert.False(await playback.RenderAsync());
+            Assert.Single(codex.Methods, method => method == "thread/realtime/appendSpeech");
+        }
+        Assert.Contains("thread/realtime/stop", codex.Methods);
+    }
+
+    [Fact]
+    public async Task VoicePlaybackReportsAnUnavailableSavedToneWithoutSubstitutingAnother()
+    {
+        var codex = new FakeCodex();
+        await using var playback = new CodexVoicePlayback(codex, new(new("architect", "Architect", "Old device voice"), "Hello."));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => playback.ConnectAsync("v=0 playback offer"));
+        Assert.Empty(codex.VoiceRequests);
+    }
+
     private static ChatWorker Worker(TestStorage storage, FakeCodex codex, ChatUpdates updates)
     {
         var memory = new MemoryStore(storage, storage.Paths);
@@ -860,10 +893,12 @@ public sealed class ChatTests(ITestOutputHelper output)
         public List<string> Methods { get; } = [];
         public List<JsonElement> ThreadRequests { get; } = [];
         public List<JsonElement> TurnRequests { get; } = [];
+        public List<JsonElement> VoiceRequests { get; } = [];
         public Queue<(string Name, object Arguments)> NextToolCalls { get; } = [];
         public List<JsonElement> ToolReplies { get; } = [];
         public string? TurnModel { get; private set; }
         public string? VoicePrompt { get; private set; }
+        public string? RenderedVoice { get; set; }
         private int count;
         public event Action<CodexEvent>? Received;
         public void Emit(string method, object parameters) => Received?.Invoke(new CodexEvent(method, Args(parameters)));
@@ -886,9 +921,12 @@ public sealed class ChatTests(ITestOutputHelper output)
             if (method == "thread/realtime/start")
             {
                 var request = Args(parameters!);
+                VoiceRequests.Add(request);
                 VoicePrompt = request.String("prompt");
                 Emit("thread/realtime/sdp", new { threadId = request.String("threadId"), sdp = "v=0 fake answer" });
             }
+            if (method == "thread/realtime/appendSpeech" && RenderedVoice is { } rendered)
+                Emit("thread/realtime/transcript/done", new { threadId = Args(parameters!).String("threadId"), role = "assistant", text = rendered });
             if (method == "windowsSandbox/readiness" && (WorkspaceReady || DenyWorkspaceNamespace))
                 return Task.FromResult(Args(new { status = "ready" }));
             if (method is "thread/start" or "thread/resume")
