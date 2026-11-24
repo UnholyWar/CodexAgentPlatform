@@ -43,6 +43,7 @@ public sealed record ChatSnapshot(List<Message> Messages, List<Activity> Events,
     bool AutoApprove = false, string? ProjectId = null, string? CoordinatorAgentId = null)
 {
     public bool Exists { get; init; } = true;
+    public string? RunningConversationId { get; init; }
     public ILookup<long, MessagePhotoPreview> Photos { get; init; } = Array.Empty<MessagePhotoPreview>().ToLookup(p => p.MessageId);
 }
 internal sealed record ProjectReference(string Id, string Name);
@@ -231,7 +232,7 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
         return (chat.Id, null);
     }
 
-    public async Task<List<Conversation>> RecentAsync(string? query, CancellationToken ct, bool archived = false)
+    public async Task<List<Conversation>> RecentAsync(string? query, CancellationToken ct, bool archived = false, int limit = 70)
     {
         await using var db = await dbs.CreateDbContextAsync(ct);
         IQueryable<Conversation> chats = db.Conversations.AsNoTracking();
@@ -246,7 +247,8 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
                               WHERE MessageSearch MATCH {expression} AND m.ConversationId = c.Id)
                 """).AsNoTracking();
         }
-        return await chats.Where(c => c.Archived == archived).OrderByDescending(x => x.UpdatedAtUtc).Take(70).ToListAsync(ct);
+        return await chats.Where(c => c.Archived == archived).OrderByDescending(x => x.UpdatedAtUtc)
+            .ThenByDescending(x => x.Id).Take(Math.Clamp(limit, 1, 70)).ToListAsync(ct);
     }
 
     public async Task SetArchivedAsync(string id, bool archived, CancellationToken ct)
@@ -526,6 +528,8 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
         var events = await db.Events.AsNoTracking().Where(x => x.ConversationId == id)
             .OrderByDescending(x => x.Id).Take(45).ToListAsync(ct);
         var run = await db.Runs.AsNoTracking().Where(x => x.ConversationId == id).OrderByDescending(x => x.CreatedAtUtc).FirstOrDefaultAsync(ct);
+        var running = run?.Status == WorkStatus.Running || run is not null &&
+            await db.Runs.AnyAsync(x => x.ConversationId == id && x.Status == WorkStatus.Running, ct);
         var conversationApprovals = db.Approvals.AsNoTracking().Where(x => x.ConversationId == id);
         var recentIds = conversationApprovals.OrderByDescending(x => x.CreatedAtUtc).Take(12).Select(x => x.Id);
         var now = DateTime.UtcNow;
@@ -544,6 +548,7 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
         return new(messages, events, run, approvals, chat?.AutoApprove == true, projectId, chat?.CoordinatorAgentId)
         {
             Exists = chat is not null,
+            RunningConversationId = running ? id : null,
             Photos = photos.ToLookup(p => p.MessageId)
         };
     }

@@ -11,21 +11,50 @@
         <button class="button">Filter</button>
     </form>
     @if (error is not null) { <p class="notice error" role="alert">@error</p> }
-    <div class="list">
-        @foreach (var entry in rows)
-        {
-            <div class="list-row timeline-row"><time>@TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(entry.EventOccurredAtUtc, DateTimeKind.Utc), zone).ToString("dd.MM.yyyy HH:mm")</time>
-                <span><strong>@entry.Kind</strong><small>@TextLimits.Clip(entry.Detail, 180)</small></span>
-                @if (entry.ConversationId is { } chat) { <a href="/chat/@chat">Open conversation</a> }
-            </div>
-        }
-        @if (rows.Count == 0) { <p class="empty">No events found in this period.</p> }
-    </div>
+    @foreach (var day in rows.GroupBy(entry => LocalTime(entry).Date))
+    {
+        <section class="timeline-day" @key="day.Key">
+            <h2>@day.Key.ToString("dddd, d MMMM yyyy")</h2>
+            <ol class="list timeline-events">
+                @foreach (var entry in day)
+                {
+                    <li class="timeline-entry" @key="entry.Id">
+                        <time title="@zone.Id" datetime="@DateTime.SpecifyKind(entry.EventOccurredAtUtc, DateTimeKind.Utc).ToString("O")">@LocalTime(entry).ToString("HH:mm")</time>
+                        <details>
+                            <summary>
+                                <strong data-tone="@Tone(entry.Kind)">@ActivityDisplay.Label(entry.Kind)</strong>
+                                @if (entry.Detail.Length > 0) { <span class="event-preview">@TextLimits.Clip(entry.Detail, 180)</span> }
+                            </summary>
+                            <div class="event-body">
+                                <small>@entry.Kind</small>
+                                @if (entry.Detail.Length > 0) { <p>@entry.Detail</p> }
+                                @if (entry.Artifact is { } artifact && Guid.TryParseExact(System.IO.Path.GetFileNameWithoutExtension(artifact), "N", out var artifactId) && artifact == $"{artifactId:N}.txt")
+                                { <a href="/artifacts/@artifact">Download full output</a> }
+                            </div>
+                        </details>
+                        @if (entry.ConversationId is { } chat)
+                        { <a class="event-chat" href="/chat/@chat">Open conversation</a> }
+                    </li>
+                }
+            </ol>
+        </section>
+    }
+    @if (rows.Count == 0 && error is null) { <p class="empty">No events found in this period.</p> }
 </section>
 
 @code {
     private List<Activity> rows = [];
     private string? query, error;
+    private int revision;
+    private DateTime LocalTime(Activity entry) =>
+        TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(entry.EventOccurredAtUtc, DateTimeKind.Utc), zone);
+    private static string? Tone(string kind) => kind switch
+    {
+        "ApprovalRequested" or "PermissionGrantRequested" or "AgentHandoffWaiting" => "attention",
+        "TurnFailed" or "ApprovalFailed" or "WorkspaceUnavailable" => "error",
+        "TurnCompleted" or "ApprovalCompleted" or "PermissionGranted" => "complete",
+        _ => null
+    };
     private TimeZoneInfo zone = TimeZoneInfo.Utc;
     protected override async Task OnInitializedAsync()
     {
@@ -35,9 +64,11 @@
     }
     private async Task LoadAsync()
     {
+        var request = ++revision;
         error = null;
         var range = string.IsNullOrWhiteSpace(query) ? null : TemporalQuery.Parse(query, DateTime.UtcNow, zone);
         if (range is null && !string.IsNullOrWhiteSpace(query)) { error = "Date expression not recognized."; return; }
-        rows = await Memory.TimelineAsync(range, null, null, default);
+        var found = await Memory.TimelineAsync(range, null, null, default);
+        if (request == revision) rows = found;
     }
 }

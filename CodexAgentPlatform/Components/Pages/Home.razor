@@ -12,7 +12,7 @@
 @inject IJSRuntime JS
 
 <PageTitle>Chat · Codex Agent Platform</PageTitle>
-<section class="chat-shell">
+<section class="chat-shell" data-edge="@ChatEdge.State(Id, snapshot, DateTime.UtcNow)">
     <header class="page-bar">
         <button class="icon-button chat-menu" type="button" aria-controls="mobile-menu" aria-haspopup="dialog" aria-label="Open menu"><Icon Name="menu" /></button>
         <div class="page-heading"><Icon Name="chat" /><div class="chat-title"><h1>@Title</h1>
@@ -26,6 +26,12 @@
         @if (snapshot.Messages.Count == 0)
         {
             <div class="empty-chat">
+                @if (Id is null && latestChat is { } recent)
+                {
+                    <a class="resume-chat" href="/chat/@recent.Id">
+                        <Icon Name="history" /><span><small>Continue last conversation</small><strong>@recent.Title</strong></span><Icon Name="arrow" />
+                    </a>
+                }
                 <div class="welcome-panel">
                     <div class="welcome-copy">
                         <h2>What are we working on today?</h2>
@@ -190,6 +196,7 @@
 
 @code {
     [Parameter] public string? Id { get; set; }
+    private Conversation? latestChat;
     private ChatSnapshot snapshot = new([], [], null, []);
     private List<Agent> agents = [];
     private List<Project> projects = [];
@@ -310,7 +317,11 @@
     {
         if (loaded != Id)
         {
-            loaded = Id;
+            var chat = Id;
+            loaded = chat;
+            refreshVersion++;
+            title = null;
+            snapshot = new([], [], null, []);
             photoDraftVersion++;
             uploads.Clear();
             mentionedAgent = null;
@@ -320,11 +331,14 @@
             approvalError = null;
             issue = null;
             limit = 60;
-            if (Id is null) { title = null; snapshot = new([], [], null, []); return; }
+            latestChat = null;
+            if (chat is null) { await RefreshAsync(); return; }
             await using var db = await Dbs.CreateDbContextAsync();
-            title = await db.Conversations.Where(x => x.Id == Id).Select(x => x.Title).SingleOrDefaultAsync();
+            var chatTitle = await db.Conversations.Where(x => x.Id == chat).Select(x => x.Title).SingleOrDefaultAsync();
+            if (disposed || Id != chat) return;
+            title = chatTitle;
             if (title is null) { Navigation.NavigateTo("/conversations"); return; }
-            await Chats.TouchAsync(Id, default);
+            await Chats.TouchAsync(chat, default);
             scroll = true;
         }
         await RefreshAsync();
@@ -340,8 +354,13 @@
 
     private async Task RefreshAsync()
     {
-        if (Id is not { } id) return;
         var version = ++refreshVersion;
+        if (Id is not { } id)
+        {
+            var recent = await Chats.RecentAsync(null, default, limit: 1);
+            if (!disposed && Id is null && version == refreshVersion) latestChat = recent.FirstOrDefault();
+            return;
+        }
         var result = await Chats.ReadAsync(id, limit, default);
         if (!disposed && Id == id && version == refreshVersion)
         {
@@ -470,13 +489,13 @@
             });
             return;
         }
-        if (Id is null || id != Id || Interlocked.Exchange(ref refreshQueued, 1) != 0) return;
+        if ((Id is not null && id != Id) || Interlocked.Exchange(ref refreshQueued, 1) != 0) return;
         _ = InvokeAsync(async () =>
         {
             Interlocked.Exchange(ref refreshQueued, 0);
             if (disposed) return;
             await RefreshAsync();
-            scroll = true;
+            if (Id is not null) scroll = true;
             StateHasChanged();
         });
     }

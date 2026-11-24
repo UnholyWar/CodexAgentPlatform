@@ -14,7 +14,7 @@ public sealed record OperationTarget(string ResourceId, string Operation, string
     string? Branch = null, string? Commit = null, string? ResourceBinding = null, string? Image = null, string? WorkId = null);
 
 public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, PlatformPaths paths, Vault vault,
-    IHttpClientFactory? httpClients = null)
+    IHttpClientFactory? httpClients = null, ChatUpdates? updates = null)
 {
     public const string AutomaticDecision = "owner:auto";
 
@@ -236,7 +236,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
     {
         await using var db = await dbs.CreateDbContextAsync(ct);
         var now = DateTime.UtcNow;
-        await db.Approvals.Where(x => (x.Status == "Pending" || x.Status == "Approved") && x.ExpiresAtUtc <= now)
+        var expiredApprovals = await db.Approvals.Where(x => (x.Status == "Pending" || x.Status == "Approved") && x.ExpiresAtUtc <= now)
             .ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, "Expired"), ct);
         var expiredRequests = await db.Runs.Where(r => r.Status == WorkStatus.WaitingForApproval &&
             db.Approvals.Any(a => a.ContinuationRunId == r.Id && a.Kind == AgentPermissionGrants.ApprovalKind && a.Status == "Expired"))
@@ -245,10 +245,11 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         var approval = await db.Approvals.AsNoTracking().Where(x => x.Status == "Approved" && x.Kind != AgentPermissionGrants.ApprovalKind)
             .OrderBy(x => x.CreatedAtUtc).FirstOrDefaultAsync(ct);
         if (approval is null)
-            return await CheckSshCommandAsync(db, ct) || expiredRequests != 0;
+            return await CheckSshCommandAsync(db, ct) || expiredRequests != 0 || expiredApprovals != 0;
         var claimed = await db.Approvals.Where(x => x.Id == approval.Id && x.Status == "Approved" && x.ExpiresAtUtc > now)
             .ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, "Executing"), ct);
         if (claimed != 1) return true;
+        updates?.Publish(approval.ConversationId ?? "");
         db.Attach(approval);
         if (approval.Kind == SshCommandApproval)
         {

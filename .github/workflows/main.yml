@@ -35,7 +35,7 @@ jobs:
       - name: Verify licensing and owner access
         run: |
           node --test CodexAgentPlatform.Tests/license.test.mjs
-          if ! dotnet test CodexAgentPlatform.Tests --filter FullyQualifiedName~AuthenticationTests > "$RUNNER_TEMP/owner-test.log" 2>&1; then
+          if ! dotnet test CodexAgentPlatform.Tests --filter "FullyQualifiedName~AuthenticationTests|FullyQualifiedName~ChatEdgeTests" > "$RUNNER_TEMP/owner-test.log" 2>&1; then
             cat "$RUNNER_TEMP/owner-test.log"
             diagnostic=$(grep -Eo 'PAGE_CHECK page=/[a-z]* status=[0-9]{3}( [a-zA-Z]+=(True|False)){6}' "$RUNNER_TEMP/owner-test.log" | head -1 || true)
             if [[ -n "$diagnostic" ]]; then echo "::error::$diagnostic"; fi

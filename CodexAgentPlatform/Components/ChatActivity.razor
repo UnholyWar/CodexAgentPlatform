@@ -98,7 +98,7 @@
     private static bool IsFile(Activity e) => e.Kind is "fileChange" or "Diff" or "CodeModified";
     private static string EventTitle(Activity entry)
     {
-        if (entry.Kind != "fileChange") return Label(entry.Kind);
+        if (entry.Kind != "fileChange") return ActivityDisplay.Label(entry.Kind);
         try
         {
             using var json = System.Text.Json.JsonDocument.Parse(entry.Detail);
@@ -114,21 +114,8 @@
             }
         }
         catch (System.Text.Json.JsonException) { /* Stored events can contain a clipped preview. */ }
-        return Label(entry.Kind);
+        return ActivityDisplay.Label(entry.Kind);
     }
-    private static string Label(string kind) => kind switch
-    {
-        "Diff" => "Diff", "fileChange" or "CodeModified" => "File change",
-        "commandExecution" => "Command output", "ToolCalled" => "Tool call", "webSearch" => "Web search",
-        "TurnCompleted" => "Response completed", "TurnInterrupted" => "Work interrupted", "TurnFailed" => "Operation failed",
-        "AutoApproved" => "Automatically approved", "AutoApprovalEnabled" => "Auto-approval enabled",
-        "AutoApprovalDisabled" => "Auto-approval disabled", "ApprovalRequested" => "Approval requested",
-        "TestExecuted" => "Test executed", "ProjectSelected" => "Project selected", "ProjectCleared" => "Project selection cleared", "WorkProgress" => "Work updated",
-        "WorkspaceUnavailable" => "Workspace unavailable", "AgentHandoff" => "Agent handoff",
-        "AgentHandoffWaiting" => "Handoff awaiting access", "AgentHandoffUnavailable" => "Handoff unavailable",
-        "PermissionGrantRequested" => "Permission requested", "PermissionGranted" => "Permission granted",
-        "PermissionGrantDeclined" => "Permission request declined", "ProjectCreated" => "Project created", _ => kind
-    };
     private static string ApprovalLabel(string status) => status switch
     {
         "Pending" => "Awaiting approval", "Approved" => "Approved", "Declined" => "Declined", "Expired" => "Expired",

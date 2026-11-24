@@ -652,3 +652,30 @@ button.list-row:hover, a.list-row:hover { background: var(--subtle); border-radi
     .admin-page h1[tabindex="-1"]:focus { outline: none; }
     .global-mark { background: var(--subtle); padding: .15rem .45rem; border-radius: 999px; }
 }
+
+@media (max-width: 760px) {
+    .chat-shell[data-edge] { position: relative; }
+    .chat-shell[data-edge]::after {
+        content: ""; position: absolute; inset: 0; z-index: 5; pointer-events: none;
+        border: 1px solid var(--edge-light);
+        box-shadow: inset 0 0 6px var(--edge-light), inset 0 0 16px color-mix(in srgb, var(--edge-light) 35%, transparent);
+        opacity: .85;
+    }
+    .chat-shell[data-edge="working"] { --edge-light: #19f991; }
+    .chat-shell[data-edge="approval"] { --edge-light: #b467ff; }
+}
+@media (max-width: 760px) and (prefers-reduced-motion: no-preference) {
+    .chat-shell[data-edge]::after { animation: chat-edge-breathe 3s ease-in-out infinite alternate; }
+    @keyframes chat-edge-breathe { from { opacity: .4; } to { opacity: .95; } }
+}
+
+.resume-chat {
+    display: flex; align-items: center; gap: .75rem; min-height: 48px;
+    padding: .65rem .9rem; border: 1px solid var(--line); border-radius: 12px;
+    color: var(--fg); background: var(--surface); text-decoration: none;
+}
+.resume-chat:hover, .resume-chat:focus-visible { border-color: var(--accent); }
+.resume-chat > span { flex: 1; min-width: 0; }
+.resume-chat small, .resume-chat strong { display: block; }
+.resume-chat strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.resume-chat .ui-icon { color: var(--accent); }
