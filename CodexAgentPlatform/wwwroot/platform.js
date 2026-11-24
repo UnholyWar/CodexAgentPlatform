@@ -121,13 +121,25 @@ document.addEventListener("click", event => {
         if (event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom)
             event.target.close();
     }
-    if (event.target instanceof Element && event.target.closest("#mobile-menu a")) {
-        document.getElementById("mobile-menu")?.hidePopover();
+    if (!(event.target instanceof Element)) return;
+    const trigger = event.target.closest('button[aria-controls="mobile-menu"]');
+    const menu = document.getElementById("mobile-menu");
+    if (!menu) return;
+    if (trigger && !menu.open) {
+        // A touch activation may leave focus elsewhere. The dialog restores this opener on close.
+        trigger.focus({ preventScroll: true });
+        menu.showModal();
+    } else if (menu.open) {
+        if (event.target.closest("#mobile-menu a, #mobile-menu [data-close-menu]")) menu.close();
+        else if (event.target === menu) {
+            const box = menu.getBoundingClientRect();
+            if (event.clientX < box.left || event.clientX >= box.right) menu.close();
+        }
     }
 });
 
 window.matchMedia("(min-width: 761px)").addEventListener("change", event => {
-    if (event.matches) document.getElementById("mobile-menu")?.hidePopover();
+    if (event.matches) document.getElementById("mobile-menu")?.close();
 });
 
 // Some mobile browsers resize only the visual viewport when the keyboard opens.

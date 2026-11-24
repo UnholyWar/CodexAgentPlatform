@@ -14,7 +14,7 @@
 <PageTitle>Chat · Codex Agent Platform</PageTitle>
 <section class="chat-shell">
     <header class="page-bar">
-        <button class="icon-button chat-menu" type="button" popovertarget="mobile-menu" aria-label="Open menu"><Icon Name="menu" /></button>
+        <button class="icon-button chat-menu" type="button" aria-controls="mobile-menu" aria-haspopup="dialog" aria-label="Open menu"><Icon Name="menu" /></button>
         <div class="page-heading"><Icon Name="chat" /><div class="chat-title"><h1>@Title</h1>
             <small>@AgentName(ReplyAgentId)@(projects.Find(p => p.Id == EffectiveProject) is { } focusedProject ? $" · {focusedProject.Name}" : "")@(AutoApprove ? " · Auto-approval enabled" : "")</small></div></div>
         <div class="actions">

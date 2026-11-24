@@ -9,7 +9,7 @@
 <PageTitle>Conversations · Codex Agent Platform</PageTitle>
 <section class="admin-page">
     <header class="section-head"><h1>Conversations</h1><a class="primary" href="/"><Icon Name="plus" /> New chat</a></header>
-    <form class="filter" @onsubmit="SearchAsync" @onsubmit:preventDefault>
+    <form class="filter list-filter" @onsubmit="SearchAsync" @onsubmit:preventDefault>
         <input placeholder="Search titles and messages" aria-label="Search conversations" @bind="query" maxlength="120" />
         <button class="button" disabled="@busy"><Icon Name="search" /> Search</button>
         <label><input type="checkbox" @bind="archived" @bind:after="SearchAsync" disabled="@busy" /> Archived conversations</label>

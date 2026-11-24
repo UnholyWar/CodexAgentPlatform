@@ -254,13 +254,14 @@ button.list-row:hover, a.list-row:hover { background: var(--subtle); border-radi
     .mobile-header .brand { margin-right: auto; }
     .mobile-header .brand-mark { width: 35px; height: 35px; border-radius: 10px; }
     .mobile-header .icon-button, .menu-head .icon-button { border: 0; background: transparent; }
-    .mobile-menu:popover-open { display: flex; flex-direction: column; gap: .65rem; position: fixed; inset: 0 0 0 auto;
+    .mobile-menu[open] { display: flex; flex-direction: column; gap: .65rem; position: fixed; inset: 0 auto 0 0;
         width: min(330px, 90vw); max-width: none; height: 100dvh; max-height: 100dvh; margin: 0;
-        padding: max(1rem, env(safe-area-inset-top)) max(1rem, env(safe-area-inset-right)) max(1rem, env(safe-area-inset-bottom)) 1rem;
-        border: 0; border-left: 1px solid var(--line); color: var(--fg); background: var(--rail); box-shadow: var(--shadow); }
+        padding: max(1rem, env(safe-area-inset-top)) max(1rem, env(safe-area-inset-right)) max(1rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left));
+        border: 0; border-right: 1px solid var(--line); color: var(--fg); background: var(--rail); box-shadow: var(--shadow); }
     .mobile-menu::backdrop { background: rgb(16 17 37 / .48); }
     .menu-head { display: flex; justify-content: space-between; align-items: center; }
-    body:has(.mobile-menu:popover-open) { overflow: hidden; }
+    html:has(.mobile-menu[open]), body:has(.mobile-menu[open]) { overflow: hidden; }
+    .mobile-menu nav { overscroll-behavior-y: contain; }
     .platform:has(.chat-shell) { height: var(--chat-viewport, 100dvh); min-height: 0; }
     .platform:has(.chat-shell) .main-pane { flex: 1; min-height: 0; }
     .chat-shell { height: 100%; }
@@ -618,6 +619,12 @@ button.list-row:hover, a.list-row:hover { background: var(--subtle); border-radi
     .split-panel:has(> form) > .list { display: none; }
     .admin-page .fields > .actions { padding-top: .65rem; border-top: 1px solid var(--line); }
     .admin-page .fields > .actions .button, .admin-page .fields > .actions .primary { flex: 1 1 auto; }
+    .list-filter { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
+    .list-filter > input { grid-column: 1 / -1; }
+    .list-filter > label { grid-column: 1; grid-row: 2; display: flex; align-items: center; gap: .4rem; min-height: 44px; }
+    .list-filter > button { grid-column: 2; grid-row: 2; }
+    .work-row .details-body { overflow-wrap: anywhere; }
+    .work-row .details-body > a { display: inline-flex; align-items: center; min-height: 44px; }
     .work-row small { display: block; margin: .3rem 0 0 1.1rem; }
 }
 .editor-back { display: none; }

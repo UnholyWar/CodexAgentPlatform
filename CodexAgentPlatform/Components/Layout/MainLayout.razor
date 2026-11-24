@@ -9,15 +9,15 @@
                 @Account(session.User.Identity?.Name)
             </aside>
             <header class="mobile-header">
+                <button class="icon-button" type="button" aria-controls="mobile-menu" aria-haspopup="dialog" aria-label="Open menu"><Icon Name="menu" /></button>
                 @Brand
                 <a class="icon-button" href="/conversations" aria-label="Conversations"><Icon Name="history" /></a>
-                <button class="icon-button" type="button" popovertarget="mobile-menu" aria-label="Open menu"><Icon Name="menu" /></button>
             </header>
-            <div class="mobile-menu" id="mobile-menu" popover="auto" role="dialog" aria-label="Workspace menu">
-                <div class="menu-head">@Brand<button class="icon-button" type="button" popovertarget="mobile-menu" popovertargetaction="hide" aria-label="Close menu"><Icon Name="close" /></button></div>
+            <dialog class="mobile-menu" id="mobile-menu" aria-label="Workspace menu">
+                <div class="menu-head">@Brand<button class="icon-button" type="button" data-close-menu autofocus aria-label="Close menu"><Icon Name="close" /></button></div>
                 @NavigationLinks
                 @Account(session.User.Identity?.Name)
-            </div>
+            </dialog>
             <main class="main-pane">@Body</main>
         </div>
     </Authorized>

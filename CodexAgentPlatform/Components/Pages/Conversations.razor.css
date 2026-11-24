@@ -20,3 +20,9 @@
     .history-row { grid-column: 1 / -1; }
     .quick-action { justify-self: start; margin-left: .65rem; }
 }
+
+@media (max-width: 760px) {
+    .list-filter { grid-template-columns: auto minmax(0, 1fr); }
+    .list-filter > button { grid-column: 1; }
+    .list-filter > label { grid-column: 2; }
+}

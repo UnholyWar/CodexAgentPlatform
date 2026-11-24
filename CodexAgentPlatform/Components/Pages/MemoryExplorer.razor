@@ -8,7 +8,7 @@
     <header class="section-head">
         <h1>Memory</h1><button class="primary" @ref="addButton" disabled="@busy" @onclick="NewNote"><Icon Name="plus" /> Add note</button>
     </header>
-    <form class="filter" @onsubmit="SearchAsync" @onsubmit:preventDefault>
+    <form class="filter list-filter" @onsubmit="SearchAsync" @onsubmit:preventDefault>
         <input placeholder="Title, summary, or tag…" aria-label="Search memory" @bind="query" maxlength="150" />
         <label class="check"><input type="checkbox" @bind="archived" @bind:after="SearchAsync" disabled="@busy" /> Include archived</label>
         <button class="button" type="submit" disabled="@busy"><Icon Name="search" /> Search</button>
