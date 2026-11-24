@@ -10,7 +10,7 @@ public sealed record MemoryDraft(string Title, string Summary, string Tags, stri
 public sealed partial class MemoryStore(IDbContextFactory<PlatformDb> dbs, PlatformPaths paths)
 {
     public async Task<List<MemoryNote>> SearchAsync(string? query, string? projectId, TimeRange? range,
-        bool includeArchived, CancellationToken ct)
+        bool includeArchived, CancellationToken ct, MemoryNote? cursor = null, int limit = 40)
     {
         await using var db = await dbs.CreateDbContextAsync(ct);
         var notes = db.Notes.AsNoTracking();
@@ -26,7 +26,10 @@ public sealed partial class MemoryStore(IDbContextFactory<PlatformDb> dbs, Platf
         if (!includeArchived) notes = notes.Where(x => !x.Archived);
         if (projectId is not null) notes = notes.Where(x => x.ProjectId == projectId);
         if (range is not null) notes = notes.Where(x => x.UpdatedAtUtc >= range.FromUtc && x.UpdatedAtUtc < range.UntilUtc);
-        return await notes.OrderByDescending(x => x.UpdatedAtUtc).Take(40).ToListAsync(ct);
+        if (cursor is not null)
+            notes = notes.Where(x => x.UpdatedAtUtc < cursor.UpdatedAtUtc ||
+                (x.UpdatedAtUtc == cursor.UpdatedAtUtc && x.Id.CompareTo(cursor.Id) < 0));
+        return await notes.OrderByDescending(x => x.UpdatedAtUtc).ThenByDescending(x => x.Id).Take(limit).ToListAsync(ct);
     }
 
     public async Task<List<Activity>> TimelineAsync(TimeRange? range, string? projectId, string? agentId, CancellationToken ct)

@@ -1,6 +1,6 @@
 .conversation-entry {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) auto auto;
     align-items: center;
     padding-right: .75rem;
 }
@@ -12,4 +12,11 @@
 .conversation-actions {
     grid-column: 1 / -1;
     padding: 0 .75rem .75rem;
+}
+
+.history-row[data-selected] { box-shadow: inset 3px 0 var(--accent); }
+@media (max-width: 600px) {
+    .conversation-entry { grid-template-columns: minmax(0, 1fr) auto; padding: 0 .4rem .4rem; }
+    .history-row { grid-column: 1 / -1; }
+    .quick-action { justify-self: start; margin-left: .65rem; }
 }

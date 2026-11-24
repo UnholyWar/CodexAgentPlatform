@@ -144,3 +144,36 @@ function fitChatViewport() {
 window.visualViewport?.addEventListener("resize", fitChatViewport);
 document.addEventListener("focusin", fitChatViewport);
 document.addEventListener("focusout", () => requestAnimationFrame(fitChatViewport));
+
+customElements.define("page-trigger", class extends HTMLElement {
+    connectedCallback() {
+        this.style.display = "block";
+        this.observer = new IntersectionObserver(entries => {
+            if (this.isConnected && entries.some(entry => entry.isIntersecting)) {
+                this.observer.disconnect();
+                this.querySelector("button")?.click();
+            }
+        }, { rootMargin: "180px" });
+        this.observer.observe(this);
+    }
+    disconnectedCallback() { this.observer.disconnect(); }
+});
+
+let conversationPosition;
+document.addEventListener("click", event => {
+    const link = event.target.closest?.("a[data-conversation]");
+    if (link && !event.ctrlKey && !event.metaKey && !event.shiftKey)
+        conversationPosition = { id: link.dataset.conversation, y: window.scrollY };
+}, true);
+
+window.restoreConversationPosition = () => {
+    if (!conversationPosition) return;
+    const link = document.querySelector(`a[data-conversation="${CSS.escape(conversationPosition.id)}"]`);
+    if (!link) return;
+    link.dataset.selected = "";
+    requestAnimationFrame(() => {
+        if (!link.isConnected) return;
+        link.focus({ preventScroll: true });
+        window.scrollTo(0, conversationPosition.y);
+    });
+};

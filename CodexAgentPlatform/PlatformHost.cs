@@ -88,6 +88,7 @@ public static class PlatformHost
                 ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
                 _ => new FixedWindowRateLimiterOptions { PermitLimit = 8, Window = TimeSpan.FromMinutes(2), QueueLimit = 0 }));
         });
+        builder.Services.AddScoped<ConversationListState>();
         builder.Services.AddRazorComponents().AddInteractiveServerComponents()
             .AddHubOptions(options => options.MaximumReceiveMessageSize = 128 * 1024);
 

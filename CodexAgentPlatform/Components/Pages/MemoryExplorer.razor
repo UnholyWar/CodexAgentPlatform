@@ -10,21 +10,21 @@
     </header>
     <form class="filter" @onsubmit="SearchAsync" @onsubmit:preventDefault>
         <input placeholder="Title, summary, or tag…" aria-label="Search memory" @bind="query" maxlength="150" />
-        <label class="check"><input type="checkbox" @bind="archived" /> Include archived</label>
+        <label class="check"><input type="checkbox" @bind="archived" @bind:after="SearchAsync" disabled="@busy" /> Include archived</label>
         <button class="button" type="submit" disabled="@busy"><Icon Name="search" /> Search</button>
     </form>
     @if (!editing && error is not null) { <p class="notice error" role="alert">@error</p> }
     @if (!editing && notice is not null) { <p class="notice" role="status">@notice</p> }
     <div class="split-panel">
         <div class="list">
-            @foreach (var note in rows)
-            {
-                <button class="list-row" disabled="@busy" @onclick="() => OpenAsync(note)">
+            <PagedList @key="revision" TItem="MemoryNote" Fetch="FetchAsync" ItemId="@(n => n.Id)" EmptyText="No memory notes found.">
+                <Row Context="note">
+                <button @key="note.Id" class="list-row" disabled="@busy" @onclick="() => OpenAsync(note)">
                     <span><strong>@note.Title</strong><small>@note.Summary</small><small>@note.UpdatedAtUtc.ToString("dd.MM.yyyy HH:mm") UTC · @note.Verification</small></span>
                     <small>@(note.Archived ? "Archived" : $"v{note.Version}")</small>
                 </button>
-            }
-            @if (rows.Count == 0) { <p class="empty">No memory notes found.</p> }
+                </Row>
+            </PagedList>
         </div>
         @if (editing)
         {
@@ -70,7 +70,9 @@
 </section>
 
 @code {
-    private List<MemoryNote> rows = [];
+    private int revision;
+    private string? appliedQuery;
+    private bool appliedArchived;
     private List<Project> projects = [];
     private MemoryNote? selected;
     private string? query, error, notice, project;
@@ -81,7 +83,6 @@
     {
         await using var db = await Dbs.CreateDbContextAsync();
         projects = await db.Projects.AsNoTracking().OrderBy(x => x.Name).ToListAsync();
-        await LoadAsync();
     }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
@@ -98,7 +99,16 @@
         }
     }
 
-    private async Task LoadAsync() => rows = await Store.SearchAsync(query, null, null, archived, default);
+    private Task<List<MemoryNote>> FetchAsync(MemoryNote? cursor, int limit) =>
+        Store.SearchAsync(appliedQuery, null, null, appliedArchived, default, cursor, limit);
+
+    private Task LoadAsync()
+    {
+        appliedQuery = query;
+        appliedArchived = archived;
+        revision++;
+        return Task.CompletedTask;
+    }
     private Task SearchAsync() => RunAsync(LoadAsync);
     private void NewNote()
     {

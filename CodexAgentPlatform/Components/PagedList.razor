@@ -1,0 +1,65 @@
+@typeparam TItem where TItem : class
+@inject ILogger<PagedList<TItem>> Logger
+
+@foreach (var item in items)
+{
+    @Row(item)
+}
+@if (failed)
+{
+    <button class="button" @onclick="LoadAsync">Loading failed. Retry</button>
+}
+else if (loading)
+{
+    <p role="status">Loading…</p>
+}
+else if (end)
+{
+    <p class="empty">@(items.Count == 0 ? EmptyText : "End of list")</p>
+}
+else if (interactive)
+{
+    <page-trigger @key="cursor"><button class="button" @onclick="LoadAsync">Load older records</button></page-trigger>
+}
+
+@code {
+    [Parameter, EditorRequired] public Func<TItem?, int, Task<List<TItem>>> Fetch { get; set; } = default!;
+    [Parameter, EditorRequired] public Func<TItem, string> ItemId { get; set; } = default!;
+    [Parameter, EditorRequired] public RenderFragment<TItem> Row { get; set; } = default!;
+    [Parameter] public string EmptyText { get; set; } = "No records found.";
+    private readonly List<TItem> items = [];
+    private readonly HashSet<string> seen = [];
+    private TItem? cursor;
+    private bool loading, failed, end, interactive;
+    protected override void OnAfterRender(bool firstRender)
+    {
+        if (!firstRender) return;
+        interactive = true;
+        StateHasChanged();
+    }
+
+    protected override Task OnInitializedAsync() => LoadAsync();
+    private async Task LoadAsync()
+    {
+        if (loading || end) return;
+        loading = true;
+        failed = false;
+        try
+        {
+            var size = cursor is null ? 20 : 10;
+            var page = await Fetch(cursor, size + 1);
+            foreach (var item in page.Take(size))
+            {
+                cursor = item;
+                if (seen.Add(ItemId(item))) items.Add(item);
+            }
+            end = page.Count <= size;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Could not load the next list page for {RowType}", typeof(TItem).Name);
+            failed = true;
+        }
+        finally { loading = false; }
+    }
+}

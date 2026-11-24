@@ -3,6 +3,8 @@
 @inject ChatStore Chats
 @inject AuthenticationStateProvider Authentication
 @inject PlatformPaths Paths
+@inject ConversationListState Saved
+@inject IJSRuntime JS
 
 <PageTitle>Conversations · Codex Agent Platform</PageTitle>
 <section class="admin-page">
@@ -18,15 +20,15 @@
         @foreach (var chat in rows)
         {
             <div class="conversation-entry" @key="chat.Id">
-                <a class="list-row history-row" href="/chat/@chat.Id"><span class="avatar" aria-hidden="true"><Icon Name="chat" /></span>
+                <a data-conversation="@chat.Id" class="list-row history-row" href="/chat/@chat.Id"><span class="avatar" aria-hidden="true"><Icon Name="chat" /></span>
                     <strong>@chat.Title</strong><small>@chat.UpdatedAtUtc.ToString("dd.MM.yyyy HH:mm") UTC</small>
                 </a>
+                <button class="button quick-action" disabled="@busy" @onclick="() => ArchiveAsync(chat)">@(chat.Archived ? "Restore" : "Archive")</button>
                 <button class="icon-button" aria-label="Actions for @chat.Title" aria-expanded="@(menu == chat.Id ? "true" : "false")"
                         disabled="@busy" @onclick="() => ToggleMenu(chat.Id)">…</button>
                 @if (menu == chat.Id)
                 {
                     <div class="conversation-actions">
-                        <button class="button" disabled="@busy" @onclick="() => ArchiveAsync(chat)">@(chat.Archived ? "Restore" : "Archive")</button>
                         <button class="button" disabled="@busy" @onclick="() => AskFinish(chat.Id)">Finish conversation</button>
                         <button class="button" disabled="@busy" @onclick="() => AskDelete(chat.Id)">Delete</button>
                     </div>
@@ -59,10 +61,26 @@
     private bool archived, busy;
     private int revision;
 
-    protected override Task OnInitializedAsync() => SearchAsync();
+    private bool restore;
+    protected override async Task OnInitializedAsync()
+    {
+        query = Saved.Query;
+        archived = Saved.Archived;
+        await SearchAsync();
+        restore = true;
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!restore) return;
+        restore = false;
+        await JS.InvokeVoidAsync("restoreConversationPosition");
+    }
 
     private async Task SearchAsync()
     {
+        Saved.Query = query;
+        Saved.Archived = archived;
         var request = ++revision;
         Cancel();
         var found = await Chats.RecentAsync(query, default, archived);

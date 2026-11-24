@@ -6,9 +6,9 @@
 <section class="admin-page">
     <header class="section-head"><h1>Work history</h1></header>
     <div class="list">
-        @foreach (var work in rows)
-        {
-            <details class="work-row">
+        <PagedList TItem="WorkItem" Fetch="FetchAsync" ItemId="@(w => w.Id)" EmptyText="No work items found.">
+            <Row Context="work">
+            <details @key="work.Id" class="work-row">
                 <summary><strong>@work.Title</strong> <span class="status">@work.Status</span> <small>@work.UpdatedAtUtc.ToString("dd.MM.yyyy HH:mm") UTC</small></summary>
                 <div class="details-body">
                     <p>@work.Description</p>
@@ -19,16 +19,19 @@
                     <a href="/chat/@work.ConversationId">Open conversation</a>
                 </div>
             </details>
-        }
-        @if (rows.Count == 0) { <p class="empty">No work items found.</p> }
+            </Row>
+        </PagedList>
     </div>
 </section>
 
 @code {
-    private List<WorkItem> rows = [];
-    protected override async Task OnInitializedAsync()
+    private async Task<List<WorkItem>> FetchAsync(WorkItem? cursor, int limit)
     {
         await using var db = await Dbs.CreateDbContextAsync();
-        rows = await db.Work.AsNoTracking().OrderByDescending(x => x.UpdatedAtUtc).Take(100).ToListAsync();
+        var work = db.Work.AsNoTracking();
+        if (cursor is not null)
+            work = work.Where(x => x.UpdatedAtUtc < cursor.UpdatedAtUtc ||
+                (x.UpdatedAtUtc == cursor.UpdatedAtUtc && x.Id.CompareTo(cursor.Id) < 0));
+        return await work.OrderByDescending(x => x.UpdatedAtUtc).ThenByDescending(x => x.Id).Take(limit).ToListAsync();
     }
 }
