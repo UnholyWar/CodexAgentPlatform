@@ -2,32 +2,27 @@
 
 .NET 10 ve Blazor Interactive Server ile çalışan tek yöneticili Codex arayüzü. Sohbetler ve uygulama kayıtları SQLite’ta, proje dosyaları ve hafıza notları diskte saklanır.
 
-## Canlı kurulum
+## Yeni sunucuya ilk kurulum
 
-Sunucuda Docker ve host üzerinde Nginx gerekir. Örnekte `development.onurozgultekin.com` kullanılır. Alt alan adının A kaydını sunucunun genel IPv4 adresine yönlendirin. HTTPS’i Nginx karşılar. Uygulama host üzerinde yalnızca `127.0.0.1:18090` adresinden dinlenir.
+Bu adımlar boş bir Ubuntu sunucusunda, HTTPS’i host üzerindeki Nginx’in karşıladığı kurulum içindir. Örneklerdeki `platform.example.org` yerine kendi DNS adınızı kullanın. Komutları sunucuda yönetici olarak Bash ile çalıştırın.
 
-### 1. İsteğe bağlı HTTP başlangıç kontrolü
+### 1. Sunucuyu hazırlayın ve hazır imajı indirin
 
-İlk kurulumda imajın açıldığını kontrol etmek için aşağıdaki geçici container’ı çalıştırın. Canlı container çalışıyorsa bu adımı atlayın.
+Docker Engine çalışıyor olmalı. Nginx, Certbot ve Nginx eklentisi, curl, tar ve sandbox için etkin AppArmor ile `apparmor_parser` gerekir. Alan adını sunucuya yönlendirin ve Nginx’in 80 ve 443 numaralı portlarına dışarıdan erişim sağlayın. [.NET çalışma zamanı, Codex CLI ve Bubblewrap hazır imajda gelir](Dockerfile).
+
+Paket özel ise indirmeden önce GHCR’ye oturum açın. Paketi okumaya yetkili GitHub kullanıcı adınızı ve parola sorulduğunda paket okuma yetkili belirtecinizi girin.
 
 ```bash
-docker run -d --name codex-agent-platform-check \
-  -p 127.0.0.1:18090:8080 \
-  -e ASPNETCORE_ENVIRONMENT=Production \
-  -e 'ASPNETCORE_URLS=http://+:8080' \
-  -v codexagentplatform_platform-data:/data \
-  -v codexagentplatform_platform-workspaces:/workspaces \
-  ghcr.io/unholywar/codexagentplatform:latest
-
-docker logs --tail 50 codex-agent-platform-check
-curl -sS -o /dev/null -w 'HTTP %{http_code}\n' http://127.0.0.1:18090/
+docker login ghcr.io
 ```
 
-Oturum açmadan ana adrese yapılan istekte `302` beklenir. `/setup` formu güvenli çerez kullandığı için doğrudan HTTP isteğinde `500` verir. Kurulum formunu aşağıdaki HTTPS adresinden açın.
+```bash
+docker info >/dev/null && docker pull ghcr.io/unholywar/codexagentplatform:latest
+```
 
-### 2. Canlı container’ı çalıştır
+### 2. Ağı, kalıcı diskleri ve ilk container’ı oluşturun
 
-Başlangıç kontrolü container’ı çalışıyorsa `docker stop codex-agent-platform-check` ile durdurun. Aynı volume’ları kullanan önceki uygulama container’ı varsa onu da yeni container’ı başlatmadan önce durdurun.
+Aşağıdaki komut ilk kurulum içindir. Docker, adlandırılmış volume’ları ilk kullanımda oluşturur. Güncellemede çalışan container’ın bağlantılarını devralan 7. adımı kullanın.
 
 ```bash
 docker network inspect codex-agent-backend >/dev/null 2>&1 ||
@@ -46,11 +41,11 @@ docker run -d --name codex-agent-platform \
   ghcr.io/unholywar/codexagentplatform:latest
 ```
 
-`ASPNETCORE_FORWARDEDHEADERS_ENABLED` ile uygulama Nginx’in ilettiği HTTPS bilgisini okur. Host portunu loopback’e bağlı tutun ve `codex-agent-backend` ağına başka container bağlamayın.
+`ASPNETCORE_FORWARDEDHEADERS_ENABLED` ile uygulama Nginx’in ilettiği HTTPS bilgisini okur. Sunucudan `curl --max-time 5 -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18090/` ile uygulamanın yanıt verdiğini kontrol edin. Oturumsuz istekte genellikle girişe yönlendiren `302` görülür. Bu kontrol yalnızca yerel HTTP erişimini sınar. Tarayıcıdaki kurulum ve oturum açma akışı güvenli çerez kullandığından aşağıda hazırlanan HTTPS adresini kullanın. Host portunu loopback’e bağlı tutun ve `codex-agent-backend` ağına başka container bağlamayın.
 
 ### 3. Nginx ve HTTPS
 
-`/etc/nginx/sites-available/development.onurozgultekin.com` dosyasını oluşturun. Nginx’in yüklediği mevcut ana site yapılandırmasını ayrı tutun.
+`/etc/nginx/sites-available/platform.example.org` dosyasını oluşturun. Nginx’in yüklediği mevcut ana site yapılandırmasını ayrı tutun.
 
 ```nginx
 map $http_upgrade $codex_connection_upgrade {
@@ -60,7 +55,7 @@ map $http_upgrade $codex_connection_upgrade {
 
 server {
     listen 80;
-    server_name development.onurozgultekin.com;
+    server_name platform.example.org;
 
     location / {
         proxy_pass http://127.0.0.1:18090;
@@ -77,21 +72,25 @@ server {
 DNS kaydı çözülüyor ve sunucuda Certbot’un Nginx eklentisi hazırsa siteyi etkinleştirin.
 
 ```bash
-ln -s /etc/nginx/sites-available/development.onurozgultekin.com \
-      /etc/nginx/sites-enabled/development.onurozgultekin.com
+ln -s /etc/nginx/sites-available/platform.example.org \
+      /etc/nginx/sites-enabled/platform.example.org
 nginx -t && systemctl reload nginx &&
-  certbot --nginx -d development.onurozgultekin.com --redirect
+  certbot --nginx -d platform.example.org --redirect
 ```
 
 ### 4. İlk kurulum ve bağlantı
 
 ```bash
 curl -sS -o /dev/null -w 'HTTP %{http_code}\n' \
-  https://development.onurozgultekin.com/setup
+  https://platform.example.org/license
 docker exec codex-agent-platform cat /data/credentials/bootstrap-code
 ```
 
-İlk kurulumda HTTP `200` beklenir. [Kurulum sayfasına](https://development.onurozgultekin.com/setup) sunucuda üretilen kodu girip yönetici hesabını ve en az 14 karakterlik şifresini oluşturun. Kurulum tamamlanınca kod geçersiz olur ve `/setup` giriş sayfasına yönlendirir.
+Tarayıcıda kendi alan adınızdaki `/license` sayfasını HTTPS üzerinden açın. Yeni kurulumda yukarıdaki kurulum kodunu ve lisans panelinden aldığınız lisans kodunu girin. Aktivasyon başarılı olunca `/setup` üzerinden aynı kurulum koduyla yönetici hesabını ve en az 14 karakterlik parolasını oluşturun. **Mevcut kurulumda** aktivasyon için kayıtlı yöneticinin adı ve parolası gerekir. Başarıdan sonra `/login` üzerinden giriş yapın.
+
+Lisans kodunu yalnızca HTTPS aktivasyon formuna girin. Kurulum kimliği, yenileme için gerekli kod ve imzalı belge `/data/credentials/platform-license.json` içinde saklanır. Bu dosyayı içeren yedekleri erişimi sınırlı bir yerde tutun. Aynı veri volume’unu kullanın. Uygulama başlangıçta ve beş dakikada bir yenileme dener. Geçici bağlantı hatasında geçerli imzalı belge bitişine kadar kullanılabilir. Lisans servisinden gelen `403` yanıtı yerel yetkiyi kaldırır. Yönetici `/license` üzerinden tekrar etkinleştirebilir.
+
+İletişim bilgisi için container ortamında `License__ContactEmail` veya `License__LinkedIn` tanımlayın. Yerel `/healthz` yanıtı yalnızca işlemin çalıştığını gösterir. Üretime geçişi doğrulamak için ayrıca HTTPS üzerinden aktivasyon ve yönetici girişi yapıp korunan bir sayfayı açın. Yönetici menüsündeki **Yeni sürüm var** bağlantısı, sunucuda çalıştırılacak sürüme sabitlenmiş komutları gösterir.
 
 **Codex ayarları → Cihaz koduyla giriş yap** üzerinden çıkan tek kullanımlık kodu OpenAI doğrulama sayfasına girin. ChatGPT hesabınızın güvenlik ayarlarında cihaz koduyla giriş etkin olmalıdır. Ardından **Bağlantıyı test et** ile hesabı ve model listesini kontrol edin. [Cihaz koduyla oturum açma](https://learn.chatgpt.com/docs/auth#login-on-headless-devices)
 
@@ -101,52 +100,78 @@ Düğmeler tıklamaya yanıt vermiyorsa Blazor betiğinin yanıtını kontrol ed
 
 ```bash
 curl -sS -D - -o /dev/null \
-  https://development.onurozgultekin.com/_framework/blazor.web.js
+  https://platform.example.org/_framework/blazor.web.js
 ```
 
 HTTP `200` ve JavaScript içerik türü beklenir. Betik `404` dönüyorsa framework dosyalarını içeren güncel imajı kullanın.
 
-### Canlı container’da terminali etkinleştir
+### 5. Terminal, çalışma alanı ve Vault’u etkinleştirin
 
-Ubuntu'da Docker'ın varsayılan güvenlik profilleri Bubblewrap'in iç Linux namespace'lerini engelleyebilir. Sohbet çalışırken çalışma alanı ve terminal kapalı görünüyorsa [Docker sandbox kurulum betiğini](deploy/docker-sandbox/enable.sh) çalışan sunucuda yürütün. Depoyu kopyalarken `deploy/docker-sandbox` klasörünü içeriğiyle birlikte taşıyın.
-
-```bash
-sudo bash deploy/docker-sandbox/enable.sh
-```
-
-Bu betik 2. adımdaki canlı kurulumu hedefler. Aynı imajı, uygulama ortam değişkenlerini, portu, ağı ve volume’ları kullanır. Geçiş sırasında kısa bir kesinti olur. HTTP, Bubblewrap ve çalışma alanı testlerinden biri başarısız olursa önceki container yeniden başlatılır. Başarılı geçişten sonra DevOps Engineer ile bir projede `pwd` çalıştırın ve terminal çıktısını kontrol edin.
-
-Betiğin yüklediği AppArmor ve seccomp profilleri OpenAI’nin Docker içinde Bubblewrap çalıştırmak için yayımladığı yapılandırmaya dayanır. [OpenAI Docker sandbox belgeleri](https://github.com/openai/codex-security/blob/main/docker/README.md)
-
-Terminali etkinleştirdiyseniz sonraki imaj güncellemelerinde 2. adımdaki `docker run` komutuna bu seçenekleri de ekleyin.
+İlk container çalışırken güvenilir depo kopyasındaki [sandbox dizinini](deploy/docker-sandbox) profil dosyalarıyla birlikte sunucuya aktarın. Aşağıdaki örneği sunucudaki depo kökünden, **ilk kurulumda** çalıştırın. Arşivi sonraki güncellemelerde de kullanacaksınız.
 
 ```bash
-  --cap-drop=ALL \
-  --security-opt=no-new-privileges:true \
-  --security-opt=apparmor=codex-agent-platform-container \
-  --security-opt=seccomp=/etc/docker/codex-agent-platform-seccomp.json \
+(
+  set -e
+  tar -C deploy -czf /root/codex-docker-vault.tar.gz docker-sandbox
+  bash deploy/docker-sandbox/enable.sh --enable-vault
+)
 ```
 
-### Yeni imaja geçiş
+[enable.sh](deploy/docker-sandbox/enable.sh) çalışan container’ı devralır. Hostta AppArmor ve seccomp profillerini yükler, yeni container’ı Linux capability’lerini kaldırarak ve `no-new-privileges` ile başlatır. Böylece Codex, terminal komutlarını Bubblewrap içinde sınırlar. Betik ilk Vault anahtarını ayrı bir volume’da oluşturur ve uygulamaya salt okunur bağlar. Mevcut şifreli kayıtlar varsa özgün anahtar gerekir. [Sandbox profillerinin kaynağı](https://github.com/openai/codex-security/blob/main/docker/README.md)
 
-Sandbox betiğiyle kurulan canlı container’ı güncellemek için yeni imajı çekip aynı betiğe verin.
+## Mevcut üretim kurulumu ve güncelleme
+
+### 6. Güncelleme öncesinde çalışan düzeni ve yedekleri kontrol edin
+
+“Sunucum” kurulumunda Nginx, HTTPS isteklerini `codex-agent-platform` container’ına iletir. Betik bu isimle çalışan, kullanıcısı `app`, ağı `codex-agent-backend` ve port eşlemesi `127.0.0.1:18090:8080` olan kurulumu bekler. `/root/codex-docker-vault.tar.gz`, betiği ve iki güvenlik profilini taşır. Özgün Vault anahtarı ayrı disktedir. Sunucu değiştirirken uygulama verilerini, çalışma alanlarını ve özgün anahtarı birlikte yedekleyin. Güncellemeden önce geri yüklenebilir, tutarlı bir yedeğiniz olduğunu doğrulayın.
 
 ```bash
-docker pull ghcr.io/unholywar/codexagentplatform:latest
-sudo bash deploy/docker-sandbox/enable.sh --image ghcr.io/unholywar/codexagentplatform:latest
+docker inspect -f '{{.State.Status}} {{.Config.User}} {{.HostConfig.NetworkMode}}' codex-agent-platform
+docker port codex-agent-platform
+docker inspect -f '{{range .Mounts}}{{println .Destination .Type .Name .RW}}{{end}}' codex-agent-platform
+tar -tzf /root/codex-docker-vault.tar.gz
 ```
 
-Betik mevcut disk bağlantılarını, uygulama ortam ayarlarını, portu ve sandbox profillerini kullanır. Yeni container kontrolleri geçemezse önceki container’ı yeniden başlatır.
+### 7. Hedef commit’i doğrulayarak yeni imaja geçin
 
-Eski, etiketsiz platform imajlarını temizlemek için güncelleme komutuna `--cleanup-old-images` ekleyin. Bu seçenek tek başına da çalışır.
+`master` dalına push edildikten sonra GitHub Actions’ta hedef commit için **Publish Docker image** işinin başarıyla bitmesini bekleyin. [Yayın iş akışı](.github/workflows/main.yml) imajı GHCR’ye `latest` etiketiyle gönderir ve tam commit kimliğini `org.opencontainers.image.revision` alanına yazar. GitHub’dan hedef commit’in 40 karakterlik SHA değerini kopyalayın. Aşağıdaki bloğu çalışan sunucuda yönetici olarak çalıştırın.
 
 ```bash
-sudo bash deploy/docker-sandbox/enable.sh --cleanup-old-images
+(
+  set -euo pipefail
+  read -rp 'Hedef commit (40 karakterlik SHA): ' expected
+  [[ $expected =~ ^[0-9a-f]{40}$ ]] || { echo 'Tam commit SHA gerekli.' >&2; exit 1; }
+
+  image=ghcr.io/unholywar/codexagentplatform:latest
+  name=codex-agent-platform
+  docker pull "$image"
+  image_id=$(docker image inspect -f '{{.Id}}' "$image")
+  revision=$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image_id")
+  [[ $revision == "$expected" ]] || { echo "İndirilen commit farklı: $revision" >&2; exit 1; }
+
+  install_dir=$(mktemp -d)
+  trap 'rm -rf -- "$install_dir"' EXIT
+  tar -xzf /root/codex-docker-vault.tar.gz -C "$install_dir"
+  bash "$install_dir/docker-sandbox/enable.sh" --image "$image_id" --enable-vault
+
+  running=$(docker inspect -f '{{.State.Running}} {{.Image}}' "$name")
+  [[ $running == "true $image_id" ]] || { echo 'Çalışan imaj doğrulanamadı.' >&2; exit 1; }
+  status=$(curl --max-time 5 -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18090/)
+  case "$status" in
+    200|302) printf 'Çalışan commit %s, yerel HTTP %s\n' "$revision" "$status" ;;
+    *) echo "Beklenmeyen HTTP yanıtı: $status" >&2; exit 1 ;;
+  esac
+)
 ```
 
-Temizlik son geri dönüş container’ını saklar. Daha eski durmuş kurulum yedeklerinden etiketsiz platform imajına bağlı olanları kaldırır. Ardından hiçbir container’ın kullanmadığı, etiketsiz platform imajlarını siler ve volume’ları korur.
+### 8. Geçiş sonucunu ve geri dönüş durumunu okuyun
 
-Canlı container 2. adımdaki `docker run` komutuyla yönetiliyorsa önce imajı çekin. Mevcut container’ı durdurup geri dönüş için farklı bir ada alın, ardından canlı komutu mevcut bağlantılarla yeniden çalıştırın.
+1. Betik mevcut ortam ayarlarını ve disk bağlantılarını devralır. Adayın imajını ve bağlantılarını kontrol ettikten sonra eski container’ı durdurur. Bu sırada kısa bir kesinti olur.
+2. Yeni container başlayınca betik yerel HTTP yanıtını, Bubblewrap’in çalışmasını ve geçici çalışma alanına yazmayı sınar. Sandbox’ın Codex yapılandırmasını, deneme amaçlı gizli dosyayı ve yapılandırılmış Vault anahtarını okuyamadığını kontrol eder. Geçiş başarılıysa önceki container, `codex-agent-platform-before-sandbox-<UTC zaman damgası>` adıyla durdurulmuş halde saklanır.
+3. Betiğin geçiş aşaması hata verirse aday container kaldırılmaya çalışılır. Eski container’ın adı geri alınır ve yeniden başlatılması denenir. Başlatma başarısızsa betik eski container kimliğini bildirir. Bu geri dönüş ortak volume’lardaki veri değişikliklerini geri sarmaz.
+4. Seçilen imaj zaten çalışıyorsa ve Vault yapılandırması gerekmiyorsa betik erken çıkar. Bu durumda sandbox testleri yeniden çalışmaz. Yukarıdaki son imaj ve HTTP kontrolleri yine çalışır. Bu dış kontrollerdeki hata otomatik geri dönüş başlatmaz.
+
+İsteğe bağlı olarak eski imajları temizlemek için çalışan kurulumda `bash deploy/docker-sandbox/enable.sh --cleanup-old-images` kullanabilirsiniz. Betik en son geri dönüş container’ını korur. Daha eski, durmuş ve etiketsiz platform imajına bağlı yedek container’ları, ardından kullanılmayan etiketsiz platform imajlarını temizler.
 
 ## Kalıcı veriler
 
@@ -156,40 +181,7 @@ Canlı container 2. adımdaki `docker run` komutuyla yönetiliyorsa önce imajı
 
 ## Private Git ve SSH kaynakları
 
-Uygulama Git erişim belirteçlerini ve SSH özel anahtarlarını şifreleyerek `/data/credentials` altında saklar. Sandbox betiğiyle yönetilen canlı container’da Vault’u Docker hostunda bir kez etkinleştirin.
-
-```bash
-sudo bash deploy/docker-sandbox/enable.sh --enable-vault
-```
-
-Betik anahtarı ayrı bir Docker volume’unda hazırlar ve uygulamaya salt okunur olarak bağlar. Uygulamanın anahtarı okuyabildiğini ve ajanların terminalinin anahtara erişemediğini kontrol eder. **Vault etkinleştirildi** mesajından sonra **Kaynaklar** ekranından erişim bilgilerini ekleyebilirsiniz.
-
-Canlı container’ı doğrudan `docker run` ile yönetiyorsanız anahtar volume’unu Docker hostunda aşağıdaki komutla hazırlayın.
-
-```bash
-platform_image=$(docker inspect -f '{{.Image}}' codex-agent-platform)
-
-docker run --rm --user 0:0 --entrypoint /bin/sh \
-  -v codexagentplatform_vault-key:/vault "$platform_image" -ec '
-    if [ ! -e /vault/master.key ]; then
-      umask 077
-      set -C
-      node -e "process.stdout.write(require(\"node:crypto\").randomBytes(32).toString(\"base64\") + \"\\n\")" >/vault/master.key
-    fi
-    test -s /vault/master.key
-    chown app:app /vault/master.key
-    chmod 0400 /vault/master.key
-  '
-```
-
-Mevcut container’ı durdurup geri dönüş için farklı bir ada alın. 2. adımdaki canlı `docker run` komutuna aşağıdaki seçenekleri ekleyin. Önceden Vault kullandıysanız mevcut anahtar dosyasını bağlamaya devam edin.
-
-```bash
-  --mount type=volume,src=codexagentplatform_vault-key,dst=/run/platform-vault,readonly \
-  -e Platform__VaultKeyFile=/run/platform-vault/master.key \
-```
-
-Sonraki imaj güncellemelerinde aynı volume’u ve anahtar yolunu kullanın. Veri yedeğini geri yüklerken Vault kayıtlarını açmak için aynı anahtar gerekir.
+Uygulama Git erişim belirteçlerini ve SSH özel anahtarlarını şifreleyerek `/data/credentials` altında saklar. 5. adımda oluşturulan `codexagentplatform_vault-key` volume’u `/run/platform-vault` altında salt okunur bağlanır. Uygulama `Platform__VaultKeyFile=/run/platform-vault/master.key` yolunu kullanır. Güncelleme sırasında mevcut anahtarı koruyun. Yalnızca SQLite yedeği, şifrelenmiş erişim bilgilerini açmaya yetmez.
 
 - **Kaynaklar → Kaynak ekle** ekranında **Projeye özel** veya **Global** kapsamını seçin. Global kaynaklar proje seçmeden eklenebilir ve kaynak listesinde yıldızla görünür.
 - **GitRepository** eklerken HTTPS depo adresini girin. Özel depo için **Özel depo** seçeneğini işaretleyip erişim belirtecini (PAT) girin. GitHub’da belirteci ilgili depoyla sınırlayın. Klonlama ve pull için okuma, push için yazma yetkisi gerekir. [GitHub erişim belirteçleri](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)

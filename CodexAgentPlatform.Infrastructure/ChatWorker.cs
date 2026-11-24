@@ -12,7 +12,7 @@ namespace CodexAgentPlatform.Infrastructure;
 
 public sealed class ChatWorker(IDbContextFactory<PlatformDb> dbs, ICodexConnection codex, AgentTools tools,
     ContextBudget context, PlatformPaths paths, Operations operations, ChatUpdates updates, ILogger<ChatWorker> log,
-    int concurrency = 2) : BackgroundService
+    int concurrency = 2, ILicenseAccess? license = null) : BackgroundService
 {
     private sealed class Running(ChatRun run, CancellationTokenSource cancel)
     {
@@ -65,7 +65,7 @@ public sealed class ChatWorker(IDbContextFactory<PlatformDb> dbs, ICodexConnecti
                 }
                 try
                 {
-                    while (processing.Count < Math.Clamp(concurrency, 1, 4) && await ClaimAsync(stoppingToken) is { } run)
+                    while (license?.IsValid != false && processing.Count < Math.Clamp(concurrency, 1, 4) && await ClaimAsync(stoppingToken) is { } run)
                     {
                         var running = new Running(run, CancellationTokenSource.CreateLinkedTokenSource(stoppingToken));
                         running.Cancel.CancelAfter(TimeSpan.FromMinutes(25));
@@ -97,7 +97,7 @@ public sealed class ChatWorker(IDbContextFactory<PlatformDb> dbs, ICodexConnecti
             {
                 try
                 {
-                    if (await operations.ExecuteNextAsync(ct))
+                    if (license?.IsValid != false && await operations.ExecuteNextAsync(ct))
                     {
                         updates.Publish("");
                         continue;

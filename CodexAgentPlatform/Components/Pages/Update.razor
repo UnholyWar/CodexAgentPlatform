@@ -1,0 +1,17 @@
+@page "/update"
+@attribute [Authorize]
+@inject ReleaseCatalog Releases
+
+<PageTitle>Sürüm güncellemesi</PageTitle>
+<section class="admin-page">
+    <h1>Sürüm güncellemesi</h1>
+    @if (Releases.Available is { } version)
+    {
+        <p>@version sürümünü kurmak için yönetici olarak Docker sunucusunda aşağıdaki Bash komutlarını çalıştırın. Önce veri, çalışma alanı ve özgün Vault anahtarının yedeklerini kontrol edin.</p>
+        <pre>@Instructions(version)</pre>
+    }
+    else
+    {
+        <p>Doğrulanmış bir güncelleme bulunmuyor.</p>
+    }
+</section>

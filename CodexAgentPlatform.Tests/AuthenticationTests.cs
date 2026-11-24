@@ -15,6 +15,14 @@ namespace CodexAgentPlatform.Tests;
 
 public sealed partial class AuthenticationTests
 {
+    private sealed class LicensedFixture : CodexAgentPlatform.Application.ILicenseAccess
+    {
+        public bool IsValid { get; set; }
+        public string Code { get; } = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32))
+            .TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        public Task<bool> ActivateAsync(string code, CancellationToken ct) => Task.FromResult(IsValid = code == Code);
+    }
+
     [Fact]
     public async Task HttpsSetupUsesCsrfAndOneTimeCodeThenProtectsChatAndSupportsLogout()
     {
@@ -23,12 +31,14 @@ public sealed partial class AuthenticationTests
         var request = new CertificateRequest("CN=localhost", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
         using var generated = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
         using var cert = X509CertificateLoader.LoadPkcs12(generated.Export(X509ContentType.Pkcs12), null);
+        var license = new LicensedFixture();
         await using var app = PlatformHost.Build(new WebApplicationOptions
         {
             ApplicationName = typeof(Program).Assembly.GetName().Name, EnvironmentName = "Development",
             ContentRootPath = AppContext.BaseDirectory
         }, builder =>
         {
+            builder.Services.AddSingleton<CodexAgentPlatform.Application.ILicenseAccess>(license);
             builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["Platform:Data"] = fixture.Paths.Data,
@@ -51,6 +61,19 @@ public sealed partial class AuthenticationTests
         }) { BaseAddress = new Uri(address) };
         client.DefaultRequestHeaders.AcceptLanguage.ParseAdd("tr-TR");
 
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/healthz", ct)).StatusCode);
+        Assert.Equal("/license", (await client.GetAsync("/", ct)).Headers.Location?.OriginalString);
+        foreach (var route in new[] { "/login", "/setup", "/memory", "/artifacts/test.txt" })
+            Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync(route, ct)).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.PostAsync("/_blazor/negotiate", null, ct)).StatusCode);
+        Assert.Contains("Kurulum kodu", await client.GetStringAsync("/license", ct));
+        var bootstrap = await File.ReadAllTextAsync(fixture.Paths.BootstrapFile, ct);
+        using var activated = await client.PostAsync("/license", new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            ["bootstrap"] = bootstrap.Trim(), ["code"] = license.Code,
+            ["__RequestVerificationToken"] = await CsrfAsync(client, "/license", ct)
+        }), ct);
+        Assert.Equal("/setup", activated.Headers.Location?.OriginalString);
         var setupPage = await client.GetStringAsync("/setup", ct);
         Assert.Contains("<html lang=\"en\">", setupPage);
         Assert.Contains("Create administrator account", setupPage);
@@ -96,6 +119,21 @@ public sealed partial class AuthenticationTests
         using (var denied = await client.GetAsync("/", ct))
             Assert.Equal(HttpStatusCode.Redirect, denied.StatusCode);
 
+        license.IsValid = false;
+        var activation = await client.GetStringAsync("/license", ct);
+        Assert.Contains("Yönetici parolası", activation);
+        Assert.DoesNotContain("Kurulum kodu", activation);
+        var activationForm = new Dictionary<string, string>
+        {
+            ["username"] = "operator", ["password"] = "incorrect", ["code"] = license.Code,
+            ["__RequestVerificationToken"] = Token(activation)
+        };
+        using var refused = await client.PostAsync("/license", new FormUrlEncodedContent(activationForm), ct);
+        Assert.Equal("/license?error=1", refused.Headers.Location?.OriginalString);
+        Assert.False(license.IsValid);
+        activationForm["password"] = password;
+        using var reactivated = await client.PostAsync("/license", new FormUrlEncodedContent(activationForm), ct);
+        Assert.Equal("/login", reactivated.Headers.Location?.OriginalString);
         form["__RequestVerificationToken"] = await CsrfAsync(client, "/login", ct);
         form["username"] = "admin";
         form["password"] = "admin";

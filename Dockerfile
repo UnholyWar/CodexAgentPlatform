@@ -30,5 +30,7 @@ ENV Platform__Data=/data \
     Platform__Workspaces=/workspaces \
     Platform__CodexExecutable=/usr/local/bin/codex
 EXPOSE 8443
+ARG PLATFORM_VERSION=development
+RUN printf '%s\n' "$PLATFORM_VERSION" > /app/platform-version
 USER app
 ENTRYPOINT ["dotnet", "CodexAgentPlatform.dll"]

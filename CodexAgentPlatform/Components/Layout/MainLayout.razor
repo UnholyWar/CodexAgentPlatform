@@ -1,4 +1,6 @@
 @inherits LayoutComponentBase
+@implements IDisposable
+@inject ReleaseCatalog Releases
 
 <AuthorizeView>
     <Authorized Context="session">
@@ -30,6 +32,10 @@
 </div>
 
 @code {
+    protected override void OnInitialized() => Releases.Changed += Refresh;
+    private void Refresh() => _ = InvokeAsync(StateHasChanged);
+    public void Dispose() => Releases.Changed -= Refresh;
+
     private RenderFragment Brand => @<a class="brand" href="/"><BrandMark /><span>Codex <small>Agent Platform</small></span></a>;
 
     private RenderFragment NavigationLinks => @<nav aria-label="Workspace">
@@ -46,6 +52,10 @@
         @Link("/approvals", "approve", "Approvals")
         @Link("/codex", "terminal", "Codex settings")
         @Link("/system", "settings", "System settings")
+        @if (Releases.Available is { } version)
+        {
+            @Link("/update", "settings", $"Yeni sürüm var · {version}")
+        }
     </nav>;
 
     private RenderFragment Link(string href, string icon, string label) =>

@@ -1,4 +1,5 @@
 using System.Threading.RateLimiting;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using CodexAgentPlatform.Application;
 using CodexAgentPlatform.Auth;
 using CodexAgentPlatform.Components;
@@ -23,6 +24,13 @@ public static class PlatformHost
         var secureCookies = !builder.Environment.IsDevelopment() || !config.GetValue<bool>("Platform:AllowLocalHttp");
         var cookiePolicy = secureCookies ? CookieSecurePolicy.Always : CookieSecurePolicy.SameAsRequest;
 
+        builder.Services.AddHttpClient("ghcr", client => client.MaxResponseContentBufferSize = 262144)
+            .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false, UseCookies = false });
+        builder.Services.AddSingleton<ReleaseCatalog>();
+        builder.Services.AddSingleton<LicenseService>();
+        builder.Services.TryAddSingleton<ILicenseAccess>(sp => sp.GetRequiredService<LicenseService>());
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<LicenseService>());
+        builder.Services.AddScoped<Microsoft.AspNetCore.Components.Server.Circuits.CircuitHandler, LicenseCircuit>();
         builder.Services.AddSingleton(paths);
         builder.Services.AddDbContextFactory<PlatformDb>(options => options.UseSqlite(paths.ConnectionString));
         builder.Services.AddSingleton<StorageStartup>();
@@ -85,7 +93,7 @@ public static class PlatformHost
         {
             options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
             options.AddPolicy("auth", ctx => RateLimitPartition.GetFixedWindowLimiter(
-                ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                (ctx.Request.Path == "/license" ? "license:" : "auth:") + (ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown"),
                 _ => new FixedWindowRateLimiterOptions { PermitLimit = 8, Window = TimeSpan.FromMinutes(2), QueueLimit = 0 }));
         });
         builder.Services.AddScoped<ConversationListState>();
@@ -99,6 +107,7 @@ public static class PlatformHost
             app.UseExceptionHandler("/Error", createScopeForErrors: true);
             app.UseHsts();
         }
+        app.UseLicenseGate();
         if (secureCookies) app.UseHttpsRedirection();
         app.Use(async (ctx, next) =>
         {
