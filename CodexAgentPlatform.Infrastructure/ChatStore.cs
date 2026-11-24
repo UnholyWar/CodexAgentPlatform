@@ -257,6 +257,18 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
         updates.Publish(id);
     }
 
+    public async Task<string> FinishConversationAsync(string id, string ownerId, CancellationToken ct)
+    {
+        if (ownerId != PlatformUser.OwnerId) throw new UnauthorizedAccessException();
+        await using var db = await dbs.CreateDbContextAsync(ct);
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        var result = await ConversationFinish.ApplyAsync(db, id, null, ct);
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+        updates.Publish(id);
+        return result;
+    }
+
     public async Task<string?> DeleteConversationAsync(string id, PlatformPaths paths, CancellationToken ct)
     {
         await using var db = await dbs.CreateDbContextAsync(ct);
@@ -270,7 +282,7 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
         var work = db.Work.Where(w => w.ConversationId == id);
         if (await runs.AnyAsync(r => Enumerable.Contains(Active, r.Status), ct) ||
             await work.AnyAsync(w => Enumerable.Contains(Active, w.Status), ct))
-            return "This conversation has an active task or response. Finish or stop it before deleting.";
+            return "This conversation has an active task or response. Choose Finish conversation in its actions menu before deleting.";
 
         var photos = await db.MessagePhotos.Where(p => db.Messages.Any(m => m.Id == p.MessageId && m.ConversationId == id))
             .Select(p => new { p.Id, p.Name, p.ContentType }).ToListAsync(ct);

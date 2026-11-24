@@ -1,6 +1,7 @@
 @page "/conversations"
 @attribute [Authorize]
 @inject ChatStore Chats
+@inject AuthenticationStateProvider Authentication
 @inject PlatformPaths Paths
 
 <PageTitle>Conversations · Codex Agent Platform</PageTitle>
@@ -12,6 +13,7 @@
         <label><input type="checkbox" @bind="archived" @bind:after="SearchAsync" disabled="@busy" /> Archived conversations</label>
     </form>
     @if (error is not null) { <p class="notice error" role="alert">@error</p> }
+    @if (result is not null) { <p role="status">@result</p> }
     <div class="list">
         @foreach (var chat in rows)
         {
@@ -25,7 +27,16 @@
                 {
                     <div class="conversation-actions">
                         <button class="button" disabled="@busy" @onclick="() => ArchiveAsync(chat)">@(chat.Archived ? "Restore" : "Archive")</button>
+                        <button class="button" disabled="@busy" @onclick="() => AskFinish(chat.Id)">Finish conversation</button>
                         <button class="button" disabled="@busy" @onclick="() => AskDelete(chat.Id)">Delete</button>
+                    </div>
+                }
+                @if (finish == chat.Id)
+                {
+                    <div class="conversation-actions" role="group" aria-label="Confirm finish">
+                        <p>Finish “@chat.Title” and cancel its open tasks, queued responses and pending approvals? Your chat history will be kept.</p>
+                        <button class="button" disabled="@busy" @onclick="Cancel">Cancel</button>
+                        <button class="button" disabled="@busy" @onclick="() => FinishAsync(chat)">Finish conversation</button>
                     </div>
                 }
                 @if (confirm == chat.Id)
@@ -44,7 +55,7 @@
 
 @code {
     private List<Conversation> rows = [];
-    private string? query, menu, confirm, error;
+    private string? query, menu, confirm, finish, result, error;
     private bool archived, busy;
     private int revision;
 
@@ -58,8 +69,26 @@
         if (request == revision) rows = found;
     }
 
-    private void Cancel() { menu = confirm = error = null; }
-    private void ToggleMenu(string id) { confirm = error = null; menu = menu == id ? null : id; }
+    private void Cancel() { menu = confirm = finish = result = error = null; }
+    private void ToggleMenu(string id) { confirm = finish = result = error = null; menu = menu == id ? null : id; }
+    private void AskFinish(string id) { Cancel(); finish = id; }
+
+    private async Task FinishAsync(Conversation chat)
+    {
+        if (busy || finish != chat.Id) return;
+        busy = true;
+        try
+        {
+            var user = (await Authentication.GetAuthenticationStateAsync()).User;
+            var ownerId = user.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? "";
+            var summary = await Chats.FinishConversationAsync(chat.Id, ownerId, default);
+            Cancel();
+            result = $"Finished “{chat.Title}”. {summary}";
+        }
+        catch (InvalidOperationException ex) { error = ex.Message; }
+        finally { busy = false; }
+    }
+
     private void AskDelete(string id) { menu = error = null; confirm = id; }
 
     private async Task ArchiveAsync(Conversation chat)

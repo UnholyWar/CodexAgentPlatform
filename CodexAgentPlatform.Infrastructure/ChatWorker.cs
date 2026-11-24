@@ -267,7 +267,7 @@ public sealed class ChatWorker(IDbContextFactory<PlatformDb> dbs, ICodexConnecti
                             answer = new { error = ex is InvalidOperationException or ArgumentException or UnauthorizedAccessException
                                 ? TextLimits.Clip(ex.Message, 500) : "The tool operation failed." };
                         }
-                        if (answer is ApprovalReply requested && tool != AgentTools.GrantToolName)
+                        if (answer is ApprovalReply requested && tool != AgentTools.GrantToolName && tool != "conversation_request_finish")
                             await ApprovalContinuations.AttachAsync(db, requested.Id, run, ct);
                         var serialized = ToolOutput.Serialize(answer);
                         toolCharacters += serialized.Length;

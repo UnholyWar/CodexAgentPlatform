@@ -26,6 +26,7 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
         new("memory_archive", "memory", "Archive one of your old notes.", ["id"], []),
         new("memory_consolidate", "memory", "Replace one note with a consolidated note and archive the duplicate.", ["id", "mergeId", "title", "summary", "markdown"], ["tags", "verification", "sources"]),
         new("memory_timeline", "memory", "Find time-stamped work events. Use a date phrase in Turkish/English or from/until dates (ISO YYYY-MM-DD, end exclusive).", [], ["projectId", "when", "from", "until"]),
+        new("conversation_request_finish", "memory", "On the owner's explicit request, ask for confirmation to finish this conversation or an authorized conversation by ID. Keeps its history and cancels outstanding work.", [], ["id"]),
         new("conversation_search", "memory", "Find past messages by keyword. Set scope to all to search your older authorized conversations. Filter dates with when, or from and until.", ["query"], ["scope", "when", "from", "until"]),
         new("task_begin", "", "Open or resume a durable work item. Set mode to new for a separate request, or resume for prior work.", ["title", "description"], ["mode"]),
         new("task_get_current", "", "Read structured context about the current work.", [], []),
@@ -178,6 +179,8 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
                 var timeline = await memory.TimelineAsync(await RangeAsync(db, args, ct), project, null, ct);
                 return timeline.Where(x => ToolAccess.AllowsProject(agent, x.ProjectId)).Take(15).Select(x =>
                     new { x.Kind, Detail = TextLimits.Clip(x.Detail, 350), x.WorkId, x.ProjectId, x.EventOccurredAtUtc }).ToArray();
+            case "conversation_request_finish":
+                return await ConversationFinish.RequestAsync(db, run, id ?? run.ConversationId, ct);
             case "conversation_search":
                 var query = MemoryStore.SearchExpression(args.String("query")!);
                 if (query is null) return Array.Empty<object>();
@@ -193,7 +196,7 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
                 if (await RangeAsync(db, args, ct) is { } interval)
                     matches = matches.Where(x => x.CreatedAtUtc >= interval.FromUtc && x.CreatedAtUtc < interval.UntilUtc);
                 return (await matches.OrderByDescending(m => m.Id).Take(8).ToListAsync(ct))
-                    .Select(x => new { x.Role, Text = TextLimits.Clip(x.Text, 600), x.CreatedAtUtc }).ToArray();
+                    .Select(x => new { x.ConversationId, x.Role, Text = TextLimits.Clip(x.Text, 600), x.CreatedAtUtc }).ToArray();
             case "resource_search":
             case "resource_get":
                 List<Resource> visible;

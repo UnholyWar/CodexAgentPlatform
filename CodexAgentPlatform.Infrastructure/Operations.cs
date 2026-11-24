@@ -211,7 +211,15 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         var now = DateTime.UtcNow;
         var approval = await db.Approvals.SingleOrDefaultAsync(x => x.Id == id && x.Status == "Pending" && x.ExpiresAtUtc > now, ct)
             ?? throw new InvalidOperationException("The approval has expired or a decision has already been made.");
-        if (approval.Kind == AgentPermissionGrants.ApprovalKind)
+        if (approval.Kind == ConversationFinish.Kind)
+        {
+            approval.Result = allow ? await ConversationFinish.ApplyAsync(db, approval.Payload, approval.Id, ct)
+                : "Conversation finish request declined.";
+            approval.DecidedBy = ownerId;
+            approval.Status = allow ? "Completed" : "Declined";
+            await db.SaveChangesAsync(ct);
+        }
+        else if (approval.Kind == AgentPermissionGrants.ApprovalKind)
             await AgentPermissionGrants.DecideAsync(db, approval, allow, ownerId, ct);
         else
         {
