@@ -64,6 +64,9 @@
     private RenderFragment Account(string? name) => @<div class="rail-footer">
         <span class="avatar avatar-small" aria-hidden="true">@(string.IsNullOrWhiteSpace(name) ? "A" : name[..1].ToUpperInvariant())</span>
         <span class="owner-name">@name</span>
+        <a class="installed-version" href="/update" aria-label="Installed version and updates">
+            @(Releases.Current ?? "Version")
+        </a>
         <form action="/session/logout" method="post">
             <AntiforgeryToken />
             <button type="submit" class="icon-button" title="Sign out" aria-label="Sign out"><Icon Name="logout" /></button>

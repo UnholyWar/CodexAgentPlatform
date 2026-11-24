@@ -98,6 +98,7 @@ summary { cursor: pointer; }
     box-shadow: 0 0 5px color-mix(in srgb, var(--signal) 40%, transparent); }
 .rail-footer { border-top: 1px solid var(--line); padding: .85rem .35rem 0; display: flex; align-items: center; gap: .6rem; }
 .owner-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; font-size: .86rem; }
+.installed-version { flex-shrink: 0; font-size: .78rem; font-variant-numeric: tabular-nums; }
 .mobile-header, .mobile-menu { display: none; }
 .main-pane { min-width: 0; }
 .chat-shell { display: flex; flex-direction: column; height: 100dvh; }

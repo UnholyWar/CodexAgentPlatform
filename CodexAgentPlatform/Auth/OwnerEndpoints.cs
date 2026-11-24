@@ -61,7 +61,7 @@ public static class OwnerEndpoints
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
         await signIn.SignInAsync(user, isPersistent: false);
-        context.RequestServices.GetRequiredService<ReleaseCatalog>().CheckAfterLogin();
+        context.RequestServices.GetRequiredService<ReleaseCatalog>().CheckForUpdates();
         return Results.Redirect("/");
     }
 
@@ -76,7 +76,7 @@ public static class OwnerEndpoints
         if (userName.Length <= 64 && password.Length <= 128 &&
             (await signIn.PasswordSignInAsync(userName, password, isPersistent: false, lockoutOnFailure: false)).Succeeded)
         {
-            context.RequestServices.GetRequiredService<ReleaseCatalog>().CheckAfterLogin();
+            context.RequestServices.GetRequiredService<ReleaseCatalog>().CheckForUpdates();
             return Results.Redirect("/");
         }
         return Results.Redirect("/login?error=invalid");

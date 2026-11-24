@@ -1,17 +1,37 @@
 @page "/update"
 @attribute [Authorize]
 @inject ReleaseCatalog Releases
+@implements IDisposable
 
 <PageTitle>Sürüm güncellemesi</PageTitle>
 <section class="admin-page">
     <h1>Sürüm güncellemesi</h1>
+    <p>Kurulu sürüm <strong>@(Releases.Current ?? "Bilinmiyor")</strong></p>
+    <button type="button" class="button" @onclick="Releases.CheckForUpdates"
+            disabled="@(Releases.Current is null || Releases.Status == ReleaseCheckStatus.Checking)">
+        Güncellemeleri kontrol et
+    </button>
+    <p role="status">@StatusMessage</p>
     @if (Releases.Available is { } version)
     {
         <p>@version sürümünü kurmak için yönetici olarak Docker sunucusunda aşağıdaki Bash komutlarını çalıştırın. Önce veri, çalışma alanı ve özgün Vault anahtarının yedeklerini kontrol edin.</p>
         <pre>@Instructions(version)</pre>
     }
-    else
-    {
-        <p>Doğrulanmış bir güncelleme bulunmuyor.</p>
-    }
 </section>
+
+@code {
+    protected override void OnInitialized() => Releases.Changed += Refresh;
+    private void Refresh() => _ = InvokeAsync(StateHasChanged);
+    public void Dispose() => Releases.Changed -= Refresh;
+
+    private string? StatusMessage => Releases.Status switch
+    {
+        ReleaseCheckStatus.Checking => "Sürüm bilgisi kontrol ediliyor.",
+        ReleaseCheckStatus.NoRelease => "Sürüm servisinde henüz bir yayın kaydı yok.",
+        ReleaseCheckStatus.AccessDenied => "Sürüm servisi sorguya erişim izni vermedi.",
+        ReleaseCheckStatus.Unavailable when Releases.Current is null => "İmajın sürüm bilgisi okunamadı.",
+        ReleaseCheckStatus.Unavailable => "Sürüm servisi sorgulanamadı. Tekrar deneyebilirsin.",
+        ReleaseCheckStatus.Completed when Releases.Available is null => "Kurulu sürüm güncel.",
+        _ => null
+    };
+}

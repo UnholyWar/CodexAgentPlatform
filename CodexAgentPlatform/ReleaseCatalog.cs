@@ -1,18 +1,23 @@
-using System.Net.Http.Headers;
+using System.Net;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
 namespace CodexAgentPlatform;
 
+public enum ReleaseCheckStatus { NotChecked, Checking, Completed, NoRelease, AccessDenied, Unavailable }
+
 public sealed class ReleaseCatalog(IHttpClientFactory clients, ILogger<ReleaseCatalog> log)
 {
-    private const string Repository = "unholywar/codexagentplatform";
+    private const string LatestRelease = "https://lisansapi.onurozgultekin.com/v1/releases/latest";
     private int checking;
     private volatile string? available;
+    private volatile ReleaseCheckStatus status;
+    public string? Current { get; } = ReadCurrentVersion();
     public string? Available => available;
+    public ReleaseCheckStatus Status => status;
     public event Action? Changed;
 
-    public void CheckAfterLogin()
+    public void CheckForUpdates()
     {
         if (Interlocked.Exchange(ref checking, 1) == 0) _ = CheckAsync();
     }
@@ -21,39 +26,57 @@ public sealed class ReleaseCatalog(IHttpClientFactory clients, ILogger<ReleaseCa
         Regex.IsMatch(tag, @"\Av(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\z") &&
         Version.TryParse(tag[1..], out var version) ? version : null;
 
+    private static string? ReadCurrentVersion()
+    {
+        try
+        {
+            var tag = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "platform-version")).Trim();
+            return StableVersion(tag) is null ? null : tag;
+        }
+        catch (IOException) { return null; }
+        catch (UnauthorizedAccessException) { return null; }
+    }
+
     private async Task CheckAsync()
     {
         try
         {
-            var path = Path.Combine(AppContext.BaseDirectory, "platform-version");
-            if (!File.Exists(path) || StableVersion(File.ReadAllText(path).Trim()) is not { } current) return;
-            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(4));
-            using var http = clients.CreateClient("ghcr");
-            using var auth = JsonDocument.Parse(await http.GetByteArrayAsync(
-                $"https://ghcr.io/token?service=ghcr.io&scope=repository:{Repository}:pull", deadline.Token));
-            http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer",
-                auth.RootElement.GetProperty("token").GetString());
-            var newest = current;
-            string? last = null;
-            while (true)
+            status = ReleaseCheckStatus.Checking;
+            Changed?.Invoke();
+            if (Current is null || StableVersion(Current) is not { } current)
             {
-                var url = $"https://ghcr.io/v2/{Repository}/tags/list?n=100";
-                if (last is not null) url += "&last=" + Uri.EscapeDataString(last);
-                using var response = await http.GetAsync(url, deadline.Token);
-                response.EnsureSuccessStatusCode();
-                using var document = JsonDocument.Parse(await response.Content.ReadAsByteArrayAsync(deadline.Token));
-                var tags = document.RootElement.GetProperty("tags").EnumerateArray().ToArray();
-                foreach (var tag in tags)
-                    if (StableVersion(tag.GetString() ?? "") is { } stable && stable > newest) newest = stable;
-                if (!response.Headers.Contains("Link") || tags.Length == 0) break;
-                var next = tags[^1].GetString();
-                if (string.IsNullOrEmpty(next) || next == last) return;
-                last = next;
+                status = ReleaseCheckStatus.Unavailable;
+                return;
             }
-            available = newest > current ? $"v{newest}" : null;
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(4));
+            using var http = clients.CreateClient("release-catalog");
+            using var response = await http.GetAsync(LatestRelease, deadline.Token);
+            if (response.StatusCode == HttpStatusCode.NoContent)
+            {
+                available = null;
+                status = ReleaseCheckStatus.NoRelease;
+                return;
+            }
+            response.EnsureSuccessStatusCode();
+            using var document = JsonDocument.Parse(await response.Content.ReadAsByteArrayAsync(deadline.Token));
+            var tag = document.RootElement.GetProperty("version").GetString();
+            if (tag is null || StableVersion(tag) is not { } newest)
+                throw new InvalidDataException("The release service returned an invalid version.");
+            available = newest > current ? tag : null;
+            status = ReleaseCheckStatus.Completed;
+        }
+        catch (Exception ex)
+        {
+            var statusCode = (ex as HttpRequestException)?.StatusCode;
+            status = statusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden
+                ? ReleaseCheckStatus.AccessDenied : ReleaseCheckStatus.Unavailable;
+            log.LogWarning("Sürüm kontrolü tamamlanamadı ({Reason}, HTTP {StatusCode}).",
+                ex.GetType().Name, statusCode);
+        }
+        finally
+        {
+            Volatile.Write(ref checking, 0);
             Changed?.Invoke();
         }
-        catch (Exception ex) { log.LogDebug("Sürüm kontrolü tamamlanamadı ({Reason}).", ex.GetType().Name); }
-        finally { Volatile.Write(ref checking, 0); }
     }
 }

@@ -24,7 +24,7 @@ public static class PlatformHost
         var secureCookies = !builder.Environment.IsDevelopment() || !config.GetValue<bool>("Platform:AllowLocalHttp");
         var cookiePolicy = secureCookies ? CookieSecurePolicy.Always : CookieSecurePolicy.SameAsRequest;
 
-        builder.Services.AddHttpClient("ghcr", client => client.MaxResponseContentBufferSize = 262144)
+        builder.Services.AddHttpClient("release-catalog", client => client.MaxResponseContentBufferSize = 262144)
             .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false, UseCookies = false });
         builder.Services.AddSingleton<ReleaseCatalog>();
         builder.Services.AddSingleton<LicenseService>();

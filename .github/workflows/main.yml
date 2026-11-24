@@ -86,7 +86,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Check release reporting configuration
+        env:
+          RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}
+        run: |
+          if [[ ! "$RELEASE_PUBLISH_TOKEN" =~ ^[0-9a-f]{64}$ ]]; then
+            echo '::error::RELEASE_PUBLISH_TOKEN must be a 32-byte hex secret.'
+            exit 1
+          fi
+
       - name: Build and publish latest
+        id: image
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -100,3 +110,17 @@ jobs:
             org.opencontainers.image.version=${{ steps.release.outputs.version }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Report published release to the license API
+        env:
+          RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          jq -n --arg version "$RELEASE_VERSION" --arg digest "$RELEASE_DIGEST" \
+            --arg commit "$GITHUB_SHA" '{version: $version, digest: $digest, commit: $commit}' > "$RUNNER_TEMP/release.json"
+          curl --silent --show-error --fail --max-time 15 --retry 2 --retry-connrefused \
+              --header "Authorization: Bearer $RELEASE_PUBLISH_TOKEN" \
+              --header 'Content-Type: application/json' --data-binary "@$RUNNER_TEMP/release.json" \
+              https://lisansapi.onurozgultekin.com/v1/releases/publish
