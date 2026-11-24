@@ -25,7 +25,7 @@ public sealed class GitHubRepositoryTests
         db.Conversations.Add(chat);
         if (alreadyRegistered)
         {
-            db.Resources.Add(new Resource { Name = "Existing link", Kind = ResourceKind.GitRepository,
+            db.Resources.Add(new Resource { Name = "Existing link", WorkingBranch = "master", Kind = ResourceKind.GitRepository,
                 Address = "https://github.com/octocat/website", ProjectId = project.Id,
                 ConnectionSourceId = source.Id, CreatedByAgentId = agent.Id });
         }
@@ -108,7 +108,7 @@ public sealed class GitHubRepositoryTests
     }
 
     private static JsonElement Args(Resource source) => JsonSerializer.SerializeToElement(
-        new { sourceId = source.Id, owner = "octocat", name = "website", visibility = "private" });
+        new { workingBranch = "master", sourceId = source.Id, owner = "octocat", name = "website", visibility = "private" });
 
     private static async Task<(Agent Agent, Project Project, Resource Source, Vault Vault)> SetupAsync(TestStorage storage, PlatformDb db)
     {
@@ -117,7 +117,7 @@ public sealed class GitHubRepositoryTests
         var vault = new Vault(storage.Paths, key);
         var source = new Resource { IsGlobal = true, Name = "GitHub", Kind = ResourceKind.GitRepository,
             Address = "https://github.com/octocat", VaultId = await vault.StoreAsync(Token, default) };
-        var project = new Project { Name = "Website", DefaultBranch = "master" };
+        var project = new Project { Name = "Website" };
         var agent = await db.Agents.SingleAsync(a => a.Id == "architect");
         agent.AllowedTools = ToolAccess.GlobalResources;
         agent.AllowedProjects = project.Id;

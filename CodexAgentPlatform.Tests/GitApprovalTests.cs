@@ -20,7 +20,7 @@ public sealed class GitApprovalTests
         var worktree = Path.Combine(root, "project");
         var project = new Project { Name = "Fake project" };
         var repository = new Resource { ProjectId = project.Id, Name = "Test repository",
-            Kind = ResourceKind.GitRepository, Address = "https://example.invalid/repo.git", Production = true };
+            Kind = ResourceKind.GitRepository, WorkingBranch = "main", Address = "https://example.invalid/repo.git", Production = true };
         await using var db = fixture.CreateDbContext();
         var agent = await db.Agents.SingleAsync(x => x.Id == "developer");
         agent.AllowedProjects = project.Id;

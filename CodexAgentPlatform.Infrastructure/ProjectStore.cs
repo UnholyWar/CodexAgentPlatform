@@ -9,18 +9,14 @@ public static class ProjectStore
     public static void Normalize(Project project)
     {
         project.Name = project.Name.Trim();
-        project.DefaultBranch = project.DefaultBranch.Trim();
         if (project.Name.Length is 0 or > 80)
             throw new ArgumentException("Enter a project name between 1 and 80 characters.");
-        if (project.DefaultBranch.Length > 150 || !Operations.IsSupportedGitBranch(project.DefaultBranch))
-            throw new ArgumentException("Enter a valid default Git branch of up to 150 characters, such as main or release/v1.");
     }
 
-    public static async Task<Project> CreateAsync(PlatformDb db, string name, string? defaultBranch,
+    public static async Task<Project> CreateAsync(PlatformDb db, string name,
         ChatRun? creator, CancellationToken ct)
     {
         var project = new Project { Name = name };
-        if (defaultBranch is not null) project.DefaultBranch = defaultBranch;
         Normalize(project);
 
         await using var transaction = await db.Database.BeginTransactionAsync(ct);

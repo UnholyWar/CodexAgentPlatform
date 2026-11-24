@@ -42,6 +42,7 @@ public sealed class ChatUpdates
 public sealed record ChatSnapshot(List<Message> Messages, List<Activity> Events, ChatRun? Run, List<Approval> Approvals,
     bool AutoApprove = false, string? ProjectId = null, string? CoordinatorAgentId = null)
 {
+    public bool Exists { get; init; } = true;
     public ILookup<long, MessagePhotoPreview> Photos { get; init; } = Array.Empty<MessagePhotoPreview>().ToLookup(p => p.MessageId);
 }
 internal sealed record ProjectReference(string Id, string Name);
@@ -57,8 +58,11 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
     public async Task RecordPauseAsync(string id, string text, CancellationToken ct)
     {
         await using var db = await dbs.CreateDbContextAsync(ct);
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        if (!await db.Conversations.AnyAsync(c => c.Id == id, ct)) throw new InvalidOperationException("This conversation was deleted.");
         db.Messages.Add(new Message { ConversationId = id, Role = "user", Text = text });
         await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
         updates.Publish(id);
     }
 
@@ -227,7 +231,7 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
         return (chat.Id, null);
     }
 
-    public async Task<List<Conversation>> RecentAsync(string? query, CancellationToken ct)
+    public async Task<List<Conversation>> RecentAsync(string? query, CancellationToken ct, bool archived = false)
     {
         await using var db = await dbs.CreateDbContextAsync(ct);
         IQueryable<Conversation> chats = db.Conversations.AsNoTracking();
@@ -242,7 +246,79 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
                               WHERE MessageSearch MATCH {expression} AND m.ConversationId = c.Id)
                 """).AsNoTracking();
         }
-        return await chats.OrderByDescending(x => x.UpdatedAtUtc).Take(70).ToListAsync(ct);
+        return await chats.Where(c => c.Archived == archived).OrderByDescending(x => x.UpdatedAtUtc).Take(70).ToListAsync(ct);
+    }
+
+    public async Task SetArchivedAsync(string id, bool archived, CancellationToken ct)
+    {
+        await using var db = await dbs.CreateDbContextAsync(ct);
+        await db.Conversations.Where(c => c.Id == id)
+            .ExecuteUpdateAsync(set => set.SetProperty(c => c.Archived, archived), ct);
+        updates.Publish(id);
+    }
+
+    public async Task<string?> DeleteConversationAsync(string id, PlatformPaths paths, CancellationToken ct)
+    {
+        await using var db = await dbs.CreateDbContextAsync(ct);
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        var now = DateTime.UtcNow;
+        var approvals = db.Approvals.Where(a => a.ConversationId == id);
+        if (await approvals.AnyAsync(a => (a.Status == "Pending" && a.ExpiresAtUtc > now) ||
+                a.Status == "Approved" || a.Status == "Executing", ct))
+            return "This conversation has an outstanding approval. Resolve it before deleting.";
+        var runs = db.Runs.Where(r => r.ConversationId == id);
+        var work = db.Work.Where(w => w.ConversationId == id);
+        if (await runs.AnyAsync(r => Enumerable.Contains(Active, r.Status), ct) ||
+            await work.AnyAsync(w => Enumerable.Contains(Active, w.Status), ct))
+            return "This conversation has an active task or response. Finish or stop it before deleting.";
+
+        var photos = await db.MessagePhotos.Where(p => db.Messages.Any(m => m.Id == p.MessageId && m.ConversationId == id))
+            .Select(p => new { p.Id, p.Name, p.ContentType }).ToListAsync(ct);
+        var workspaces = await runs.Select(r => r.Workspace).Distinct().ToListAsync(ct);
+        var workIds = await work.Select(w => w.Id).ToListAsync(ct);
+        // Remove only platform-generated files. The database retains the originals until commit.
+        foreach (var workspace in workspaces.Where(w => Guid.TryParseExact(w, "N", out _)))
+        {
+            foreach (var photo in photos.Where(p => Guid.TryParseExact(p.Id, "N", out _)))
+            {
+                var folder = Path.Combine(paths.Workspaces, workspace!, "chat-images", photo.Id);
+                DeleteManagedFile(folder, ChatPhotos.StagedName(photo.Name, photo.ContentType));
+            }
+        }
+        foreach (var workId in workIds.Where(w => Guid.TryParseExact(w, "N", out _)))
+        {
+            var folder = Path.Combine(paths.Data, "tasks", workId);
+            DeleteManagedFile(folder, "work.json");
+            DeleteManagedFile(folder, "working.md");
+        }
+
+        var artifacts = await db.Events.Where(e => e.ConversationId == id && e.Artifact != null)
+            .Select(e => e.Artifact!).Distinct().ToListAsync(ct);
+        foreach (var artifact in artifacts)
+        {
+            if (artifact.EndsWith(".txt", StringComparison.Ordinal) && Guid.TryParseExact(artifact[..^4], "N", out _))
+                DeleteManagedFile(Path.Combine(paths.Data, "logs"), artifact);
+        }
+
+        await approvals.ExecuteDeleteAsync(ct);
+        await runs.ExecuteDeleteAsync(ct);
+        await work.ExecuteDeleteAsync(ct);
+        await db.Events.Where(e => e.ConversationId == id).ExecuteDeleteAsync(ct);
+        await db.Usage.Where(u => u.ConversationId == id).ExecuteDeleteAsync(ct);
+        await db.Threads.Where(t => t.ConversationId == id).ExecuteDeleteAsync(ct);
+        // The message foreign key removes photo bytes; the delete trigger updates full-text search.
+        await db.Messages.Where(m => m.ConversationId == id).ExecuteDeleteAsync(ct);
+        await db.Conversations.Where(c => c.Id == id).ExecuteDeleteAsync(ct);
+        await tx.CommitAsync(ct);
+        updates.Publish(id);
+        return null;
+    }
+
+    private static void DeleteManagedFile(string folder, string name)
+    {
+        if (!Directory.Exists(folder)) return;
+        PlatformPaths.CheckLinks(folder);
+        File.Delete(Path.Combine(folder, name));
     }
 
     internal async Task<Message> SaveVoiceUserAsync(string? conversationId, string? projectId, string text,
@@ -326,6 +402,8 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
         var command = ProjectRouting.VoiceControl(user.Text);
         if (!command.Identity && !command.TaskStatus && command.Target is null) return default;
         await using var db = await dbs.CreateDbContextAsync(ct);
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        if (!await db.Conversations.AnyAsync(c => c.Id == user.ConversationId, ct)) throw new InvalidOperationException("This conversation was deleted.");
         VoiceSpeaker? changed = null;
         string answer;
         if (command.Target is { } target)
@@ -357,6 +435,7 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
         var reply = new VoiceReply(changed ?? current, answer);
         AddVoiceReply(db, user, reply);
         await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
         updates.Publish(user.ConversationId);
         return (changed, reply);
     }
@@ -393,8 +472,11 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
     internal async Task RecordVoiceReplyAsync(Message user, VoiceReply reply, CancellationToken ct)
     {
         await using var db = await dbs.CreateDbContextAsync(ct);
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        if (!await db.Conversations.AnyAsync(c => c.Id == user.ConversationId, ct)) throw new InvalidOperationException("This conversation was deleted.");
         AddVoiceReply(db, user, reply);
         await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
         updates.Publish(user.ConversationId);
     }
 
@@ -449,6 +531,7 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
             .Select(p => new MessagePhotoPreview(p.Id, p.MessageId, p.Name)).ToListAsync(ct);
         return new(messages, events, run, approvals, chat?.AutoApprove == true, projectId, chat?.CoordinatorAgentId)
         {
+            Exists = chat is not null,
             Photos = photos.ToLookup(p => p.MessageId)
         };
     }

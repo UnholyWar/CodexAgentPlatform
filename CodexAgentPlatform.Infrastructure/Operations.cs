@@ -84,7 +84,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
             throw new ArgumentException("This Git operation does not support pagination.");
         var resource = await ResolveAsync(agent, resourceId, ResourceKind.GitRepository, "git", ct);
         var root = paths.Workspace(workspaceId);
-        var folder = CheckoutFolder(resource);
+        var folder = await ResolveCheckoutFolderAsync(resource, root, ct);
         var repo = Path.Combine(root, folder);
         if (operation == "prepare")
         {
@@ -93,8 +93,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
                 await VerifyRepoAsync(resource, repo, ct);
                 return new { path = folder, branch = (await RunGitAsync(repo, ["branch", "--show-current"], null, ct)).Trim() };
             }
-            await using var db = await dbs.CreateDbContextAsync(ct);
-            var branch = resource.IsGlobal ? null : await db.Projects.Where(x => x.Id == resource.ProjectId).Select(x => x.DefaultBranch).SingleAsync(ct);
+            var branch = resource.WorkingBranch;
             if (branch is not null) ValidateBranch(branch);
             var cacheRoot = Path.Combine(paths.Workspaces, ".git-cache");
             Directory.CreateDirectory(cacheRoot);
@@ -119,7 +118,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
             "status" => await RunGitAsync(repo, ["status", "--short", "--branch"], null, ct),
             "diff" => await RunGitAsync(repo, ["diff", "--no-ext-diff", "--no-textconv", "HEAD", "--"], null, ct),
             "fetch" => await RunGitAsync(repo, ["fetch", "--no-recurse-submodules", GitAddress(resource)], resource, ct),
-            "pull" => await RunGitAsync(repo, ["pull", "--ff-only", "--no-rebase", "--no-recurse-submodules", GitAddress(resource), SafeBranch(argument)], resource, ct),
+            "pull" => await RunGitAsync(repo, ["pull", "--ff-only", "--no-rebase", "--no-recurse-submodules", GitAddress(resource), argument is null ? resource.WorkingBranch ?? "HEAD" : SafeBranch(argument)], resource, ct),
             "branch" => await RunGitAsync(repo, ["switch", "-c", SafeBranch(argument)], null, ct),
             "commit" => await CommitAsync(repo, argument, ct),
             _ => throw new InvalidOperationException("Unknown Git operation.")
@@ -141,7 +140,8 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         if (kind == "GitPush")
         {
             resource = await ResolveAsync(agent, resourceId, ResourceKind.GitRepository, "git", ct);
-            var repo = Path.Combine(paths.Workspace(workspaceId!), CheckoutFolder(resource));
+            var root = paths.Workspace(workspaceId!);
+            var repo = Path.Combine(root, await ResolveCheckoutFolderAsync(resource, root, ct));
             await VerifyRepoAsync(resource, repo, ct);
             var local = SafeBranch((await RunGitAsync(repo, ["branch", "--show-current"], null, ct)).Trim());
             var commit = (await RunGitAsync(repo, ["rev-parse", "--verify", "HEAD^{commit}"], null, ct)).Trim();
@@ -180,7 +180,7 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         {
             if (kind == "GitPush")
                 approval.AutoEligible = target.Operation == $"agent/{workspaceId}" && target.Branch == target.Operation &&
-                    !await db.Projects.AnyAsync(p => p.Id == resource.ProjectId && p.DefaultBranch == target.Branch, ct);
+                    await IsDevelopmentDestinationAsync(resource, target.Branch, ct);
             else if (operation is "restart-docker" or "deploy")
             {
                 var approvedScopes = await db.Approvals.Where(a => a.ConversationId == conversationId && a.AgentId == agent.Id &&
@@ -278,11 +278,11 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         if (approval.Kind == "GitPush")
         {
             var resource = await ResolveAsync(agent, target.ResourceId, ResourceKind.GitRepository, "git", ct);
-            if (approval.DecidedBy == AutomaticDecision && await db.Projects.AnyAsync(p =>
-                p.Id == resource.ProjectId && p.DefaultBranch == target.Branch, ct))
+            if (approval.DecidedBy == AutomaticDecision && !await IsDevelopmentDestinationAsync(resource, target.Branch, ct))
                 throw new InvalidOperationException("The default branch requires administrator approval.");
             if (Binding(resource) != target.ResourceBinding) throw new InvalidOperationException("The resource changed after approval.");
-            var repo = Path.Combine(paths.Workspace(target.WorkspaceId!), CheckoutFolder(resource));
+            var root = paths.Workspace(target.WorkspaceId!);
+            var repo = Path.Combine(root, await ResolveCheckoutFolderAsync(resource, root, ct));
             await VerifyRepoAsync(resource, repo, ct);
             var head = (await RunGitAsync(repo, ["rev-parse", "--verify", "HEAD^{commit}"], null, ct)).Trim();
             var local = (await RunGitAsync(repo, ["branch", "--show-current"], null, ct)).Trim();
@@ -453,6 +453,19 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         };
     }
 
+    private async Task<bool> IsDevelopmentDestinationAsync(Resource resource, string? destination, CancellationToken ct)
+    {
+        if (resource.WorkingBranch is { } branch) return destination != branch;
+        var refs = await RunGitAsync(paths.Workspaces, ["ls-remote", "--symref", "--", GitAddress(resource), "HEAD"], resource, ct);
+        const string prefix = "ref: refs/heads/";
+        foreach (var line in refs.Split('\n', StringSplitOptions.TrimEntries))
+        {
+            if (line.StartsWith(prefix, StringComparison.Ordinal) && line.EndsWith("\tHEAD", StringComparison.Ordinal))
+                return destination != line[prefix.Length..^5];
+        }
+        return false;
+    }
+
     private async Task<string> RunGitAsync(string cwd, string[] args, Resource? authentication, CancellationToken ct)
     {
         var start = new ProcessStartInfo("git") { WorkingDirectory = cwd, UseShellExecute = false,
@@ -559,13 +572,18 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
     private async Task VerifyRepoAsync(Resource resource, string repo, CancellationToken ct)
     {
         if (!Directory.Exists(repo)) throw new InvalidOperationException("Prepare the Git workspace first.");
+        if (!await IsLinkedRepoAsync(resource, repo, ct))
+            throw new InvalidOperationException("The workspace is not linked to this Git resource.");
+    }
+
+    private async Task<bool> IsLinkedRepoAsync(Resource resource, string repo, CancellationToken ct)
+    {
         PlatformPaths.CheckLinks(repo);
         var common = (await RunGitAsync(repo, ["rev-parse", "--path-format=absolute", "--git-common-dir"], null, ct)).Trim();
         var baseDir = Path.GetFullPath(Path.Combine(paths.Workspaces, ".git-cache")) + Path.DirectorySeparatorChar;
         var marker = Path.Combine(common, "platform-resource");
-        if (!Path.GetFullPath(common).StartsWith(baseDir, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal) ||
-            !File.Exists(marker) || await File.ReadAllTextAsync(marker, ct) != resource.Id)
-            throw new InvalidOperationException("The workspace is not linked to this Git resource.");
+        return Path.GetFullPath(common).StartsWith(baseDir, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal) &&
+            File.Exists(marker) && await File.ReadAllTextAsync(marker, ct) == resource.Id;
     }
 
     private async Task AuditAsync(string agentId, string? project, string? conversation, string? workId, string kind, string detail, CancellationToken ct)
@@ -583,9 +601,16 @@ public sealed partial class Operations(IDbContextFactory<PlatformDb> dbs, Platfo
         return uri.AbsoluteUri;
     }
 
+    private async Task<string> ResolveCheckoutFolderAsync(Resource resource, string root, CancellationToken ct)
+    {
+        var legacy = Path.Combine(root, "project");
+        if (resource.CreatedByAgentId is null && Directory.Exists(legacy) && await IsLinkedRepoAsync(resource, legacy, ct))
+            return "project";
+        return CheckoutFolder(resource);
+    }
+
     internal static string CheckoutFolder(Resource resource)
     {
-        if (resource.CreatedByAgentId is null) return "project";
         // A changed repository URL must never reuse the previous repository's files or pending edits.
         var address = SHA256.HashData(Encoding.UTF8.GetBytes(resource.Id + "\n" + GitAddress(resource)));
         return "project-" + Convert.ToHexStringLower(address.AsSpan(0, 12));

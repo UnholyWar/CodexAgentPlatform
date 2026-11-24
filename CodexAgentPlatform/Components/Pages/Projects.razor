@@ -15,7 +15,7 @@
             @foreach (var project in rows)
             {
                 <button class="list-row" disabled="@busy" @onclick="() => Select(project)"><span class="avatar" aria-hidden="true"><Icon Name="folder" /></span>
-                    <span><strong>@project.Name</strong><small>@project.DefaultBranch</small></span></button>
+                    <span><strong>@project.Name</strong></span></button>
             }
             @if (rows.Count == 0) { <p class="empty">No projects yet.</p> }
         </div>
@@ -25,7 +25,6 @@
                 <button type="button" class="editor-back" disabled="@busy" @onclick="CloseEditor"><Icon Name="chevron" /> Project list</button>
                 <h2 id="project-editor" tabindex="-1" @ref="editorHeading">@(isNew ? "New project" : "Edit project")</h2>
                 <label>Project name <input @bind="selected.Name" maxlength="80" required disabled="@busy" /></label>
-                <label>Default branch <input @bind="selected.DefaultBranch" maxlength="150" required disabled="@busy" /></label>
                 @if (error is not null) { <p class="notice error" role="alert">@error</p> }
                 @if (confirmDelete)
                 {
@@ -92,7 +91,7 @@
     private void NewProject() => OpenEditor(new Project(), true);
 
     private void Select(Project project) =>
-        OpenEditor(new Project { Id = project.Id, Name = project.Name, DefaultBranch = project.DefaultBranch }, false);
+        OpenEditor(new Project { Id = project.Id, Name = project.Name }, false);
 
     private void OpenEditor(Project project, bool creating)
     {
@@ -129,13 +128,13 @@
         {
             await using var db = await Dbs.CreateDbContextAsync();
             if (isNew)
-                await ProjectStore.CreateAsync(db, draft.Name, draft.DefaultBranch, null, default);
+                await ProjectStore.CreateAsync(db, draft.Name, null, default);
             else
             {
                 ProjectStore.Normalize(draft);
                 var row = await db.Projects.FindAsync(draft.Id);
                 if (row is null) { error = "This project no longer exists."; return; }
-                (row.Name, row.DefaultBranch) = (draft.Name, draft.DefaultBranch);
+                row.Name = draft.Name;
                 await db.SaveChangesAsync();
             }
             await LoadAsync();

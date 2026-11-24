@@ -34,28 +34,28 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
         new("task_delegate", "delegate", "Assign one task to another agent after this turn. List eligible agents using agent_list.", ["agentId", "brief"], []),
         new("agent_list", "delegate", "List agents eligible for a follow-up on this project.", [], []),
         new("resource_search", ToolAccess.ProjectResources, "Find resources by name within your granted scope. Set scope to global for the global inventory.", [], ["query", "scope"]),
-        new("project_create", ToolAccess.CreateProjects, "Create a platform project and give the creating agent access to it. The default branch is main unless specified.", ["name"], ["defaultBranch"]),
+        new("project_create", ToolAccess.CreateProjects, "Create a platform project and give the creating agent access to it.", ["name"], []),
         new("resource_get", ToolAccess.ProjectResources, "Read metadata of an authorized resource.", ["id"], []),
         new("resource_create", ToolAccess.CreateResources,
             "Register a platform resource in the current project, or provide projectId (ID or exact name). " +
             "Use scope=global only for an explicit global request. For a new resource provide kind and address. " +
             "Kinds: GitRepository, SshServer, ApiConnection, LocalWorkspace, Environment, DeploymentTarget, ExternalService. " +
             "Use resource_search then sourceId to copy a visible resource, optionally changing the repository URL. " +
-            "A saved HTTPS Git credential is linked by the server. For SSH use an existing SSH source. " +
+            "For GitRepository, workingBranch defaults to the remote default branch. A saved HTTPS Git credential is linked by the server. For SSH use an existing SSH source. " +
             "DeploymentTarget requires sshServerId or a source target. Never provide keys or tokens.",
-            ["name"], ["kind", "address", "scope", "projectId", "sourceId", "sshServerId", "production"]),
+            ["name"], ["kind", "address", "scope", "projectId", "sourceId", "workingBranch", "sshServerId", "production"]),
         new("resource_update", ToolAccess.CreateResources,
             "Edit the name or address/path of a project resource you created, using its project resource ID. " +
             "Pass sourceId to use another visible connection of the same type, or sshServerId for a deployment target. " +
-            "Specify projectId when the destination differs from the active project.",
-            ["id"], ["name", "address", "projectId", "sourceId", "sshServerId"]),
+            "Set workingBranch to an empty string to follow the remote default. Specify projectId when the destination differs from the active project.",
+            ["id"], ["name", "address", "projectId", "sourceId", "workingBranch", "sshServerId"]),
         new("git_workspace", "git", "Use prepare to check out the registered repository. Use list or read for committed files at HEAD, passing a relative directory or file path as argument. Supports status, diff, fetch, pull, branch and commit. Pass nextOffset as offset for paged output.", ["id", "operation"], ["argument", "offset"]),
         new("git_request_push", "git", "Request explicit owner approval for a non-force push of the current commit.", ["id"], ["destinationBranch"]),
         new("github_request_create_repository", ToolAccess.CreateGitHubRepositories,
             "Request owner approval to create a GitHub repository for a platform project using a saved global GitHub connection. " +
             "Find its ID with resource_search. Provide the personal GitHub account login, repository name and visibility (private or public). " +
             "Use the active project or pass projectId (ID or exact name). After approval the platform initializes and links the repository.",
-            ["sourceId", "owner", "name", "visibility"], ["projectId"]),
+            ["sourceId", "owner", "name", "visibility"], ["projectId", "workingBranch"]),
         new("ssh_inspect", "ssh", "Inspect test, health, docker-status, docker-services, linux-services, docker-logs or sftp-read. For more live command output pass nextOffset as offset.", ["id", "operation"], ["offset"]),
         new("ssh_request_operation", "ssh", "Request explicit approval for restart-docker on an SSH server, or deploy/rollback on a registered Swarm target. Deploy requires an image digest.", ["id", "operation"], ["image"]),
         new("ssh_request_command", "ssh",
@@ -151,8 +151,8 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
         switch (name)
         {
             case "project_create":
-                var created = await ProjectStore.CreateAsync(db, args.String("name")!, args.String("defaultBranch"), run, ct);
-                return new { created.Id, created.Name, created.DefaultBranch };
+                var created = await ProjectStore.CreateAsync(db, args.String("name")!, run, ct);
+                return new { created.Id, created.Name };
             case "memory_search":
             case "memory_list":
                 var notes = await memory.SearchAsync(args.String("query"), project, await RangeAsync(db, args, ct), false, ct);
@@ -213,7 +213,7 @@ public sealed class AgentTools(IDbContextFactory<PlatformDb> dbs, MemoryStore me
                         throw new UnauthorizedAccessException("The Global resources permission is required.");
                     visible = await operations.VisibleResourcesAsync(agent, args.String("query"), ct, run.ProjectId, globalOnly);
                 }
-                return visible.Select(x => new { x.Id, x.Name, Kind = x.Kind.ToString(), x.ProjectId, x.IsGlobal, x.Address, x.Production,
+                return visible.Select(x => new { x.Id, x.Name, Kind = x.Kind.ToString(), x.ProjectId, x.IsGlobal, x.Address, x.WorkingBranch, x.Production,
                     hasSavedConnection = x.VaultId != null || x.ConnectionSourceId != null,
                     canEdit = !x.IsGlobal && x.CreatedByAgentId == agent.Id && ToolAccess.Has(agent, ToolAccess.CreateResources) }).ToArray();
             case "git_workspace":

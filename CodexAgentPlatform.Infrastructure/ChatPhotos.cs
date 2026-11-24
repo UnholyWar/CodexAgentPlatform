@@ -75,9 +75,7 @@ public static partial class ChatPhotos
             var folder = Path.Combine(root, photo.Id);
             Directory.CreateDirectory(folder);
             PlatformPaths.CheckLinks(folder);
-            var stem = UnsafeFileName().Replace(Path.GetFileNameWithoutExtension(photo.Name), "-").Trim('-', '.');
-            var extension = photo.ContentType switch { "image/png" => ".png", "image/webp" => ".webp", _ => ".jpg" };
-            var path = Path.Combine(folder, (stem.Length == 0 ? "photo" : $"photo-{stem}") + extension);
+            var path = Path.Combine(folder, StagedName(photo.Name, photo.ContentType));
             var temporary = Path.Combine(folder, Guid.NewGuid().ToString("N") + ".tmp");
             try
             {
@@ -89,6 +87,13 @@ public static partial class ChatPhotos
             paths.Add(path);
         }
         return (paths, forCurrentRequest);
+    }
+
+    internal static string StagedName(string name, string contentType)
+    {
+        var stem = UnsafeFileName().Replace(Path.GetFileNameWithoutExtension(name), "-").Trim('-', '.');
+        var extension = contentType switch { "image/png" => ".png", "image/webp" => ".webp", _ => ".jpg" };
+        return (stem.Length == 0 ? "photo" : $"photo-{stem}") + extension;
     }
 
     [GeneratedRegex("[^a-zA-Z0-9_.-]+")]

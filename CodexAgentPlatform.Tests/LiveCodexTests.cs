@@ -92,7 +92,7 @@ public sealed class LiveCodexTests
     {
         await using var storage = await TestStorage.CreateAsync();
         await using var db = storage.CreateDbContext();
-        var project = new Project { Name = "Compass", DefaultBranch = "main" };
+        var project = new Project { Name = "Compass" };
         var repository = new Resource { ProjectId = project.Id, Name = "Compass repository",
             Kind = ResourceKind.GitRepository, Address = "https://example.invalid/compass.git" };
         var chat = new Conversation();

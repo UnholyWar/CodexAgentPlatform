@@ -29,6 +29,7 @@ public sealed class Agent
 
 public sealed class Conversation
 {
+    public bool Archived { get; set; }
     public bool AutoApprove { get; set; }
     public string? CoordinatorAgentId { get; set; }
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
@@ -159,6 +160,8 @@ public sealed class MemoryRevision
 
 public sealed class Resource
 {
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? WorkingBranch { get; set; }
     public bool IsGlobal { get; set; }
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public string? ProjectId { get; set; }
@@ -185,7 +188,6 @@ public sealed class Project
 {
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public string Name { get; set; } = "";
-    public string DefaultBranch { get; set; } = "main";
 }
 
 public sealed class Approval

@@ -345,6 +345,7 @@
         var result = await Chats.ReadAsync(id, limit, default);
         if (!disposed && Id == id && version == refreshVersion)
         {
+            if (!result.Exists) { Navigation.NavigateTo("/conversations", replace: true); return; }
             Updates.ApplyAnswer(id, result);
             snapshot = result;
         }

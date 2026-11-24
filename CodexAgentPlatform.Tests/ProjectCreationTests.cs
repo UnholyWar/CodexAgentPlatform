@@ -13,11 +13,7 @@ public sealed class ProjectCreationTests
     {
         await using var storage = await TestStorage.CreateAsync();
         await using var db = storage.CreateDbContext();
-        var prior = await ProjectStore.CreateAsync(db, "Existing", " release ", null, default);
-        Assert.Equal("release", prior.DefaultBranch);
-        var branchError = await Assert.ThrowsAsync<ArgumentException>(() =>
-            ProjectStore.CreateAsync(db, "Invalid default branch", "release/../main", null, default));
-        Assert.Contains("default Git branch", branchError.Message);
+        var prior = await ProjectStore.CreateAsync(db, "Existing", null, default);
         var developers = db.Agents.Where(a => a.Id == "developer");
         var developer = await developers.AsNoTracking().SingleAsync();
         Assert.DoesNotContain("project_create", JsonSerializer.Serialize(AgentTools.Describe(developer)));
@@ -37,7 +33,7 @@ public sealed class ProjectCreationTests
         await developers.ExecuteUpdateAsync(s => s.SetProperty(a => a.AllowedProjects, prior.Id));
         await Create(" New project ");
         var created = await db.Projects.SingleAsync(p => p.Name == "New project");
-        Assert.Equal("main", created.DefaultBranch);
+        Assert.False(await db.Resources.AnyAsync(r => r.ProjectId == created.Id));
         Assert.Equal(new[] { prior.Id, created.Id }, ToolAccess.Split((await developers.AsNoTracking().SingleAsync()).AllowedProjects));
         var evt = await db.Events.SingleAsync(e => e.Kind == "ProjectCreated");
         Assert.Equal((created.Id, developer.Id, run.ConversationId), (evt.ProjectId, evt.AgentId, evt.ConversationId));
@@ -50,7 +46,7 @@ public sealed class ProjectCreationTests
     {
         await using var storage = await TestStorage.CreateAsync();
         await using var db = storage.CreateDbContext();
-        var other = await ProjectStore.CreateAsync(db, "Keep", null, null, default);
+        var other = await ProjectStore.CreateAsync(db, "Keep", null, default);
         var architect = await db.Agents.SingleAsync(a => a.Id == "architect");
         architect.AllowedTools = ToolAccess.CreateProjects;
         architect.AllowedProjects = other.Id;
@@ -60,7 +56,7 @@ public sealed class ProjectCreationTests
         db.Messages.Add(message);
         await db.SaveChangesAsync();
         var run = new ChatRun { AgentId = architect.Id, ConversationId = conversation.Id, UserMessageId = message.Id };
-        var project = await ProjectStore.CreateAsync(db, "Temporary project", null, run, default);
+        var project = await ProjectStore.CreateAsync(db, "Temporary project", run, default);
         await AgentPermissionGrants.ProposeAsync(db, run, "qa", "project", project.Id, default);
 
         Assert.Null(await ProjectStore.DeleteAsync(db, project.Id, project.Name, default));
@@ -76,7 +72,7 @@ public sealed class ProjectCreationTests
     {
         await using var storage = await TestStorage.CreateAsync();
         await using var db = storage.CreateDbContext();
-        var project = await ProjectStore.CreateAsync(db, "Project with work", null, null, default);
+        var project = await ProjectStore.CreateAsync(db, "Project with work", null, default);
         var architect = await db.Agents.SingleAsync(a => a.Id == "architect");
         architect.AllowedProjects = project.Id;
         db.Resources.Add(new Resource { Name = "Repository", ProjectId = project.Id });

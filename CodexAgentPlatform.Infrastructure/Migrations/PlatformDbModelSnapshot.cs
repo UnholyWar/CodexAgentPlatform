@@ -237,6 +237,9 @@ namespace CodexAgentPlatform.Infrastructure.Migrations
                     b.Property<string>("Id")
                         .HasColumnType("TEXT");
 
+                    b.Property<bool>("Archived")
+                        .HasColumnType("INTEGER");
+
                     b.Property<bool>("AutoApprove")
                         .HasColumnType("INTEGER");
 
@@ -451,10 +454,6 @@ namespace CodexAgentPlatform.Infrastructure.Migrations
                     b.Property<string>("Id")
                         .HasColumnType("TEXT");
 
-                    b.Property<string>("DefaultBranch")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasColumnType("TEXT");
@@ -514,6 +513,9 @@ namespace CodexAgentPlatform.Infrastructure.Migrations
                         .HasColumnType("TEXT");
 
                     b.Property<string>("VaultId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("WorkingBranch")
                         .HasColumnType("TEXT");
 
                     b.HasKey("Id");

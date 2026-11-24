@@ -9,11 +9,20 @@ namespace CodexAgentPlatform.Tests;
 public sealed class ResourceCreationTests
 {
     [Fact]
+    public void WorkingBranchIsOptionalAndValidatedForGitResources()
+    {
+        Assert.Null(ResourceRegistration.NormalizeWorkingBranch(ResourceKind.GitRepository, " "));
+        Assert.Equal("release/v1", ResourceRegistration.NormalizeWorkingBranch(ResourceKind.GitRepository, " release/v1 "));
+        Assert.Throws<ArgumentException>(() => ResourceRegistration.NormalizeWorkingBranch(ResourceKind.GitRepository, "release/../main"));
+        Assert.Throws<ArgumentException>(() => ResourceRegistration.NormalizeWorkingBranch(ResourceKind.SshServer, "main"));
+    }
+
+    [Fact]
     public async Task RegisteringGitUsesTheSavedConnectionAndIsIdempotent()
     {
         await using var storage = await TestStorage.CreateAsync();
         await using var db = storage.CreateDbContext();
-        var project = new Project { Name = "yaseminwebsite", DefaultBranch = "master" };
+        var project = new Project { Name = "yaseminwebsite" };
         var source = new Resource { Name = "Github Adresim", Kind = ResourceKind.GitRepository, IsGlobal = true,
             Address = "https://github.com/UnholyWar", Username = "UnholyWar", VaultId = Guid.NewGuid().ToString("N") };
         var architect = await db.Agents.SingleAsync(a => a.Id == "architect");
@@ -23,7 +32,7 @@ public sealed class ResourceCreationTests
         var tools = Tools(storage);
         var run = new ChatRun { AgentId = architect.Id, ConversationId = "chat" };
         var args = JsonSerializer.SerializeToElement(new { projectId = project.Name, name = "Project repository",
-            sourceId = source.Id, address = "https://github.com/UnholyWar/yaseminwebsite" });
+            sourceId = source.Id, workingBranch = " master ", address = "https://github.com/UnholyWar/yaseminwebsite" });
         Task<object?> Create() => tools.RunAsync("resource_create", args, run, default);
         Assert.DoesNotContain("resource_create", JsonSerializer.Serialize(AgentTools.Describe(architect)));
         await Assert.ThrowsAsync<UnauthorizedAccessException>(Create);
@@ -36,9 +45,14 @@ public sealed class ResourceCreationTests
         Assert.True(JsonSerializer.SerializeToElement(await Create()).True("created"));
         Assert.False(JsonSerializer.SerializeToElement(await Create()).True("created"));
         var resource = await db.Resources.SingleAsync(r => r.ProjectId == project.Id);
+        Assert.Equal("master", resource.WorkingBranch);
+        await tools.RunAsync("resource_create", JsonSerializer.SerializeToElement(new { projectId = project.Id,
+            name = "Second repository", sourceId = source.Id, workingBranch = "main",
+            address = "https://github.com/UnholyWar/second" }), run, default);
+        Assert.Equal("main", (await db.Resources.SingleAsync(r => r.Name == "Second repository")).WorkingBranch);
         Assert.Equal(source.Id, resource.ConnectionSourceId);
         Assert.Null(resource.VaultId);
-        Assert.Equal(architect.Id, (await db.Events.SingleAsync(e => e.Kind == "ResourceCreated")).AgentId);
+        Assert.Equal(architect.Id, (await db.Events.SingleAsync(e => e.Kind == "ResourceCreated" && e.Detail == resource.Name)).AgentId);
         var metadata = await tools.RunAsync("resource_get", JsonSerializer.SerializeToElement(new { id = resource.Id }), run, default);
         Assert.DoesNotContain(source.VaultId!, JsonSerializer.Serialize(metadata));
 

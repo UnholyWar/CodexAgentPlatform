@@ -1,20 +1,42 @@
 @page "/conversations"
 @attribute [Authorize]
 @inject ChatStore Chats
+@inject PlatformPaths Paths
 
 <PageTitle>Conversations · Codex Agent Platform</PageTitle>
 <section class="admin-page">
     <header class="section-head"><h1>Conversations</h1><a class="primary" href="/"><Icon Name="plus" /> New chat</a></header>
     <form class="filter" @onsubmit="SearchAsync" @onsubmit:preventDefault>
         <input placeholder="Search titles and messages" aria-label="Search conversations" @bind="query" maxlength="120" />
-        <button class="button"><Icon Name="search" /> Search</button>
+        <button class="button" disabled="@busy"><Icon Name="search" /> Search</button>
+        <label><input type="checkbox" @bind="archived" @bind:after="SearchAsync" disabled="@busy" /> Archived conversations</label>
     </form>
+    @if (error is not null) { <p class="notice error" role="alert">@error</p> }
     <div class="list">
         @foreach (var chat in rows)
         {
-            <a class="list-row history-row" href="/chat/@chat.Id"><span class="avatar" aria-hidden="true"><Icon Name="chat" /></span>
-                <strong>@chat.Title</strong><small>@chat.UpdatedAtUtc.ToString("dd.MM.yyyy HH:mm") UTC</small>
-            </a>
+            <div class="conversation-entry" @key="chat.Id">
+                <a class="list-row history-row" href="/chat/@chat.Id"><span class="avatar" aria-hidden="true"><Icon Name="chat" /></span>
+                    <strong>@chat.Title</strong><small>@chat.UpdatedAtUtc.ToString("dd.MM.yyyy HH:mm") UTC</small>
+                </a>
+                <button class="icon-button" aria-label="Actions for @chat.Title" aria-expanded="@(menu == chat.Id ? "true" : "false")"
+                        disabled="@busy" @onclick="() => ToggleMenu(chat.Id)">…</button>
+                @if (menu == chat.Id)
+                {
+                    <div class="conversation-actions">
+                        <button class="button" disabled="@busy" @onclick="() => ArchiveAsync(chat)">@(chat.Archived ? "Restore" : "Archive")</button>
+                        <button class="button" disabled="@busy" @onclick="() => AskDelete(chat.Id)">Delete</button>
+                    </div>
+                }
+                @if (confirm == chat.Id)
+                {
+                    <div class="conversation-actions" role="group" aria-label="Confirm deletion">
+                        <p>Permanently delete “@chat.Title”? Its messages and attachments will be permanently removed.</p>
+                        <button class="button" disabled="@busy" @onclick="Cancel">Cancel</button>
+                        <button class="button danger" disabled="@busy" @onclick="() => DeleteAsync(chat.Id)">Permanently delete</button>
+                    </div>
+                }
+            </div>
         }
         @if (rows.Count == 0) { <p class="empty">No conversations found.</p> }
     </div>
@@ -22,7 +44,49 @@
 
 @code {
     private List<Conversation> rows = [];
-    private string? query;
+    private string? query, menu, confirm, error;
+    private bool archived, busy;
+    private int revision;
+
     protected override Task OnInitializedAsync() => SearchAsync();
-    private async Task SearchAsync() => rows = await Chats.RecentAsync(query, default);
+
+    private async Task SearchAsync()
+    {
+        var request = ++revision;
+        Cancel();
+        var found = await Chats.RecentAsync(query, default, archived);
+        if (request == revision) rows = found;
+    }
+
+    private void Cancel() { menu = confirm = error = null; }
+    private void ToggleMenu(string id) { confirm = error = null; menu = menu == id ? null : id; }
+    private void AskDelete(string id) { menu = error = null; confirm = id; }
+
+    private async Task ArchiveAsync(Conversation chat)
+    {
+        if (busy) return;
+        busy = true;
+        try
+        {
+            await Chats.SetArchivedAsync(chat.Id, !chat.Archived, default);
+            await SearchAsync();
+        }
+        finally { busy = false; }
+    }
+
+    private async Task DeleteAsync(string id)
+    {
+        if (busy || confirm != id) return;
+        busy = true;
+        try
+        {
+            error = await Chats.DeleteConversationAsync(id, Paths, default);
+            if (error is null) await SearchAsync();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            error = "Could not remove this conversation’s stored files. Check storage access and try again.";
+        }
+        finally { busy = false; }
+    }
 }

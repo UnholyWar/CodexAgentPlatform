@@ -43,6 +43,7 @@
                     <input @bind="selected.Address" maxlength="1024" required disabled="@busy" /></label>
                 @if (selected.Kind == ResourceKind.GitRepository)
                 {
+                    <label>Working branch <input @bind="selected.WorkingBranch" maxlength="150" placeholder="Remote default" disabled="@busy" /></label>
                     <label class="check"><input type="checkbox" @bind="gitUsesToken" @bind:after="ClearCredential" disabled="@busy" /> Private repository (use an HTTPS access token)</label>
                     @if (gitUsesToken)
                     {
@@ -334,6 +335,7 @@
         {
             item.Name = item.Name.Trim();
             item.Address = item.Address.Trim();
+            item.WorkingBranch = ResourceRegistration.NormalizeWorkingBranch(item.Kind, item.Kind == ResourceKind.GitRepository ? item.WorkingBranch : null);
             if (item.Name.Length is 0 or > 100)
                 throw new ArgumentException("Enter a resource name between 1 and 100 characters.");
             if (item.Address.Length is 0 or > 1024)

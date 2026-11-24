@@ -14,7 +14,7 @@ public sealed partial class Operations
     public const string GitHubHttpClient = "GitHub";
 
     private sealed record GitHubRepositoryTarget(string ResourceId, string SourceBinding, string ProjectId,
-        string Owner, string Name, bool Private, string Branch, string? WorkId, long? RepositoryId = null)
+        string Owner, string Name, bool Private, string? Branch, string? WorkId, long? RepositoryId = null)
     {
         public string FullName => $"{Owner}/{Name}";
         public string Address => $"https://github.com/{FullName}.git";
@@ -45,7 +45,7 @@ public sealed partial class Operations
         var project = await db.Projects.AsNoTracking().SingleAsync(p => p.Id == projectId, ct);
         var source = await GetGitHubConnectionAsync(db, agent, project.Id, args.String("sourceId")!, ct);
         var target = new GitHubRepositoryTarget(source.Id, Binding(source), project.Id, owner, name, isPrivate,
-            SafeBranch(project.DefaultBranch), run.WorkId);
+            ResourceRegistration.NormalizeWorkingBranch(ResourceKind.GitRepository, args.String("workingBranch")), run.WorkId);
         ResourceRegistration.ValidateConnection(ProjectGitHubResource(target, source, agent.Id), source);
         var registration = await FindGitHubRegistrationAsync(db, target, ct);
 
@@ -78,7 +78,7 @@ public sealed partial class Operations
         }
 
         var visibility = isPrivate ? "Private" : "Public";
-        var scope = $"{target.FullName} · {visibility} · Project {project.Name} · Branch {target.Branch} · Connection {source.Name}";
+        var scope = $"{target.FullName} · {visibility} · Project {project.Name} · Branch {target.Branch ?? "remote default"} · Connection {source.Name}";
         var approval = new Approval
         {
             AgentId = agent.Id, ConversationId = run.ConversationId, Kind = GitHubRepositoryApproval,
@@ -126,7 +126,7 @@ public sealed partial class Operations
         await db.SaveChangesAsync(CancellationToken.None);
 
         var defaultBranch = SafeBranch(repository.String("default_branch"));
-        await EnsureGitHubBranchAsync(http, token, apiPath, defaultBranch, target.Branch, ct);
+        await EnsureGitHubBranchAsync(http, token, apiPath, defaultBranch, target.Branch ?? defaultBranch, ct);
 
         await using var registration = await dbs.CreateDbContextAsync(ct);
         await using var transaction = await registration.Database.BeginTransactionAsync(ct);
@@ -140,15 +140,14 @@ public sealed partial class Operations
             await registration.SaveChangesAsync(ct);
         }
         await transaction.CommitAsync(ct);
-        approval.Result = $"{target.Address} was initialized and linked to the project on branch {target.Branch}.";
+        approval.Result = $"{target.Address} was initialized and linked to the project on branch {target.Branch ?? defaultBranch}.";
     }
 
     private static async Task<Resource> RecheckGitHubApprovalAsync(PlatformDb db, GitHubRepositoryTarget target, Agent agent, CancellationToken ct)
     {
         var source = await GetGitHubConnectionAsync(db, agent, target.ProjectId, target.ResourceId, ct);
-        var branch = await db.Projects.Where(p => p.Id == target.ProjectId).Select(p => p.DefaultBranch).SingleOrDefaultAsync(ct);
-        if (branch != target.Branch || Binding(source) != target.SourceBinding)
-            throw new InvalidOperationException("The GitHub connection or project branch changed after the approval was requested.");
+        if (!await db.Projects.AnyAsync(p => p.Id == target.ProjectId, ct) || Binding(source) != target.SourceBinding)
+            throw new InvalidOperationException("The GitHub connection or project changed after the approval was requested.");
         ResourceRegistration.ValidateConnection(ProjectGitHubResource(target, source, agent.Id), source);
         await FindGitHubRegistrationAsync(db, target, ct);
         return source;
@@ -178,7 +177,7 @@ public sealed partial class Operations
         var resource = matches[0];
         var address = resource.Address.TrimEnd('/');
         if (matches.Count == 1 && resource.Kind == ResourceKind.GitRepository && !resource.IsGlobal &&
-            resource.ConnectionSourceId == target.ResourceId && resource.VaultId is null &&
+            resource.ConnectionSourceId == target.ResourceId && resource.WorkingBranch == target.Branch && resource.VaultId is null &&
             (address.Equals(target.Address, StringComparison.OrdinalIgnoreCase) ||
                 address.Equals(addressWithoutSuffix, StringComparison.OrdinalIgnoreCase)))
             return resource;
@@ -187,7 +186,7 @@ public sealed partial class Operations
 
     private static Resource ProjectGitHubResource(GitHubRepositoryTarget target, Resource source, string agentId) =>
         new() { Name = target.Name, Address = target.Address, Kind = ResourceKind.GitRepository,
-            ProjectId = target.ProjectId, CreatedByAgentId = agentId, ConnectionSourceId = source.Id,
+            WorkingBranch = target.Branch, ProjectId = target.ProjectId, CreatedByAgentId = agentId, ConnectionSourceId = source.Id,
             Username = source.Username, Production = source.Production };
 
     private static GitHubRepositoryTarget ReadGitHubTarget(Approval approval) =>

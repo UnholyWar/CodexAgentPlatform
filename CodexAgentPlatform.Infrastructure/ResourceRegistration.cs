@@ -7,6 +7,15 @@ namespace CodexAgentPlatform.Infrastructure;
 
 public static partial class ResourceRegistration
 {
+    public static string? NormalizeWorkingBranch(ResourceKind kind, string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        var branch = value.Trim();
+        if (kind != ResourceKind.GitRepository || branch.Length > 150 || branch == "HEAD" || !Operations.IsSupportedGitBranch(branch))
+            throw new ArgumentException("Enter a valid Git repository working branch of up to 150 characters.");
+        return branch;
+    }
+
     internal static async Task<object> CreateAsync(PlatformDb db, ChatRun run, JsonElement args, CancellationToken ct)
     {
         await using var tx = await db.Database.BeginTransactionAsync(ct);
@@ -45,14 +54,14 @@ public static partial class ResourceRegistration
         if (kind is null) throw new ArgumentException("Provide a resource type or choose a source.");
         var address = ResourceAddress(args.String("address") ?? source?.Address);
         var item = new Resource { Name = name, Kind = kind.Value, Address = address, ProjectId = project, IsGlobal = project is null, CreatedByAgentId = agent.Id,
-            Production = args.True("production") || source?.Production == true };
+            WorkingBranch = NormalizeWorkingBranch(kind.Value, args.String("workingBranch")), Production = args.True("production") || source?.Production == true };
         if (source != null) await CopyConnectionAsync(db, agent, item, source, ct);
         await ValidateTargetAsync(db, agent, item, args.String("sshServerId"), ct);
         var existing = await db.Resources.AsNoTracking().FirstOrDefaultAsync(r => r.IsGlobal == item.IsGlobal && r.ProjectId == project &&
             EF.Functions.Collate(r.Name, "NOCASE") == name, ct);
         if (existing != null)
         {
-            if (existing.Kind != item.Kind || existing.Address != item.Address || existing.ConnectionSourceId != item.ConnectionSourceId ||
+            if (existing.WorkingBranch != item.WorkingBranch || existing.Kind != item.Kind || existing.Address != item.Address || existing.ConnectionSourceId != item.ConnectionSourceId ||
                 existing.VaultId != null || existing.Production != item.Production || existing.SshServerId != item.SshServerId)
                 throw new ArgumentException("A different resource already uses this name in the target scope.");
             return new { existing.Id, existing.Name, existing.ProjectId, existing.IsGlobal, created = false };
@@ -85,6 +94,8 @@ public static partial class ResourceRegistration
         var newSource = args.String("sourceId");
         if ((address != item.Address || newSource != null) && item.VaultId != null)
             throw new InvalidOperationException("The owner configured a credential for this exact address. Choose a saved connection for a new address.");
+        if (args.TryGetProperty("workingBranch", out _))
+            item.WorkingBranch = NormalizeWorkingBranch(item.Kind, args.String("workingBranch"));
         item.Name = newName;
         item.Address = address;
         if (newSource != null)
