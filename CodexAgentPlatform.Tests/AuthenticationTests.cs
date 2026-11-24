@@ -53,9 +53,11 @@ public sealed partial class AuthenticationTests
         var ct = timeout.Token;
         await app.StartAsync(ct);
         var address = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single();
+        var cookies = new CookieContainer();
         using var client = new HttpClient(new HttpClientHandler
         {
             AllowAutoRedirect = false,
+            CookieContainer = cookies,
             UseProxy = false,
             ServerCertificateCustomValidationCallback = (_, serverCert, _, _) => cert.Thumbprint == serverCert?.Thumbprint
         }) { BaseAddress = new Uri(address) };
@@ -153,10 +155,19 @@ public sealed partial class AuthenticationTests
         })
         {
             using var response = await client.GetAsync(page, ct);
-            Assert.True(response.IsSuccessStatusCode, $"{page} returned {response.StatusCode}");
-            var html = WebUtility.HtmlDecode(await response.Content.ReadAsStringAsync(ct));
+            var raw = await response.Content.ReadAsStringAsync(ct);
+            var target = new Uri(client.BaseAddress!, page);
+            var ownerCookie = cookies.GetCookies(target)["__Host-CodexPlatform"] is not null;
+            var ownerLayout = raw.Contains("action=\"/session/logout\"", StringComparison.Ordinal);
+            var exactHeading = Regex.IsMatch(raw, """<h1(?: b-[a-z0-9]{10}(?:="")?)?>""" + Regex.Escape(heading) + "</h1>");
+            var trace = $"PAGE_CHECK page={page} status={(int)response.StatusCode} " +
+                $"sameUrl={target == response.RequestMessage?.RequestUri} redirect={response.Headers.Location is not null} " +
+                $"ownerCookie={ownerCookie} ownerLayout={ownerLayout} exactHeading={exactHeading} " +
+                $"exceptionPage={raw.Contains("Exception:", StringComparison.Ordinal)}";
+            Assert.True(response.StatusCode == HttpStatusCode.OK && target == response.RequestMessage?.RequestUri &&
+                response.Headers.Location is null && ownerCookie && ownerLayout && exactHeading, trace);
+            var html = WebUtility.HtmlDecode(raw);
             Assert.Contains("<html lang=\"en\">", html);
-            Assert.Contains($"<h1>{heading}</h1>", html);
             Assert.DoesNotMatch("[çÇğĞıİöÖşŞüÜ]", html);
         }
         await app.StopAsync(ct);
