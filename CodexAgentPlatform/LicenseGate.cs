@@ -48,9 +48,13 @@ internal static class LicenseGate
             var tokens = csrf.GetAndStoreTokens(ctx);
             ctx.Response.Headers.CacheControl = "no-store";
             ctx.Response.Headers["Content-Security-Policy"] = "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
+            var scheme = ctx.Request.Cookies["platform-theme"] switch
+            {
+                "light" => "light", "dark" => "dark", _ => "light dark"
+            };
             var message = ctx.Request.Query.ContainsKey("error") ? "<p>Aktivasyon tamamlanamadı. Bilgilerinizi kontrol edip yeniden deneyin.</p>" : "";
             return Results.Content($"""
-                <!doctype html><html lang="tr"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+                <!doctype html><html lang="tr"><meta charset="utf-8"><meta name="color-scheme" content="{scheme}"><meta name="viewport" content="width=device-width,initial-scale=1">
                 <title>Lisans aktivasyonu</title><main><h1>Lisans aktivasyonu</h1><p>{WebUtility.HtmlEncode(info)}</p>{message}
                 <form method="post" action="/license"><input type="hidden" name="{WebUtility.HtmlEncode(tokens.FormFieldName)}" value="{WebUtility.HtmlEncode(tokens.RequestToken)}">
                 {identity}<label>Lisans kodu <input type="password" name="code" autocomplete="off" maxlength="43" required></label>
