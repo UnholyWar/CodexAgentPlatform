@@ -12,17 +12,88 @@
         Güncellemeleri kontrol et
     </button>
     <p role="status">@StatusMessage</p>
+    @if (update is { State: "running" })
+    {
+        <p role="status">@update.Version yükleniyor. Uygulama kısa süreliğine yeniden başlatılabilir.</p>
+    }
+    else if (update is { State: "installed" })
+    {
+        <p role="status">@update.Version başarıyla kuruldu.</p>
+    }
+    else if (update is { State: "failed" })
+    {
+        <p role="alert">@update.Version kurulamadı. Ayrıntılar sunucunun güncelleyici günlüğünde.</p>
+    }
     @if (Releases.Available is { } version)
     {
-        <p>@version sürümünü kurmak için yönetici olarak Docker sunucusunda aşağıdaki Bash komutlarını çalıştırın. Önce veri, çalışma alanı ve özgün Vault anahtarının yedeklerini kontrol edin.</p>
-        <pre>@Instructions(version)</pre>
+        @if (update is not null)
+        {
+            <button type="button" class="primary" @onclick="() => InstallAsync(version)"
+                    disabled="@(requesting || update.State == "running")">@version sürümüne güncelle</button>
+        }
+        else
+        {
+            <p>@version sürümünü kurmak için yönetici olarak Docker sunucusunda aşağıdaki Bash komutlarını çalıştırın. Önce veri, çalışma alanı ve özgün Vault anahtarının yedeklerini kontrol edin.</p>
+            <pre>@Instructions(version)</pre>
+        }
     }
 </section>
 
 @code {
     protected override void OnInitialized() => Releases.Changed += Refresh;
     private void Refresh() => _ = InvokeAsync(StateHasChanged);
-    public void Dispose() => Releases.Changed -= Refresh;
+    private readonly CancellationTokenSource lifetime = new();
+    private PlatformUpdater.UpdateState? update;
+    private bool requesting;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+        update = await PlatformUpdater.RequestAsync("status", lifetime.Token);
+        if (lifetime.IsCancellationRequested) return;
+        StateHasChanged();
+        await WatchAsync();
+    }
+
+    private async Task InstallAsync(string version)
+    {
+        if (requesting || update?.State == "running" || Releases.Available != version ||
+            ReleaseCatalog.StableVersion(version) is null) return;
+        requesting = true;
+        try
+        {
+            update = await PlatformUpdater.RequestAsync(version, lifetime.Token);
+        }
+        finally
+        {
+            requesting = false;
+        }
+        if (lifetime.IsCancellationRequested) return;
+        StateHasChanged();
+        await WatchAsync();
+    }
+
+    private async Task WatchAsync()
+    {
+        var token = lifetime.Token;
+        try
+        {
+            while (update?.State == "running")
+            {
+                await Task.Delay(TimeSpan.FromSeconds(2), token);
+                update = await PlatformUpdater.RequestAsync("status", token);
+                if (!token.IsCancellationRequested) StateHasChanged();
+            }
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+    }
+
+    public void Dispose()
+    {
+        Releases.Changed -= Refresh;
+        lifetime.Cancel();
+        lifetime.Dispose();
+    }
 
     private string? StatusMessage => Releases.Status switch
     {

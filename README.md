@@ -90,7 +90,7 @@ Tarayıcıda kendi alan adınızdaki `/license` sayfasını HTTPS üzerinden aç
 
 Lisans kodunu yalnızca HTTPS aktivasyon formuna girin. Kurulum kimliği, yenileme için gerekli kod ve imzalı belge `/data/credentials/platform-license.json` içinde saklanır. Bu dosyayı içeren yedekleri erişimi sınırlı bir yerde tutun. Aynı veri volume’unu kullanın. Uygulama başlangıçta ve beş dakikada bir yenileme dener. Geçici bağlantı hatasında geçerli imzalı belge bitişine kadar kullanılabilir. Lisans servisinden gelen `403` yanıtı yerel yetkiyi kaldırır. Yönetici `/license` üzerinden tekrar etkinleştirebilir.
 
-İletişim bilgisi için container ortamında `License__ContactEmail` veya `License__LinkedIn` tanımlayın. Yerel `/healthz` yanıtı yalnızca işlemin çalıştığını gösterir. Üretime geçişi doğrulamak için ayrıca HTTPS üzerinden aktivasyon ve yönetici girişi yapıp korunan bir sayfayı açın. Yönetici menüsündeki **Yeni sürüm var** bağlantısı, sunucuda çalıştırılacak sürüme sabitlenmiş komutları gösterir.
+İletişim bilgisi için container ortamında `License__ContactEmail` veya `License__LinkedIn` tanımlayın. Yerel `/healthz` yanıtı yalnızca işlemin çalıştığını gösterir. Üretime geçişi doğrulamak için ayrıca HTTPS üzerinden aktivasyon ve yönetici girişi yapıp korunan bir sayfayı açın. Yönetici menüsündeki **Yeni sürüm var** bağlantısı güncelleme ekranını açar.
 
 **Codex ayarları → Cihaz koduyla giriş yap** üzerinden çıkan tek kullanımlık kodu OpenAI doğrulama sayfasına girin. ChatGPT hesabınızın güvenlik ayarlarında cihaz koduyla giriş etkin olmalıdır. Ardından **Bağlantıyı test et** ile hesabı ve model listesini kontrol edin. [Cihaz koduyla oturum açma](https://learn.chatgpt.com/docs/auth#login-on-headless-devices)
 
@@ -113,13 +113,29 @@ HTTP `200` ve JavaScript içerik türü beklenir. Betik `404` dönüyorsa framew
 (
   set -e
   tar -C deploy -czf /root/codex-docker-vault.tar.gz docker-sandbox
-  bash deploy/docker-sandbox/enable.sh --enable-vault
+  bash deploy/docker-sandbox/enable.sh --enable-vault --enable-updater
 )
 ```
 
 [enable.sh](deploy/docker-sandbox/enable.sh) çalışan container’ı devralır. Hostta AppArmor ve seccomp profillerini yükler, yeni container’ı Linux capability’lerini kaldırarak ve `no-new-privileges` ile başlatır. Böylece Codex, terminal komutlarını Bubblewrap içinde sınırlar. Betik ilk Vault anahtarını ayrı bir volume’da oluşturur ve uygulamaya salt okunur bağlar. Mevcut şifreli kayıtlar varsa özgün anahtar gerekir. [Sandbox profillerinin kaynağı](https://github.com/openai/codex-security/blob/main/docker/README.md)
 
 ## Mevcut üretim kurulumu ve güncelleme
+
+### Panelden güncelleme
+
+Ubuntu kurulumundaki sandbox ve Vault adımı, `--enable-updater` ile yerel
+güncelleyiciyi de kurar. Bu seçenek için hostta Python 3 ve systemd gerekir.
+Mevcut kurulumlarda güncel dağıtım paketini kullanarak bu seçeneği ilk geçişte
+uygulayın. Eski arşiv güncelleyici dosyalarını içermez.
+
+Panelde **Güncellemeleri kontrol et** ve ardından **sürümüne güncelle** düğmesine
+basın. Panel yalnızca yerel Unix soketinden sürüm numarasını ister. Güncelleyici
+lisans API’sindeki kayıtla karşılaştırır ve imajı digest ile indirir. Geçişi
+mevcut sandbox betiği yürütür. Yeni container’ın kontrolleri başarısız olursa
+önceki container geri getirilir. Uygulama kısa süreliğine yeniden başlatılır.
+
+Güncelleyiciye ulaşılamazsa panel elle güncelleme komutlarını gösterir.
+Sunucu günlüğü için `journalctl -u codex-platform-updater.service` kullanın.
 
 ### 6. Güncelleme öncesinde çalışan düzeni ve yedekleri kontrol edin
 

@@ -1,0 +1,16 @@
+[Unit]
+Description=Codex Agent Platform update worker
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/codex-platform-updater/updater.py
+Environment=PATH=/usr/sbin:/usr/bin:/sbin:/bin
+Restart=on-failure
+UMask=0077
+KillMode=mixed
+TimeoutStopSec=90
+
+[Install]
+WantedBy=multi-user.target

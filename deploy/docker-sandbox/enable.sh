@@ -9,7 +9,8 @@ fail() {
 requested_image=''
 cleanup_requested=false
 vault_requested=false
-usage='Kullanım: bash enable.sh [--image İMAJ] [--enable-vault] [--cleanup-old-images]'
+updater_requested=false
+usage='Kullanım: bash enable.sh [--image İMAJ] [--enable-vault] [--cleanup-old-images] [--enable-updater]'
 while (( $# > 0 )); do
   case "$1" in
     --image)
@@ -18,6 +19,7 @@ while (( $# > 0 )); do
       shift 2 ;;
     --cleanup-old-images) cleanup_requested=true; shift ;;
     --enable-vault) vault_requested=true; shift ;;
+    --enable-updater) updater_requested=true; shift ;;
     *) fail "$usage" ;;
   esac
 done
@@ -69,7 +71,7 @@ cleanup_old_images() {
 
 old=$(docker inspect --type container -f '{{.Id}}' "$name")
 [[ $(docker inspect -f '{{.State.Running}}' "$old") == true ]] || fail 'Mevcut container çalışmıyor.'
-if [[ $cleanup_requested == true && -z $requested_image && $vault_requested == false ]]; then
+if [[ $cleanup_requested == true && -z $requested_image && $vault_requested == false && $updater_requested == false ]]; then
   cleanup_old_images
   exit 0
 fi
@@ -90,7 +92,7 @@ if [[ $vault_requested == true ]]; then
   if [[ -n $current_vault_key ]]; then
     docker exec "$old" node -e "$vault_key_check" "$current_vault_key" ||
       fail 'Mevcut Vault anahtarı okunamadı veya geçersiz. Özgün anahtar dosyasını kontrol edin.'
-    if [[ -z $requested_image ]]; then
+    if [[ -z $requested_image && $updater_requested == false ]]; then
       printf 'Vault zaten etkin. Mevcut anahtar kullanılıyor.\n'
       if [[ $cleanup_requested == true ]]; then cleanup_old_images; fi
       exit 0
@@ -102,7 +104,7 @@ fi
 if [[ -n $requested_image ]]; then
   image=$(docker image inspect -f '{{.Id}}' -- "$requested_image") ||
     fail 'Seçilen imaj yerelde bulunamadı. Önce docker pull çalıştırın.'
-  if [[ $image == "$old_image" && $configure_vault == false ]]; then
+  if [[ $image == "$old_image" && $configure_vault == false && $updater_requested == false ]]; then
     printf 'Container seçilen imajla zaten çalışıyor.\n'
     if [[ $cleanup_requested == true ]]; then cleanup_old_images; fi
     exit 0
@@ -125,12 +127,38 @@ mount_layout() {
     LC_ALL=C sort
 }
 
-original_mount_layout() {
-  if [[ ${#vault_mount_args[@]} == 0 ]]; then
-    mount_layout "$1"
-  else
-    mount_layout "$1" | grep -v '^"/run/platform-vault" '
+updater_dir=/var/lib/codex-platform-updater
+updater_mount_args=()
+if [[ $updater_requested == true ]]; then
+  updater_mount=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/run/platform-update"}}{{.Type}} {{.Source}} {{.RW}}{{end}}{{end}}' "$old")
+  if [[ -z $updater_mount ]]; then
+    updater_mount_args+=(--mount "type=bind,src=$updater_dir,dst=/run/platform-update,readonly")
+  elif [[ $updater_mount != "bind $updater_dir false" ]]; then
+    fail 'Beklenmeyen güncelleyici bağlantısı.'
   fi
+  command -v python3 >/dev/null || fail 'Güncelleyici için python3 gerekli.'
+  install -d -o root -g root -m 0755 "$updater_dir" /opt/codex-platform-updater
+  install -m 0644 "$source_dir"/{enable.sh,updater.py,codex-agent-platform.apparmor,seccomp.json} /opt/codex-platform-updater/
+  install -m 0644 "$source_dir/codex-platform-updater.service" /etc/systemd/system/
+  systemctl daemon-reload
+  systemctl enable --now codex-platform-updater.service
+  for attempt in {1..10}; do
+    [[ ! -S $updater_dir/update.sock ]] || break
+    sleep 1
+  done
+  [[ -S $updater_dir/update.sock ]] || fail 'Güncelleyici soketi açılmadı.'
+fi
+
+original_mount_layout() {
+  local layout
+  layout=$(mount_layout "$1") || return 1
+  if (( ${#vault_mount_args[@]} )); then
+    layout=$(printf '%s\n' "$layout" | grep -v '^"/run/platform-vault" ')
+  fi
+  if (( ${#updater_mount_args[@]} )); then
+    layout=$(printf '%s\n' "$layout" | grep -v '^"/run/platform-update" ')
+  fi
+  printf '%s\n' "$layout"
 }
 
 writable_mounts=$(docker inspect -f '{{range .Mounts}}{{if and .RW (or (eq .Type "volume") (eq .Type "bind"))}}{{println .Destination}}{{end}}{{end}}' "$old")
@@ -240,7 +268,7 @@ replacement=$(docker create --pull never --name "$next" \
   --init --restart unless-stopped --network "$network" -p "$port" \
   --cap-drop=ALL --security-opt=no-new-privileges:true \
   --security-opt="apparmor=$profile" --security-opt="seccomp=$seccomp" \
-  --volumes-from "$old" "${vault_mount_args[@]}" "${env_args[@]}" "$image")
+  --volumes-from "$old" "${vault_mount_args[@]}" "${updater_mount_args[@]}" "${env_args[@]}" "$image")
 
 [[ $(docker inspect -f '{{.Image}}' "$replacement") == "$image" ]] ||
   fail 'Docker seçilen imajla container oluşturmadı. Çalışan container durdurulmadan geçiş iptal edildi.'
@@ -269,6 +297,19 @@ if [[ $configure_vault == true ]]; then
     fail 'Yeni container Vault anahtarını okuyamadı.'
 fi
 
+if [[ $updater_requested == true || $(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/run/platform-update"}}yes{{end}}{{end}}' "$name") == yes ]]; then
+  docker exec "$name" node -e '
+    const socket = require("node:net").createConnection("/run/platform-update/update.sock");
+    socket.setTimeout(3000, () => socket.destroy(new Error("Updater status timed out")));
+    socket.once("connect", () => socket.write("status\n"));
+    let body = "";
+    socket.on("data", chunk => body += chunk);
+    socket.once("end", () => {
+      if (!["idle", "running", "installed", "failed"].includes(JSON.parse(body).state)) process.exitCode = 1;
+    });
+  ' || fail 'Yeni container güncelleyiciye erişemedi.'
+fi
+
 docker exec "$name" bwrap --unshare-user --unshare-ipc --unshare-pid \
   --unshare-net --ro-bind / / /bin/true
 
@@ -280,7 +321,7 @@ trap 'rm -f -- "$probe/.env" "$probe/probe.txt"; rmdir -- "$probe"' EXIT
 printf 'probe\n' >"$probe/.env"
 vault_key=${Platform__VaultKeyFile:-}
 codex sandbox -P platform_work -C "$probe" -- /bin/sh -ec '
-  if cat /data/codex/config.toml >/dev/null 2>&1 || cat .env >/dev/null 2>&1 ||
+  if [ -S /run/platform-update/update.sock ] || cat /data/codex/config.toml >/dev/null 2>&1 || cat .env >/dev/null 2>&1 ||
     { [ -n "$1" ] && cat -- "$1" >/dev/null 2>&1; }; then
     echo "Sandbox dosya erişimi kontrolü başarısız." >&2
     exit 1
