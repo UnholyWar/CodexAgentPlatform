@@ -75,6 +75,10 @@
                                     <div class="thinking" role="status"><span></span> @RunStatus(snapshot.Run.Status)</div>
                                 }
                             }
+                            else if (message.Role == "user" && message.Text.Length > TextLimits.InlineChatCharacters)
+                            {
+                                <a class="button" href="@($"/chat-text/{message.Id}")" download data-enhance-nav="false">message.txt</a>
+                            }
                             else if (message.Role == "user") { <div class="user-text">@message.Text</div> }
                             else { <MarkdownBody Text="@message.Text" CompactCode="true" /> }
                             @if (snapshot.Photos.Contains(message.Id))
@@ -131,10 +135,14 @@
                 <strong>@@@mentionedAgent.Name</strong><Icon Name="close" />
             </button>
         }
+        @if (draft.Trim().Length > TextLimits.InlineChatCharacters)
+        {
+            <p class="photo-loading" role="status">This message will appear as message.txt.</p>
+        }
         <form class="composer" @onsubmit="SendAsync" @onsubmit:preventDefault>
             <textarea @ref="composerInput" aria-label="Your message" placeholder="Write a message or @@mention an agent…" aria-autocomplete="list"
                       aria-controls="agent-options" aria-haspopup="listbox" @bind="draft" @bind:event="oninput"
-                      maxlength="16000" rows="1" data-send-on-enter="true" enterkeyhint="enter"></textarea>
+                      maxlength="@TextLimits.MaxChatCharacters" rows="1" data-send-on-enter="true" enterkeyhint="enter"></textarea>
             <div class="mention-list" id="agent-options" role="listbox" aria-label="Agents" hidden @key="(Id, EffectiveProject, IsActive)">
                 @if (!IsActive)
                 {
@@ -150,7 +158,7 @@
             <div class="photo-picker">
                 <label class="icon-button photo-choice" title="Choose photos">
                     <Icon Name="image" />
-                    <InputFile OnChange="ReadPhotosAsync" accept="image/*" multiple aria-label="Choose photos" disabled="@PhotoPickerDisabled" />
+                    <InputFile OnChange="ReadPhotosAsync" accept="image/*" multiple data-photo-drop="true" aria-label="Choose photos" disabled="@PhotoPickerDisabled" />
                 </label>
                 <label class="icon-button photo-choice photo-camera" title="Take photo">
                     <Icon Name="camera" />

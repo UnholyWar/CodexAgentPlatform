@@ -235,6 +235,9 @@ public sealed record CodexModel(string Id, string Name, bool IsDefault, string? 
 
 public static class TextLimits
 {
+    public const int InlineChatCharacters = 16_000;
+    public const int MaxChatCharacters = 48_000;
+
     public static string Clip(string? text, int max) =>
         string.IsNullOrEmpty(text) ? "" : text.Length <= max ? text : text[..max];
 }

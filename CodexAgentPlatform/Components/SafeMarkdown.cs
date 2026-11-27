@@ -22,6 +22,15 @@ public static partial class SafeMarkdown
                 html.Insert(codeStart!.Value, $"<details class=\"code-fold\"><summary>{label}<small>{lines} lines</small></summary>");
                 html.Append("</details>");
             }
+            if (compactCode)
+            {
+                html.Insert(codeStart!.Value, """
+                    <div class="copyable-code"><div class="code-toolbar">
+                    <button type="button" class="button" data-copy-code aria-label="Copy code">Copy</button>
+                    <span class="code-copy-status" role="status"></span></div>
+                    """);
+                html.Append("</div>");
+            }
             codeStart = null;
         }
         var rows = source.Replace("\r", "").Split('\n');

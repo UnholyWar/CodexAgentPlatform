@@ -98,7 +98,7 @@ public static class PlatformHost
         });
         builder.Services.AddScoped<ConversationListState>();
         builder.Services.AddRazorComponents().AddInteractiveServerComponents()
-            .AddHubOptions(options => options.MaximumReceiveMessageSize = 128 * 1024);
+            .AddHubOptions(options => options.MaximumReceiveMessageSize = (6 * TextLimits.MaxChatCharacters) + (32 * 1024));
 
         var app = builder.Build();
         app.UseRequestLocalization();
@@ -130,6 +130,16 @@ public static class PlatformHost
             var photo = await db.MessagePhotos.AsNoTracking().SingleOrDefaultAsync(p => p.Id == key, ctx.RequestAborted);
             ctx.Response.Headers.CacheControl = "private, no-store";
             return photo is null ? Results.NotFound() : Results.File(photo.Bytes, photo.ContentType);
+        }).RequireAuthorization();
+        app.MapGet("/chat-text/{id:long}", async (long id, IDbContextFactory<PlatformDb> dbs, HttpContext ctx) =>
+        {
+            await using var db = await dbs.CreateDbContextAsync(ctx.RequestAborted);
+            var content = await db.Messages.AsNoTracking()
+                .Where(message => message.Id == id && message.Role == "user")
+                .Select(message => message.Text).SingleOrDefaultAsync(ctx.RequestAborted);
+            ctx.Response.Headers.CacheControl = "private, no-store";
+            return content is null || content.Length <= TextLimits.InlineChatCharacters ? Results.NotFound() :
+                Results.File(System.Text.Encoding.UTF8.GetBytes(content), "text/plain; charset=utf-8", "message.txt");
         }).RequireAuthorization();
         app.MapGet("/artifacts/{id:guid}.txt", (Guid id, PlatformPaths paths) =>
         {

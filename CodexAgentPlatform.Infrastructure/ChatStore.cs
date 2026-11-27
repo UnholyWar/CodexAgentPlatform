@@ -82,8 +82,8 @@ public sealed partial class ChatStore(IDbContextFactory<PlatformDb> dbs, ChatUpd
         var inheritProject = projectId is null;
         if (string.IsNullOrWhiteSpace(projectId)) projectId = null;
         var photos = ChatPhotos.Prepare(uploads);
-        if (text.Length > 16_000 || (text.Length == 0 && photos.Length == 0))
-            throw new ArgumentException("Add a photo or enter a message of up to 16,000 characters.");
+        if (text.Length > TextLimits.MaxChatCharacters || (text.Length == 0 && photos.Length == 0))
+            throw new ArgumentException($"Add a photo or enter a message of up to {TextLimits.MaxChatCharacters:N0} characters.");
         await using var db = await dbs.CreateDbContextAsync(ct);
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         var chat = chatId is null ? new Conversation { Title = text.Length == 0 ? "Photo" : TextLimits.Clip(text.Replace('\n', ' '), 65), AutoApprove = autoApproveNewChat }

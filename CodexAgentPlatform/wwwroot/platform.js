@@ -189,3 +189,44 @@ window.restoreConversationPosition = () => {
         window.scrollTo(0, conversationPosition.y);
     });
 };
+
+document.addEventListener("dragover", event => {
+    const chat = event.target.closest?.(".chat-shell");
+    const transfer = event.dataTransfer;
+    if (!chat || !transfer?.types.includes("Files")) return;
+    event.preventDefault();
+    transfer.dropEffect = chat.querySelector("input[data-photo-drop]:enabled") ? "copy" : "none";
+});
+
+document.addEventListener("drop", event => {
+    const chat = event.target.closest?.(".chat-shell");
+    const transfer = event.dataTransfer;
+    if (!chat || !transfer?.types.includes("Files")) return;
+    event.preventDefault();
+
+    const input = chat.querySelector("input[data-photo-drop]:enabled");
+    if (!input) return;
+    const images = new DataTransfer();
+    for (const file of transfer.files) {
+        if (file.type.startsWith("image/")) images.items.add(file);
+    }
+    if (!images.files.length) return;
+    input.files = images.files;
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+});
+
+document.addEventListener("click", async event => {
+    const button = event.target.closest?.("button[data-copy-code]");
+    const block = button?.closest(".copyable-code");
+    const code = block?.querySelector("pre > code");
+    const status = block?.querySelector(".code-copy-status");
+    if (!code || !status) return;
+
+    status.textContent = "";
+    try {
+        await navigator.clipboard.writeText(code.textContent);
+        status.textContent = "Copied";
+    } catch {
+        status.textContent = "Could not copy";
+    }
+});
